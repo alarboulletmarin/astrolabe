@@ -1,0 +1,8 @@
+/target
+.env
+
+# ctags index
+/tags
+
+# Claude Code local caches
+/.claude/
