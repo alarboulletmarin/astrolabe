@@ -17,6 +17,9 @@ use gpui_kit::component::{Theme as KitTheme, ThemeMode, tooltip::Tooltip};
 use gpui_kit::{prelude::FluentBuilder, *};
 use std::time::Duration;
 
+/// Height of the strip at the top of the window that moves it; the pages start lower.
+const HEADER: f32 = 36.0;
+
 actions!(astrolabe, [SelectNext, SelectPrev, OpenSelected, Back, GoBack, GoForward, Older, Newer]);
 
 pub fn bind_keys(cx: &mut App) {
@@ -393,6 +396,8 @@ impl Render for Shell {
                         .size_full(),
                     )
                     .child(body)
+                    // The top of the window, anywhere, moves it (the buttons float above).
+                    .when(client, |d| d.child(crate::ui::drag_window(div().id("header-drag").absolute().top(px(0.)).left(px(0.)).right(px(0.)).h(px(HEADER)).occlude())))
             })
             .child(self.status_line(cx))
             .when(client, |d| d.child(self.window_controls(window, cx)))
