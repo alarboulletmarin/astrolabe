@@ -213,7 +213,7 @@ impl Render for StatsView {
         let width = self.width.get(window);
         let t = self.snap.theme;
         if self.snap.acts.is_empty() {
-            return page("stats", width)
+            return page("stats", width).track_scroll(self.width.scroll())
                 .child(title("Statistiques"))
                 .child(div().text_color(t.soft).child("Les graphiques se dessinent dès la première synchronisation."))
                 .into_any_element();
@@ -259,7 +259,7 @@ impl Render for StatsView {
             .child(self.selection(cx))
             .child(self.by_sport());
 
-        page("stats", width).gap(px(36.)).child(header).child(chart).child(below).child(self.calendar(inner, cx)).into_any_element()
+        page("stats", width).track_scroll(self.width.scroll()).gap(px(36.)).child(header).child(chart).child(below).child(self.calendar(inner, cx)).into_any_element()
     }
 
 }

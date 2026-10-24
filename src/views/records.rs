@@ -56,7 +56,7 @@ impl Render for RecordsView {
             grid = grid.child(self.board(board, cx));
         }
 
-        crate::ui::page("records", width)
+        crate::ui::page("records", width).track_scroll(self.width.scroll())
             .child(
                 div()
                     .flex()

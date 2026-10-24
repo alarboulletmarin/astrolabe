@@ -127,7 +127,7 @@ impl Render for ActivityView {
         let id = self.id;
         let t = self.snap.theme;
         let Some(a) = self.snap.activity(id).cloned() else {
-            return page("activity", width).child(div().text_color(t.soft).child("Cette activité n'existe plus.")).into_any_element();
+            return page("activity", width).track_scroll(self.width.scroll()).child(div().text_color(t.soft).child("Cette activité n'existe plus.")).into_any_element();
         };
         let s = a.sport();
         let wide = width >= 1180.0;
@@ -225,7 +225,7 @@ impl Render for ActivityView {
             div().flex().flex_col().gap(px(24.)).child(map).child(charts).child(side)
         };
 
-        page("activity", width).gap(px(22.)).child(nav).child(head).child(figures).child(body).into_any_element()
+        page("activity", width).track_scroll(self.width.scroll()).gap(px(22.)).child(nav).child(head).child(figures).child(body).into_any_element()
     }
 }
 

@@ -29,12 +29,17 @@ pub fn today() -> NaiveDate {
     Local::now().date_naive()
 }
 
-/// Width the views really get, measured by the window at the last frame (its frame and the rail
-/// make the viewport a poor guess); before the first frame, the viewport minus the rail.
+/// What the window shares with the views: the width they really get, measured at the last frame
+/// (its frame and the rail make the viewport a poor guess; before the first frame, the viewport
+/// minus the rail), and the scroll of the page shown, which the window saves and restores.
 #[derive(Clone, Default)]
-pub struct Width(pub Rc<Cell<f32>>);
+pub struct Width(pub Rc<Cell<f32>>, ScrollHandle);
 
 impl Width {
+    pub fn scroll(&self) -> &ScrollHandle {
+        &self.1
+    }
+
     pub fn get(&self, window: &Window) -> f32 {
         let measured = self.0.get();
         if measured > 0.0 { measured } else { window.viewport_size().width / px(1.) - 46.0 }

@@ -58,7 +58,7 @@ impl Render for SettingsView {
         let label = |text: &'static str| div().text_size(px(12.)).text_color(t.soft).child(text);
         let section = |gap: f32| div().flex().flex_col().gap(px(gap));
 
-        div().id("settings").size_full().overflow_y_scroll().child(
+        div().id("settings").size_full().overflow_y_scroll().track_scroll(self.width.scroll()).child(
             div()
                 .w_full()
                 .max_w(px(760.))
