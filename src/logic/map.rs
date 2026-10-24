@@ -208,6 +208,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fit_keeps_every_corner_inside_the_padding() {
+        // A 30 km run along a coast, a short loop, a tall box, and a single point.
+        let boxes = [
+            [43.6437, 7.1449, 43.6985, 7.2871],
+            [43.6866, 7.2855, 43.6983, 7.2958],
+            [43.0, 7.2, 44.5, 7.3],
+        ];
+        for (w, h) in [(740.0, 460.0), (1020.0, 460.0), (320.0, 340.0)] {
+            for b in boxes {
+                let v = View::fit(b, w, h, 52.0);
+                for (lat, lon) in [(b[0], b[1]), (b[2], b[3]), (b[0], b[3]), (b[2], b[1])] {
+                    let (x, y) = v.screen(lat, lon, w, h);
+                    assert!((52.0 - 1e-6..=w - 52.0 + 1e-6).contains(&x), "x {x} of {w} for {b:?}");
+                    assert!((52.0 - 1e-6..=h - 52.0 + 1e-6).contains(&y), "y {y} of {h} for {b:?}");
+                }
+            }
+        }
+        // A single point: the zoom is capped, the point is centred.
+        let v = View::fit([43.7, 7.2, 43.7, 7.2], 740.0, 460.0, 52.0);
+        let (x, y) = v.screen(43.7, 7.2, 740.0, 460.0);
+        assert_eq!(v.z, 16.0);
+        assert!((x - 370.0).abs() < 1e-6 && (y - 230.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn projection() {
         assert_eq!(world(0.0, -180.0, 0.0), (0.0, 128.0));
         let (x, y) = world(0.0, 0.0, 1.0);

@@ -8,6 +8,10 @@ use gpui_kit::assets::IconName;
 use gpui_kit::{prelude::FluentBuilder, *};
 use std::{cell::Cell, rc::Rc, time::Instant};
 
+/// Space left around what a map is fitted to: enough to clear the controls (bottom left) and the
+/// attribution (bottom right).
+const FIT_PAD: f64 = 52.0;
+
 /// A map's state, kept by the view that shows it: what it shows, where it is on screen, the drag
 /// in progress, and what the pointer just did.
 pub struct MapState {
@@ -16,6 +20,9 @@ pub struct MapState {
     pub drag: Option<(Point<Pixels>, View)>,
     /// What the view was last fitted to; a new subject fits again.
     pub fitted: Option<u64>,
+    /// The size and view of the last fit: the same subject fits again if the map was resized
+    /// and not moved since, so it keeps framing what it shows.
+    fit_at: Option<(Size<Pixels>, View)>,
     /// A click (a press and release without moving), in map pixels, for the view to read.
     pub click: Option<(f64, f64)>,
     /// When the wheel last tried to zoom without Ctrl: the hint shows a moment.
@@ -24,19 +31,22 @@ pub struct MapState {
 
 impl MapState {
     pub fn new() -> Self {
-        MapState { view: View::default(), bounds: Rc::new(Cell::new(Bounds::default())), drag: None, fitted: None, click: None, hint: None }
+        MapState { view: View::default(), bounds: Rc::new(Cell::new(Bounds::default())), drag: None, fitted: None, fit_at: None, click: None, hint: None }
     }
 
-    /// Fits the map to `bbox` when `subject` changed (or on demand), once its size is known.
+    /// Fits the map to `bbox` when `subject` changed (or on demand), or when the map was resized
+    /// without being moved, once its size is known.
     pub fn fit(&mut self, subject: u64, bbox: Option<[f64; 4]>, force: bool) {
         let b = self.bounds.get();
-        if b.size.width < px(10.) || (!force && self.fitted == Some(subject)) {
+        let resized = self.fit_at.is_some_and(|(size, view)| size != b.size && view == self.view);
+        if b.size.width < px(10.) || (!force && self.fitted == Some(subject) && !resized) {
             return;
         }
         // Nothing to fit yet (tracks still loading): try again at the next frame.
         if let Some(bbox) = bbox {
-            self.view = View::fit(bbox, (b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64, 36.0);
+            self.view = View::fit(bbox, (b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64, FIT_PAD);
             self.fitted = Some(subject);
+            self.fit_at = Some((b.size, self.view));
         }
     }
 }
@@ -114,7 +124,20 @@ pub fn map_widget<V: 'static>(
         .size_full()
         .bg(t.panel)
         .cursor(if dragging { CursorStyle::ClosedHand } else { CursorStyle::OpenHand })
-        .child(canvas(move |b, _, _| cell.set(b), |_, _, _, _| {}).absolute().size_full())
+        .child(
+            canvas(
+                move |b, window, _| {
+                    // A new size lays the map out again (tiles, fit) at the next frame.
+                    if cell.get().size != b.size {
+                        window.refresh();
+                    }
+                    cell.set(b)
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
         .children(imgs)
         .children(overlay)
         .on_mouse_down(
