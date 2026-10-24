@@ -129,7 +129,7 @@ pub fn map_widget<V: 'static>(
                 move |b, window, _| {
                     // A new size lays the map out again (tiles, fit) at the next frame.
                     if cell.get().size != b.size {
-                        window.refresh();
+                        window.request_animation_frame();
                     }
                     cell.set(b)
                 },

@@ -400,7 +400,7 @@ impl Render for Shell {
                                 // A new width lays the views out again at the next frame.
                                 if (cell.get() - w).abs() > 0.5 {
                                     cell.set(w);
-                                    window.refresh();
+                                    window.request_animation_frame();
                                 }
                             },
                             |_, _, _, _| {},
