@@ -7,3 +7,4 @@ pub mod journal;
 pub mod map;
 pub mod profiles;
 pub mod records;
+pub mod sync;

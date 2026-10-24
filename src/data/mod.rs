@@ -22,6 +22,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How long the rail says "done" after a clean synchronisation.
+const RESULT_SHOWN: Duration = Duration::from_secs(6);
+
 pub enum Status {
     Idle,
     Busy(String),
@@ -75,6 +78,10 @@ pub struct Data {
     pub status: Status,
     /// The last thing worth saying, after the activity count.
     pub note: Option<String>,
+    /// New activities of the synchronisation under way, said once its files are done.
+    sync_added: Option<usize>,
+    /// When the last synchronisation ended, and whether it went through without a failure.
+    finished: Option<(Instant, bool)>,
     /// Settings that aren't secrets (the tile server).
     pub settings: HashMap<String, String>,
     pub fetch: Fetch,
@@ -115,6 +122,8 @@ impl Data {
             token: None,
             status: Status::Busy("Ouverture…".into()),
             note: None,
+            sync_added: None,
+            finished: None,
             settings: store::load_settings(),
             fetch: Fetch::default(),
             tiles: HashMap::new(),
@@ -200,6 +209,7 @@ impl Data {
             return;
         }
         self.status = Status::Busy("Synchronisation : connexion à Garmin…".into());
+        self.finished = None;
         cx.notify();
         let known = self.acts.clone();
         let seen = Arc::new(AtomicUsize::new(0));
@@ -251,10 +261,19 @@ impl Data {
                             1 => format!("1 nouvelle à {at}"),
                             n => format!("{n} nouvelles à {at}"),
                         });
+                        this.sync_added = Some(added);
                         this.fetch_tracks(cx);
+                        if !this.fetch.running {
+                            // Nothing left to download: an old stop no longer holds.
+                            this.fetch.stopped = None;
+                            this.conclude(0, 0, cx);
+                        }
                         Status::Idle
                     }
-                    Err(e) => Status::Failed(e),
+                    Err(e) => {
+                        this.finished = Some((Instant::now(), false));
+                        Status::Failed(e)
+                    }
                 };
                 cx.notify();
             })
@@ -352,11 +371,39 @@ impl Data {
                 d.fetch.cancel = false;
                 d.fetch.current = None;
                 d.save_derived(cx);
+                let failed = d.fetch.failed;
+                d.conclude(d.fetch.done.saturating_sub(failed), failed, cx);
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// The synchronisation is over: says what it brought, and for a moment how it went.
+    fn conclude(&mut self, files: usize, failed: usize, cx: &mut Context<Self>) {
+        let added = self.sync_added.take();
+        if added.is_some() || files + failed > 0 {
+            let at = Local::now().format("%H:%M");
+            self.note = Some(format!("synchronisé à {at} · {}", crate::logic::sync::summary(added.unwrap_or(0), files, failed)));
+        }
+        self.finished = Some((Instant::now(), failed == 0 && self.fetch.stopped.is_none()));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RESULT_SHOWN).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+    }
+
+    /// How the last synchronisation went: `Some(true)` for a few seconds after a clean one,
+    /// `Some(false)` after one that failed or stopped short, until the next one starts.
+    pub fn sync_outcome(&self) -> Option<bool> {
+        match self.finished {
+            Some((_, false)) => Some(false),
+            _ if matches!(self.status, Status::Failed(_)) => Some(false),
+            Some((at, true)) if at.elapsed() < RESULT_SHOWN && !self.syncing() => Some(true),
+            _ => None,
+        }
     }
 
     /// Asks the track downloads to stop after the file in progress.

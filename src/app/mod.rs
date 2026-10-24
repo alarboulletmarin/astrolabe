@@ -152,7 +152,13 @@ impl Shell {
                 .child(icon(name, if on { t.accent } else { t.soft }, 16.))
         };
         let syncing = d.syncing();
-        let spin = icon(IconName::RefreshCw, if syncing { t.accent } else if d.key.is_some() { t.soft } else { t.dim }, 15.);
+        // Idle, the icon says how the last synchronisation went: a tick, or red.
+        let outcome = d.sync_outcome().filter(|_| !syncing);
+        let spin = match outcome {
+            Some(true) => icon(IconName::Check, t.accent, 15.),
+            Some(false) => icon(IconName::RefreshCw, t.bad(), 15.),
+            None => icon(IconName::RefreshCw, if syncing { t.accent } else if d.key.is_some() { t.soft } else { t.dim }, 15.),
+        };
         let spin = if syncing {
             spin.with_animation("sync-spin", Animation::new(Duration::from_millis(1100)).repeat(), |i, d| {
                 i.transform(Transformation::rotate(percentage(d)))
@@ -161,7 +167,14 @@ impl Shell {
         } else {
             spin.into_any_element()
         };
-        let tip: SharedString = d.sync_line().unwrap_or_else(|| "Synchroniser avec Garmin".into()).into();
+        let tip: SharedString = match (d.sync_line(), outcome, &d.status) {
+            (Some(line), ..) => line,
+            (_, Some(false), Status::Failed(e)) => format!("{e} · cliquer pour réessayer"),
+            (_, Some(false), _) => "Synchronisation incomplète · cliquer pour reprendre".into(),
+            (_, Some(true), _) => d.note.clone().unwrap_or_else(|| "Synchronisation terminée".into()),
+            _ => "Synchroniser avec Garmin".into(),
+        }
+        .into();
         let percent = d.sync_share().map(|f| format!("{:.0}%", f * 100.0));
         div()
             .w(px(46.))
