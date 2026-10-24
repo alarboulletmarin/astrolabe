@@ -171,7 +171,7 @@ impl JournalView {
                         .gap(px(1.))
                         .rounded(px(2.))
                         .overflow_hidden()
-                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                        .tooltip_show_delay(crate::ui::TIP_DELAY).tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                         .children(z.iter().enumerate().filter(|(_, s)| **s > 0.0).map(|(k, s)| div().h_full().w(relative(s / total)).bg(shade(k)))),
                 )
             }

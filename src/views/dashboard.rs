@@ -221,7 +221,7 @@ impl Render for DashboardView {
                         fr_day(mondays[i], today),
                         if total > 0.0 { metric.fmt(total) } else { "rien".into() }
                     );
-                    let slot = div().id(("dash-week", i)).flex_1().min_w_0().h_full().flex().flex_col().justify_end().tooltip(move |window, cx| {
+                    let slot = div().id(("dash-week", i)).flex_1().min_w_0().h_full().flex().flex_col().justify_end().tooltip_show_delay(crate::ui::TIP_DELAY).tooltip(move |window, cx| {
                         let (head, lines) = (head.clone(), lines.clone());
                         Tooltip::element(move |_, _| {
                             div()
@@ -331,7 +331,7 @@ impl Render for DashboardView {
                         .rounded(px(2.))
                         .bg(fill(cal::level(secs, busiest)))
                         .when(day == today, |d| d.border_1().border_color(t.text))
-                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                        .tooltip_show_delay(crate::ui::TIP_DELAY).tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                         .when_some(first, |d, id| d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id)))))
                         .into_any_element()
                 }))

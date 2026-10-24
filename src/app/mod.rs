@@ -158,7 +158,7 @@ impl Shell {
                 .cursor_pointer()
                 .when(on, |d| d.bg(t.selection))
                 .hover(|d| d.bg(t.border))
-                .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
+                .tooltip_show_delay(crate::ui::TIP_DELAY).tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
                 .on_click(cx.listener(move |this, _, window, cx| this.go(view, window, cx)))
                 .child(icon(name, if on { t.accent } else { t.soft }, 16.))
         };
@@ -221,7 +221,7 @@ impl Shell {
                     .gap(px(3.))
                     .cursor_pointer()
                     .hover(|d| d.bg(t.border))
-                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .tooltip_show_delay(crate::ui::TIP_DELAY).tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     // While it runs, a click shows where it is; otherwise it starts one.
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if this.data.read(cx).syncing() {
@@ -247,7 +247,7 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
+                .tooltip_show_delay(crate::ui::TIP_DELAY).tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
                 .when(on, |d| d.cursor_pointer().hover(|d| d.bg(t.border)).on_click(cx.listener(move |this, _, window, cx| this.travel(forward, window, cx))))
                 .child(icon(name, if on { t.soft } else { t.dim }, 16.))
         };

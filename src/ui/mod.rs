@@ -10,6 +10,10 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::{prelude::FluentBuilder, *};
 
+/// How long the pointer rests on something before its tooltip shows: gpui waits 500 ms, which
+/// reads as a tooltip that does not come.
+pub const TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub fn icon(name: IconName, color: Hsla, size: f32) -> Icon {
     Icon::new(name).size(px(size)).text_color(color)
 }
