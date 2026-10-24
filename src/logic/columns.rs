@@ -1,39 +1,41 @@
-//! The journal's columns: which exist, which are shown, and which fit the width (pure). The
-//! choice is kept as a word per column, so a setting from another version only loses what it
-//! no longer knows.
+//! The journal's columns: which exist, which are shown, and which fit the width, and what the
+//! computed ones say (pure). The choice is kept as a word per column, so a setting from another
+//! version only loses what it no longer knows.
 
 use crate::logic::activity::{Activity, Sport, fmt_clock, fmt_m, group};
+use crate::logic::fit::BAND;
+use chrono::Duration;
 use std::collections::HashMap;
 
-/// A column the user can show or hide. The date and the name are always there.
+/// A column the user can show or hide. The date and the name (with the sport's icon) are always there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Column {
-    Sport,
     Distance,
     Time,
     Pace,
+    Gap,
     Elevation,
+    Climb,
     Hr,
     Calories,
-    Climb,
     Rank,
-    Bar,
-    Trace,
+    Zones,
+    Profile,
 }
 
-/// Every column, in the order they are shown.
+/// Every column, in the order they are shown: the figures, then the small charts.
 pub const ALL: [Column; 11] = [
-    Column::Sport,
     Column::Distance,
     Column::Time,
     Column::Pace,
+    Column::Gap,
     Column::Elevation,
+    Column::Climb,
     Column::Hr,
     Column::Calories,
-    Column::Climb,
     Column::Rank,
-    Column::Bar,
-    Column::Trace,
+    Column::Zones,
+    Column::Profile,
 ];
 
 /// Room kept for the date and, at the least, the name; the gap between two columns.
@@ -44,66 +46,67 @@ pub const GAP: f32 = 16.0;
 impl Column {
     pub fn key(self) -> &'static str {
         match self {
-            Column::Sport => "sport",
             Column::Distance => "distance",
             Column::Time => "time",
             Column::Pace => "pace",
+            Column::Gap => "gap",
             Column::Elevation => "elevation",
+            Column::Climb => "climb",
             Column::Hr => "hr",
             Column::Calories => "calories",
-            Column::Climb => "climb",
             Column::Rank => "rank",
-            Column::Bar => "bar",
-            Column::Trace => "trace",
+            Column::Zones => "zones",
+            Column::Profile => "profile",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Column::Sport => "Sport",
             Column::Distance => "Distance",
             Column::Time => "Temps",
             Column::Pace => "Allure",
+            Column::Gap => "Écart",
             Column::Elevation => "D+",
+            Column::Climb => "D+ / km",
             Column::Hr => "FC",
             Column::Calories => "Calories",
-            Column::Climb => "D+ / km",
             Column::Rank => "Rang",
-            Column::Bar => "Ampleur",
-            Column::Trace => "Tracé",
+            Column::Zones => "Zones FC",
+            Column::Profile => "Profil",
         }
     }
 
     /// One line in the menu: what the column says.
     pub fn hint(self) -> &'static str {
         match self {
-            Column::Sport => "le sport",
             Column::Distance => "la distance",
             Column::Time => "la durée",
             Column::Pace => "allure, vitesse ou temps aux 100 m selon le sport",
+            Column::Gap => "l'allure face à ta médiane sur les sorties du même sport et de distance proche, l'année d'avant",
             Column::Elevation => "le dénivelé positif",
+            Column::Climb => "mètres de dénivelé par kilomètre : à quel point la sortie grimpe",
             Column::Hr => "la fréquence cardiaque moyenne",
             Column::Calories => "les calories dépensées",
-            Column::Climb => "mètres de dénivelé par kilomètre : à quel point la sortie grimpe",
             Column::Rank => "la place parmi les sorties du même sport, par distance",
-            Column::Bar => "une barre : la sortie face à la plus longue du même sport",
-            Column::Trace => "la forme du parcours (une fois le fichier de l'activité lu)",
+            Column::Zones => "le temps passé dans chacune des 5 zones de fréquence cardiaque (une fois le fichier lu)",
+            Column::Profile => "l'altitude le long de la sortie (une fois le fichier lu)",
         }
     }
 
+    /// The width it takes; the profile's is its least, as it takes what the row has left.
     pub fn width(self) -> f32 {
         match self {
-            Column::Sport => 110.0,
             Column::Distance => 86.0,
             Column::Time => 78.0,
             Column::Pace => 96.0,
+            Column::Gap => 92.0,
             Column::Elevation => 72.0,
+            Column::Climb => 86.0,
             Column::Hr => 78.0,
             Column::Calories => 92.0,
-            Column::Climb => 86.0,
             Column::Rank => 96.0,
-            Column::Bar => 90.0,
-            Column::Trace => 64.0,
+            Column::Zones => 104.0,
+            Column::Profile => 140.0,
         }
     }
 
@@ -113,26 +116,26 @@ impl Column {
             Column::Distance => 0,
             Column::Time => 1,
             Column::Pace => 2,
-            Column::Sport => 3,
-            Column::Hr => 4,
-            Column::Elevation => 5,
-            Column::Bar => 6,
-            Column::Trace => 7,
+            Column::Gap => 3,
+            Column::Profile => 4,
+            Column::Hr => 5,
+            Column::Zones => 6,
+            Column::Elevation => 7,
             Column::Climb => 8,
             Column::Calories => 9,
             Column::Rank => 10,
         }
     }
 
-    /// Numbers sit against the right edge of their column; the rest to the left.
-    pub fn right(self) -> bool {
-        !matches!(self, Column::Sport | Column::Bar | Column::Trace)
+    /// The small charts; the rest are words and numbers, set against the right edge.
+    pub fn chart(self) -> bool {
+        matches!(self, Column::Zones | Column::Profile)
     }
 }
 
 /// What a new install shows.
 pub fn default() -> Vec<Column> {
-    vec![Column::Sport, Column::Distance, Column::Time, Column::Pace, Column::Elevation, Column::Hr, Column::Bar, Column::Trace]
+    vec![Column::Distance, Column::Time, Column::Pace, Column::Gap, Column::Elevation, Column::Hr, Column::Zones, Column::Profile]
 }
 
 /// The setting as columns. Nothing saved (empty) gives the defaults; "-" is a deliberate empty
@@ -174,8 +177,9 @@ fn ordinal(n: usize) -> String {
     if n == 1 { "1er".into() } else { format!("{n}e") }
 }
 
-/// The cell of a text column, empty when the activity has nothing to say. `rank` is the place and the
-/// number of outings of the sport, asked for only by the column that needs it.
+/// The cell of a figure column, empty when the activity has nothing to say. `rank` is the place
+/// and the number of outings of the sport, asked for only by the column that needs it. The
+/// computed columns (the gap, the charts) are not told here.
 pub fn text(column: Column, a: &Activity, rank: Option<(usize, usize)>) -> String {
     match column {
         Column::Distance => a.distance.filter(|d| *d > 0.0).map(crate::logic::activity::fmt_km).unwrap_or_default(),
@@ -189,29 +193,113 @@ pub fn text(column: Column, a: &Activity, rank: Option<(usize, usize)>) -> Strin
             _ => String::new(),
         },
         Column::Rank => rank.map(|(r, n)| format!("{} sur {}", ordinal(r), group(n as i64))).unwrap_or_default(),
-        Column::Sport | Column::Bar | Column::Trace => String::new(),
+        Column::Gap | Column::Zones | Column::Profile => String::new(),
     }
 }
 
-/// What the bar compares: distance where a sport has one, time otherwise.
-fn size(a: &Activity) -> f64 {
-    if a.sport().has_distance() { a.distance } else { a.duration }.unwrap_or(0.0).max(0.0)
+// --- The gap to the usual pace.
+
+/// Speed in m/s, when the outing has a distance and a time that mean something.
+fn speed(a: &Activity) -> Option<f64> {
+    let (d, t) = (a.distance?, a.duration?);
+    (a.sport().has_distance() && d > 0.0 && t > 0.0).then(|| d / t)
 }
 
-/// The biggest outing of each sport.
-pub fn maxima(acts: &[Activity]) -> HashMap<Sport, f64> {
-    let mut m: HashMap<Sport, f64> = HashMap::new();
+/// The middle value; the mean of the two middle ones when even.
+fn median(mut v: Vec<f64>) -> Option<f64> {
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    match n {
+        0 => None,
+        _ if n % 2 == 1 => Some(v[n / 2]),
+        _ => Some((v[n / 2 - 1] + v[n / 2]) / 2.0),
+    }
+}
+
+/// How far each outing was from the usual: its pace against the median of the outings of the
+/// same sport, of a distance within a quarter of its own, in the year before it (at least three
+/// of them). In seconds per km (per 100 m swimming; more is slower), or in km/h on a bike (more
+/// is faster). Outings with nothing to compare with are left out.
+pub fn gaps(acts: &[Activity]) -> HashMap<i64, f64> {
+    let mut by_sport: HashMap<Sport, Vec<(chrono::NaiveDateTime, f64, f64, i64)>> = HashMap::new();
     for a in acts {
-        let e = m.entry(a.sport()).or_insert(0.0);
-        *e = e.max(size(a));
+        if let (Some(at), Some(v)) = (a.start(), speed(a)) {
+            by_sport.entry(a.sport()).or_default().push((at, a.distance.unwrap_or(0.0), v, a.activity_id));
+        }
     }
-    m
+    let mut out = HashMap::new();
+    for (sport, mut list) in by_sport {
+        // The pace (or the speed on a bike) as it reads, so the median is the one a reader expects.
+        let unit = |v: f64| match sport {
+            Sport::Bike => v * 3.6,
+            Sport::Swim => 100.0 / v,
+            _ => 1000.0 / v,
+        };
+        list.sort_by_key(|x| x.0);
+        for (i, (at, dist, v, id)) in list.iter().enumerate() {
+            // ponytail: walks back over the year for each outing, O(n * outings a year); an index by distance if years of daily outings make it slow.
+            let year_ago = *at - Duration::days(365);
+            let like: Vec<f64> = list[..i].iter().rev().take_while(|x| x.0 >= year_ago).filter(|x| x.0 < *at && x.1 >= dist * 0.8 && x.1 <= dist * 1.25).map(|x| unit(x.2)).collect();
+            if like.len() < 3 {
+                continue;
+            }
+            out.insert(*id, unit(*v) - median(like).unwrap());
+        }
+    }
+    out
 }
 
-/// Share (0 to 1) of the sport's biggest outing.
-pub fn share(a: &Activity, maxima: &HashMap<Sport, f64>) -> f32 {
-    let max = maxima.get(&a.sport()).copied().unwrap_or(0.0);
-    if max <= 0.0 { 0.0 } else { (size(a) / max).clamp(0.0, 1.0) as f32 }
+/// "−12 s/km" (faster), "+1:05 /km", "+1,3 km/h", "−4 s/100m"; "≈ habitude" within a hair.
+pub fn gap_label(sport: Sport, gap: f64) -> String {
+    let sign = |v: f64| if v < 0.0 { "\u{2212}" } else { "+" };
+    match sport {
+        Sport::Bike if gap.abs() < 0.15 => "≈ habitude".into(),
+        Sport::Bike => format!("{}{:.1}\u{a0}km/h", sign(gap), gap.abs()).replace('.', ","),
+        _ if gap.abs() < 1.5 => "≈ habitude".into(),
+        _ => {
+            let per = if sport == Sport::Swim { "/100m" } else { "/km" };
+            let s = gap.abs().round() as i64;
+            if s >= 60 { format!("{}{}:{:02} {per}", sign(gap), s / 60, s % 60) } else { format!("{}{s} s{per}", sign(gap)) }
+        }
+    }
+}
+
+// --- Heart rate zones.
+
+/// The heart rate reached for at least a minute over all the outings, counted down from the top
+/// band: a high estimate of the maximum that a strap glitch does not set. None without heart rate.
+pub fn observed_max<'a>(all_bands: impl Iterator<Item = &'a [f32]>) -> Option<f32> {
+    let mut total: Vec<f32> = Vec::new();
+    for bands in all_bands {
+        if total.len() < bands.len() {
+            total.resize(bands.len(), 0.0);
+        }
+        total.iter_mut().zip(bands).for_each(|(t, b)| *t += b);
+    }
+    let mut above = 0.0;
+    for (i, secs) in total.iter().enumerate().rev() {
+        above += secs;
+        if above >= 60.0 {
+            return Some((i as f32 + 1.0) * BAND);
+        }
+    }
+    None
+}
+
+/// Seconds in each of the five zones, at 50-60-70-80-90 % of `max` (a band goes by its middle;
+/// below 50 % is not a zone, above 100 % is the fifth).
+pub fn zones(bands: &[f32], max: f32) -> [f32; 5] {
+    let mut z = [0.0; 5];
+    if max <= 0.0 {
+        return z;
+    }
+    for (i, secs) in bands.iter().enumerate() {
+        let share = (i as f32 + 0.5) * BAND / max;
+        if share >= 0.5 {
+            z[(((share - 0.5) * 10.0) as usize).min(4)] += secs;
+        }
+    }
+    z
 }
 
 #[cfg(test)]
@@ -244,8 +332,9 @@ mod tests {
         assert_eq!(parse(""), default());
         assert_eq!(parse("   "), default());
         assert_eq!(parse("-"), vec![]);
-        // Unknown words (a later version's column), repeats, spaces, upper case.
+        // Unknown words (another version's columns), repeats, spaces, upper case.
         assert_eq!(parse("distance, time ,distance,heartbeat,Sport"), vec![Column::Distance, Column::Time]);
+        assert_eq!(parse("sport,distance,bar,trace,profile"), vec![Column::Distance, Column::Profile]);
         assert_eq!(parse("heartbeat"), vec![]);
         assert_eq!(parse("pace\ndistance"), vec![]);
         assert_eq!(encode(&[]), "-");
@@ -262,7 +351,7 @@ mod tests {
         assert_eq!(toggle(&[], Column::Rank), vec![Column::Rank]);
         assert_eq!(toggle(&[Column::Rank], Column::Rank), vec![]);
         // Added out of order, shown in order.
-        assert_eq!(toggle(&[Column::Trace], Column::Sport), vec![Column::Sport, Column::Trace]);
+        assert_eq!(toggle(&[Column::Profile], Column::Distance), vec![Column::Distance, Column::Profile]);
     }
 
     #[test]
@@ -287,8 +376,11 @@ mod tests {
         assert!(visible(&default(), 300.0).is_empty());
         assert_eq!(visible(&[Column::Rank], 300.0), vec![]);
         // A wide column that does not fit lets a narrower, less important one in.
-        assert!(visible(&[Column::Sport, Column::Trace], DATE_W + NAME_MIN + GAP + 64.0 + GAP).contains(&Column::Trace));
+        assert_eq!(visible(&[Column::Zones, Column::Rank], DATE_W + NAME_MIN + GAP + 96.0 + GAP), vec![Column::Rank]);
         assert!(visible(&[], 2000.0).is_empty());
+        // Short of room, the profile shows before the zones.
+        let v = visible(&default(), 1000.0);
+        assert!(v.contains(&Column::Profile) && !v.contains(&Column::Zones), "{v:?}");
     }
 
     #[test]
@@ -305,7 +397,7 @@ mod tests {
         assert_eq!(text(Column::Rank, &run, Some((2, 12))), "2e sur 12");
         assert_eq!(text(Column::Rank, &run, Some((11, 1941))), "11e sur 1\u{a0}941");
         assert_eq!(text(Column::Rank, &run, None), "");
-        assert_eq!(text(Column::Sport, &run, None), "");
+        assert_eq!(text(Column::Profile, &run, None), "");
         // Missing, zero or too small to mean anything: empty, not "0".
         let none = act("running", None, None, None, None, None);
         let zero = act("running", Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(0.0));
@@ -322,25 +414,80 @@ mod tests {
         assert_eq!(text(Column::Pace, &act("strength_training", None, Some(40.0), None, None, None), None), "");
     }
 
+    /// An outing `days` after 1 January 2026, of `km` in `min`.
+    fn outing(id: i64, days: i64, key: &str, km: f64, min: f64) -> Activity {
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap().and_hms_opt(8, 0, 0).unwrap() + Duration::days(days);
+        Activity { activity_id: id, start_time_local: at.format("%Y-%m-%d %H:%M:%S").to_string(), ..act(key, Some(km), Some(min), None, None, None) }
+    }
+
     #[test]
-    fn the_bar_compares_with_the_biggest_of_the_sport() {
-        let acts = [
-            act("running", Some(10.0), Some(60.0), None, None, None),
-            act("running", Some(40.0), Some(240.0), None, None, None),
-            act("cycling", Some(100.0), Some(200.0), None, None, None),
-            act("strength_training", None, Some(30.0), None, None, None),
-            act("strength_training", None, Some(60.0), None, None, None),
-            act("yoga", None, None, None, None, None),
-        ];
-        let m = maxima(&acts);
-        assert_eq!(share(&acts[0], &m), 0.25);
-        assert_eq!(share(&acts[1], &m), 1.0);
-        // Another sport has its own scale: 100 km of cycling does not shrink a run.
-        assert_eq!(share(&acts[2], &m), 1.0);
-        // Without a distance, time is the measure; with nothing at all, an empty bar and no division by zero.
-        assert_eq!(share(&acts[3], &m), 0.5);
-        assert_eq!(share(&acts[5], &m), 0.0);
-        assert_eq!(share(&acts[0], &HashMap::new()), 0.0);
-        assert!(maxima(&[]).is_empty());
+    fn the_gap_is_to_the_usual_pace_of_like_outings() {
+        // Three 10 km runs at 5:00, 5:30 and 6:00 /km: the median is 5:30.
+        let mut acts = vec![outing(1, 0, "running", 10.0, 50.0), outing(2, 10, "running", 10.0, 55.0), outing(3, 20, "running", 10.0, 60.0)];
+        // Then 10.5 km at 5:20: 10 s/km faster than usual.
+        acts.push(outing(4, 30, "running", 10.5, 56.0));
+        // A 30 km run has no like outing; a 9 km one counts the four before it.
+        acts.push(outing(5, 31, "running", 30.0, 180.0));
+        acts.push(outing(6, 32, "running", 9.0, 45.0));
+        let g = gaps(&acts);
+        assert!((g[&4] - (-10.0)).abs() < 0.01, "{}", g[&4]);
+        assert!(!g.contains_key(&1) && !g.contains_key(&3) && !g.contains_key(&5));
+        // The four before 6 (5:00, 5:30, 6:00, 5:20 → 5:25), 9 km in 45 min is 5:00: −25 s.
+        assert!((g[&6] - (-25.0)).abs() < 0.01, "{}", g[&6]);
+        // More than a year back does not count; another sport neither.
+        let old = vec![outing(1, 0, "running", 10.0, 50.0), outing(2, 1, "running", 10.0, 50.0), outing(3, 2, "cycling", 10.0, 50.0), outing(4, 400, "running", 10.0, 50.0), outing(5, 401, "running", 10.0, 50.0)];
+        assert!(gaps(&old).is_empty());
+        // A bike: km/h, faster is more.
+        let bike = vec![outing(1, 0, "cycling", 26.0, 60.0), outing(2, 1, "cycling", 26.0, 60.0), outing(3, 2, "cycling", 26.0, 60.0), outing(4, 3, "cycling", 27.0, 60.0)];
+        assert!((gaps(&bike)[&4] - 1.0).abs() < 1e-9);
+        // Nothing to compare: nothing; no distance or time: left out, never a division by zero.
+        assert!(gaps(&[]).is_empty());
+        let blank = vec![outing(1, 0, "running", 0.0, 50.0), outing(2, 1, "running", 0.0, 50.0), outing(3, 2, "running", 0.0, 50.0), outing(4, 3, "running", 0.0, 50.0)];
+        assert!(gaps(&blank).is_empty());
+        let strength: Vec<Activity> = (0..5).map(|i| outing(i, i, "strength_training", 1.0, 30.0)).collect();
+        assert!(gaps(&strength).is_empty());
+    }
+
+    #[test]
+    fn gap_labels() {
+        assert_eq!(gap_label(Sport::Run, -10.0), "\u{2212}10 s/km");
+        assert_eq!(gap_label(Sport::Run, 8.4), "+8 s/km");
+        assert_eq!(gap_label(Sport::Run, 65.0), "+1:05 /km");
+        assert_eq!(gap_label(Sport::Run, -59.6), "\u{2212}1:00 /km");
+        assert_eq!(gap_label(Sport::Run, 1.0), "≈ habitude");
+        assert_eq!(gap_label(Sport::Run, -1.4), "≈ habitude");
+        assert_eq!(gap_label(Sport::Swim, -4.0), "\u{2212}4 s/100m");
+        assert_eq!(gap_label(Sport::Bike, 1.26), "+1,3\u{a0}km/h");
+        assert_eq!(gap_label(Sport::Bike, -0.8), "\u{2212}0,8\u{a0}km/h");
+        assert_eq!(gap_label(Sport::Bike, 0.1), "≈ habitude");
+    }
+
+    #[test]
+    fn heart_rate_zones_against_the_observed_maximum() {
+        // Bands of 5 bpm: 30 min at 140-145 (band 28), 2 min at 185-190 (37), 20 s at 220 (44: a glitch).
+        let mut a = vec![0.0; 45];
+        a[28] = 1800.0;
+        a[37] = 120.0;
+        a[44] = 20.0;
+        let b = vec![0.0, 0.0, 30.0];
+        // The glitch alone is under a minute: the maximum is the top of the band reached for one.
+        assert_eq!(observed_max([a.as_slice(), b.as_slice()].into_iter()), Some(190.0));
+        assert_eq!(observed_max(std::iter::empty()), None);
+        assert_eq!(observed_max([[0.0f32; 3].as_slice()].into_iter()), None);
+        // Against 190: 142.5 is 75 % (zone 3), 187.5 is 98.7 % (zone 5), 222.5 is past 100 % (zone 5).
+        let z = zones(&a, 190.0);
+        assert_eq!(z, [0.0, 0.0, 1800.0, 0.0, 140.0]);
+        // Below half the maximum, not a zone; exactly 50 % is zone 1, 60 % zone 2.
+        let mut low = vec![0.0; 24];
+        low[10] = 50.0; // 52.5 bpm
+        low[19] = 10.0; // 97.5 bpm: 48.75 % of 200
+        low[20] = 7.0; // 102.5: 51.25 %
+        low[23] = 3.0; // 117.5: 58.75 %
+        assert_eq!(zones(&low, 200.0), [10.0, 0.0, 0.0, 0.0, 0.0]);
+        let mut edge = vec![0.0; 25];
+        edge[24] = 5.0; // 122.5 bpm of 200 = 61.25 %: zone 2
+        assert_eq!(zones(&edge, 200.0), [0.0, 5.0, 0.0, 0.0, 0.0]);
+        assert_eq!(zones(&a, 0.0), [0.0; 5]);
+        assert_eq!(zones(&[], 190.0), [0.0; 5]);
     }
 }

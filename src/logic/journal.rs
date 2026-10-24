@@ -52,6 +52,42 @@ pub fn name(a: &Activity) -> String {
     a.activity_name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| a.sport().label().into())
 }
 
+/// The sport a device writes after the place in the names it gives ("Nice Course à pied"), longest
+/// first so that "Natation en eau libre" goes before "Natation".
+const ADDED: [&str; 21] = [
+    "Natation en eau libre",
+    "Natation en piscine",
+    "Open Water Swimming",
+    "Vélo d'intérieur",
+    "Course sur tapis",
+    "Stand up paddle",
+    "Marche à pied",
+    "Pool Swimming",
+    "Trail Running",
+    "Course à pied",
+    "Musculation",
+    "Randonnée",
+    "Cyclisme",
+    "Natation",
+    "Strength",
+    "Running",
+    "Walking",
+    "Cycling",
+    "Hiking",
+    "Cardio",
+    "Trail",
+];
+
+/// The name without the sport a device added after the place ("Nice Course à pied" → "Nice"):
+/// the row shows the sport's icon. A name of one's own, or a sport alone, is kept whole.
+pub fn short_name(a: &Activity) -> String {
+    let full = name(a);
+    ADDED
+        .iter()
+        .find_map(|sport| full.strip_suffix(sport)?.strip_suffix(' ').filter(|place| !place.trim().is_empty() && !place.ends_with('-')).map(str::to_string))
+        .unwrap_or(full)
+}
+
 /// The sports present in the data, for the filters.
 pub fn sports_present(acts: &[Activity]) -> Vec<Sport> {
     Sport::ALL.into_iter().filter(|s| acts.iter().any(|a| a.sport() == *s)).collect()
@@ -59,7 +95,7 @@ pub fn sports_present(acts: &[Activity]) -> Vec<Sport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Activity, NaiveDate, Row, Sport, fold, name, rows};
+    use super::{Activity, NaiveDate, Row, Sport, fold, name, rows, short_name};
 
     fn a(id: i64, t: &str, key: &str, n: &str) -> Activity {
         serde_json::from_value(serde_json::json!({
@@ -90,6 +126,20 @@ mod tests {
         assert_eq!(rows(&acts, None, "velo"), [Row::Week(d("2026-10-19")), Row::Act(1)]);
         assert!(rows(&acts, None, "zzz").is_empty());
         assert_eq!(name(&acts[3]), "Course");
+        // The sport a device added goes; a name of one's own stays.
+        let short = |n: &str| short_name(&a(1, "2026-10-26 07:00:00", "running", n));
+        assert_eq!(short("Nice Course à pied"), "Nice");
+        assert_eq!(short("Saint-Jean-Cap-Ferrat Trail"), "Saint-Jean-Cap-Ferrat");
+        assert_eq!(short("Alpes-Maritimes Natation en eau libre"), "Alpes-Maritimes");
+        assert_eq!(short("Alpes-Maritimes Stand up paddle"), "Alpes-Maritimes");
+        assert_eq!(short("Lyon Trail Running"), "Lyon");
+        assert_eq!(short("Nice - Footing 40min"), "Nice - Footing 40min");
+        assert_eq!(short("Sortie longue Course à pied du dimanche"), "Sortie longue Course à pied du dimanche");
+        assert_eq!(short("Course à pied"), "Course à pied");
+        assert_eq!(short(" Course à pied"), " Course à pied");
+        assert_eq!(short("Valbonne - Course à pied"), "Valbonne - Course à pied");
+        assert_eq!(short("NiceCourse à pied"), "NiceCourse à pied");
+        assert_eq!(short(""), "Course");
         assert_eq!(fold("ÉCLAIR Çà"), "eclair ca");
     }
 }

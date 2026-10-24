@@ -59,6 +59,13 @@ pub fn num(text: impl Into<SharedString>) -> Div {
     div().font_family(MONO).whitespace_nowrap().child(text.into())
 }
 
+/// A figure in mono and its unit after it, smaller and in `dim`, so units line up without the
+/// wide spaces of a mono font.
+pub fn quantity(text: &str, t: Theme) -> Div {
+    let (n, unit) = format::split_unit(text);
+    div().flex().items_baseline().gap(px(3.)).whitespace_nowrap().child(num(n)).when(!unit.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(t.dim).child(unit)))
+}
+
 pub fn heading(text: impl Into<SharedString>) -> Div {
     div().text_size(px(15.)).font_weight(FontWeight::BOLD).child(text.into())
 }

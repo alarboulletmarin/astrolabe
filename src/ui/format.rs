@@ -19,6 +19,25 @@ pub fn fr_day(d: chrono::NaiveDate, today: chrono::NaiveDate) -> String {
     format!("{} {}{year}", d.day(), MONTHS[d.month0() as usize])
 }
 
+/// A figure and its unit, to set them apart: "4,0 km" → ("4,0", "km"), "6:46 /km" → ("6:46",
+/// "/km"), "27min" → ("27", "min"), "153h" → ("153", "h"). What has no unit after a number stays
+/// whole: "4h26", "1er sur 12", "≈ habitude".
+pub fn split_unit(s: &str) -> (String, String) {
+    if let Some((i, c)) = s.char_indices().rev().find(|(_, c)| *c == ' ' || *c == '\u{a0}') {
+        let (n, u) = (&s[..i], &s[i + c.len_utf8()..]);
+        if n.ends_with(|c: char| c.is_ascii_digit()) && u.starts_with(|c: char| c.is_alphabetic() || c == '/') {
+            return (n.into(), u.into());
+        }
+    }
+    let digits = |n: &str| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == '\u{a0}');
+    for unit in ["min", "h"] {
+        if let Some(n) = s.strip_suffix(unit).filter(|n| digits(n)) {
+            return (n.into(), unit.into());
+        }
+    }
+    (s.into(), String::new())
+}
+
 /// "samedi 24 octobre".
 pub fn fr_weekday(d: chrono::NaiveDate) -> String {
     use chrono::Datelike;
@@ -97,7 +116,30 @@ pub fn calendar_title(mode: crate::logic::calendar::Mode, anchor: chrono::NaiveD
 
 #[cfg(test)]
 mod tests {
-    use super::calendar_title;
+    use super::{calendar_title, split_unit};
+
+    #[test]
+    fn figures_and_their_units() {
+        let split = |s: &str| split_unit(s);
+        let pair = |n: &str, u: &str| (n.to_string(), u.to_string());
+        assert_eq!(split("4,0\u{a0}km"), pair("4,0", "km"));
+        assert_eq!(split("1\u{a0}941\u{a0}km"), pair("1\u{a0}941", "km"));
+        assert_eq!(split("34\u{a0}semaines"), pair("34", "semaines"));
+        assert_eq!(split("6:46 /km"), pair("6:46", "/km"));
+        assert_eq!(split("2:00 /100m"), pair("2:00", "/100m"));
+        assert_eq!(split("27,4\u{a0}km/h"), pair("27,4", "km/h"));
+        assert_eq!(split("152 bpm"), pair("152", "bpm"));
+        assert_eq!(split("1\u{a0}945 kcal"), pair("1\u{a0}945", "kcal"));
+        assert_eq!(split("\u{2212}12 s/km"), pair("\u{2212}12", "s/km"));
+        assert_eq!(split("+1:05 /km"), pair("+1:05", "/km"));
+        assert_eq!(split("27min"), pair("27", "min"));
+        assert_eq!(split("0min"), pair("0", "min"));
+        assert_eq!(split("153h"), pair("153", "h"));
+        assert_eq!(split("1\u{a0}020h"), pair("1\u{a0}020", "h"));
+        for whole in ["16h18", "1:00:00", "1er sur 186", "≈ habitude", "min", "h", "", "km", " km"] {
+            assert_eq!(split(whole), pair(whole, ""), "{whole:?}");
+        }
+    }
     use crate::logic::calendar::Mode;
     use chrono::NaiveDate;
 

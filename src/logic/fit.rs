@@ -231,6 +231,52 @@ impl Track {
         }
         out
     }
+
+    /// The altitude at `n` points spread evenly along the outing, each the mean of its stretch (a
+    /// stretch without a sample takes the one before). Along the distance when most samples have
+    /// one, along the time otherwise; empty when fewer than two samples have an altitude.
+    pub fn altitude(&self, n: usize) -> Vec<f32> {
+        let by_distance = self.samples.iter().filter(|s| s.dist.is_some()).count() * 2 > self.samples.len();
+        let mut pts: Vec<(f32, f32)> = Vec::new();
+        for s in &self.samples {
+            let (Some(alt), Some(x)) = (s.alt, if by_distance { s.dist } else { Some(s.t) }) else { continue };
+            if alt.is_finite() && pts.last().is_none_or(|l| x >= l.0) {
+                pts.push((x, alt));
+            }
+        }
+        let (Some(first), Some(last)) = (pts.first(), pts.last()) else { return vec![] };
+        let span = last.0 - first.0;
+        if pts.len() < 2 || span <= 0.0 || n == 0 {
+            return vec![];
+        }
+        let mut sums = vec![(0.0f64, 0u32); n];
+        for (x, alt) in &pts {
+            let k = (((x - first.0) / span * n as f32) as usize).min(n - 1);
+            sums[k].0 += *alt as f64;
+            sums[k].1 += 1;
+        }
+        let mut out: Vec<f32> = Vec::with_capacity(n);
+        for (sum, count) in sums {
+            let v = if count > 0 { (sum / count as f64) as f32 } else { out.last().copied().unwrap_or(first.1) };
+            out.push(v);
+        }
+        out
+    }
+
+    /// Seconds per `BAND`-bpm band of heart rate. Each sample counts until the next one, at most
+    /// 20 s: a pause is not time spent at the heart rate it started with.
+    pub fn hr_bands(&self) -> Vec<f32> {
+        let mut bands: Vec<f32> = Vec::new();
+        for w in self.samples.windows(2) {
+            let Some(hr) = w[0].hr.filter(|h| *h > 0.0 && *h < 300.0) else { continue };
+            let i = (hr / BAND) as usize;
+            if bands.len() <= i {
+                bands.resize(i + 1, 0.0);
+            }
+            bands[i] += (w[1].t - w[0].t).clamp(0.0, 20.0);
+        }
+        bands
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -247,19 +293,36 @@ pub struct Split {
     pub ascent: f32,
 }
 
-/// What every activity keeps once its file has been read: enough for the maps and the records.
+/// What every activity keeps once its file has been read: enough for the maps, the records and
+/// the journal's small charts.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Derived {
     pub line: Vec<[f32; 2]>,
     pub efforts: Vec<Effort>,
+    /// Altitude in metres at `PROFILE` points spread evenly over the distance (over the time when
+    /// nothing recorded one), each the mean of its stretch; empty without altitude.
+    #[serde(default)]
+    pub profile: Vec<f32>,
+    /// Seconds spent in each band of `BAND` bpm (band `i` starts at `i * BAND`); empty without
+    /// heart rate.
+    #[serde(default)]
+    pub hr_bands: Vec<f32>,
+    /// The `VERSION` that derived it: an older entry is derived again from its file.
+    #[serde(default)]
+    pub version: u32,
 }
+
+/// Raised when `derive` keeps something new.
+pub const VERSION: u32 = 1;
+pub const PROFILE: usize = 48;
+pub const BAND: f32 = 5.0;
 
 /// Distances of the records, in metres.
 pub const EFFORTS: [f64; 13] =
     [400.0, 1000.0, 1609.344, 5000.0, 10_000.0, 15_000.0, 20_000.0, 21_097.5, 42_195.0, 50_000.0, 100_000.0, 1500.0, 40_000.0];
 
 pub fn derive(track: &Track) -> Derived {
-    Derived { line: track.line(15.0), efforts: track.best_efforts(&EFFORTS) }
+    Derived { line: track.line(15.0), efforts: track.best_efforts(&EFFORTS), profile: track.altitude(PROFILE), hr_bands: track.hr_bands(), version: VERSION }
 }
 
 #[cfg(test)]
@@ -347,6 +410,51 @@ mod tests {
         assert_eq!(sp[0].hr, Some(150.0));
         assert!((sp[0].ascent - 10.0).abs() < 0.1);
         assert!(Track::default().splits(1000.0).is_empty());
+    }
+
+    #[test]
+    fn altitude_profile_and_heart_rate_bands() {
+        // 1 km climbing from 100 m to 200 m, one sample per metre.
+        let s: Vec<_> = (0..=1000).map(|m| Sample { alt: Some(100.0 + m as f32 / 10.0), ..sample(m as f32, m as f32) }).collect();
+        let p = Track { samples: s.clone(), laps: vec![] }.altitude(10);
+        assert_eq!(p.len(), 10);
+        assert!((p[0] - 105.0).abs() < 0.1 && (p[9] - 195.0).abs() < 0.2, "{p:?}");
+        assert!(p.windows(2).all(|w| w[1] > w[0]));
+        // A gap in the samples: the empty stretch takes the one before, nothing drops to zero.
+        let holes: Vec<_> = s.iter().copied().filter(|x| !(400.0..600.0).contains(&x.dist.unwrap())).collect();
+        let p = Track { samples: holes, laps: vec![] }.altitude(10);
+        assert_eq!(p[4], p[3]);
+        assert!(p.iter().all(|v| *v >= 100.0));
+        // No altitude, one sample, nothing at all, or no room: empty.
+        assert!(Track { samples: (0..10).map(|i| sample(i as f32, i as f32)).collect(), laps: vec![] }.altitude(10).is_empty());
+        assert!(Track { samples: s[..1].to_vec(), laps: vec![] }.altitude(10).is_empty());
+        assert!(Track::default().altitude(10).is_empty());
+        assert!(Track { samples: s.clone(), laps: vec![] }.altitude(0).is_empty());
+        // Indoors (no distance): along the time.
+        let indoor: Vec<_> = (0..100).map(|i| Sample { t: i as f32, alt: Some(i as f32), ..Default::default() }).collect();
+        assert_eq!(Track { samples: indoor, laps: vec![] }.altitude(4).len(), 4);
+
+        // 60 s at 142 bpm, then 30 samples at 171 with a 5 min pause among them, then a last one.
+        let mut hr = vec![];
+        for i in 0..60 {
+            hr.push(Sample { t: i as f32, hr: Some(142.0), ..Default::default() });
+        }
+        for i in 0..30 {
+            hr.push(Sample { t: 60.0 + i as f32 + if i >= 10 { 300.0 } else { 0.0 }, hr: Some(171.0), ..Default::default() });
+        }
+        hr.push(Sample { t: 400.0, hr: Some(90.0), ..Default::default() });
+        let b = Track { samples: hr, laps: vec![] }.hr_bands();
+        assert_eq!(b.len(), 35);
+        assert!((b[28] - 60.0).abs() < 0.01, "{}", b[28]);
+        // 9 + 19 one-second steps, the pause counted 20 s (not 300), and 11 s to the last sample.
+        assert!((b[34] - (9.0 + 20.0 + 19.0 + 11.0)).abs() < 0.01, "{}", b[34]);
+        assert_eq!(b[18], 0.0);
+        assert!(Track::default().hr_bands().is_empty());
+        let junk = Track { samples: vec![Sample { hr: Some(0.0), ..Default::default() }, Sample { t: 5.0, hr: Some(900.0), ..Default::default() }, Sample { t: 9.0, ..Default::default() }], laps: vec![] };
+        assert!(junk.hr_bands().is_empty());
+        // What is kept says which version kept it.
+        assert_eq!(derive(&Track::default()).version, VERSION);
+        assert_eq!(Derived::default().version, 0);
     }
 
     #[test]

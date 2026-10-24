@@ -199,7 +199,7 @@ mod tests {
             a(5, "2026-05-01 07:00:00", "cycling", 50_000.0, 7200.0, 300.0),
             a(6, "2026-06-01 07:00:00", "cycling", 60_000.0, 7200.0, 300.0),
         ];
-        let eff = |s: f32| Derived { line: vec![], efforts: vec![Effort { metres: 5000.0, seconds: s }] };
+        let eff = |s: f32| Derived { efforts: vec![Effort { metres: 5000.0, seconds: s }], ..Default::default() };
         let derived: HashMap<i64, Derived> = [(1, eff(1500.0)), (2, eff(1300.0)), (3, eff(1300.0)), (4, eff(1250.0))].into();
         let all = broken(&acts, &derived, None, 10);
         let line: Vec<_> = all.iter().map(|b| (b.row, b.entry.id, b.previous)).collect();
@@ -224,7 +224,7 @@ mod tests {
             a(3, "2026-04-01 07:00:00", "treadmill_running", 10_000.0, 2000.0, 0.0),
             a(4, "2026-05-01 07:00:00", "trail_running", 30_000.0, 14_000.0, 1800.0),
         ];
-        let eff = |s: f32| Derived { line: vec![], efforts: vec![Effort { metres: 5000.0, seconds: s }] };
+        let eff = |s: f32| Derived { efforts: vec![Effort { metres: 5000.0, seconds: s }], ..Default::default() };
         let derived: HashMap<i64, Derived> = [(1, eff(1290.0)), (2, eff(1250.0)), (3, eff(900.0)), (4, eff(1700.0))].into();
         let road = &BOARDS[0];
         let five = podium(&acts, &derived, road, Kind::Effort(5000.0), None, 3);

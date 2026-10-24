@@ -157,6 +157,7 @@ impl Data {
             this.update(cx, |this, cx| {
                 this.acts = Arc::new(acts);
                 this.derived = Arc::new(derived);
+                this.upgrade_derived(cx);
                 this.key_loaded = true;
                 this.status = Status::Idle;
                 this.key_store = key_store;
@@ -410,6 +411,43 @@ impl Data {
     pub fn stop_fetch(&mut self, cx: &mut Context<Self>) {
         self.fetch.cancel = true;
         cx.notify();
+    }
+
+    /// Entries kept by an older version are derived again from the files on disk, off the UI
+    /// thread and without the network. One without a file stays as it is (and is tried again at
+    /// the next launch); nothing is removed.
+    fn upgrade_derived(&mut self, cx: &mut Context<Self>) {
+        let stale: Vec<i64> = self.derived.iter().filter(|(_, d)| d.version < fit::VERSION).map(|(id, _)| *id).collect();
+        if stale.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let fresh: Vec<(i64, Derived)> = cx
+                .background_executor()
+                .spawn(async move {
+                    stale
+                        .into_iter()
+                        .filter_map(|id| {
+                            let track = fit::unzip(&store::load_fit(id)?).and_then(|f| fit::parse(&f)).ok()?;
+                            Some((id, fit::derive(&track)))
+                        })
+                        .collect()
+                })
+                .await;
+            this.update(cx, |d, cx| {
+                if fresh.is_empty() {
+                    return;
+                }
+                let map = Arc::make_mut(&mut d.derived);
+                for (id, derived) in fresh {
+                    map.insert(id, derived);
+                }
+                d.save_derived(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn save_derived(&self, cx: &mut Context<Self>) {

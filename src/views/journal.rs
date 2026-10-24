@@ -1,22 +1,31 @@
 //! The journal: every activity in a table that takes the whole width, grouped by week.
-//! Columns fold away as the window narrows; a click opens the activity.
+//! Columns fold away as the window narrows; the altitude profile takes what the row has left;
+//! a click opens the activity.
 
 use crate::data::{Data, Snapshot};
-use crate::logic::activity::{self as act, Sport};
-use crate::logic::columns::{self, Column, DATE_W, GAP};
-use crate::logic::journal::{Row, fold, name, rows, sports_present};
-use crate::logic::map::{View, bbox};
-use crate::ui::theme::blend;
-use std::{collections::HashMap, time::Instant};
-use crate::views::{Page, Width, today};
+use crate::logic::activity::{self as act, Sport, fmt_duration, fmt_km, fmt_m, group};
+use crate::logic::columns::{self, Column, DATE_W, GAP, NAME_MIN};
+use crate::logic::journal::{Row, fold, rows, short_name, sports_present};
 use crate::ui::format::{fr_day, fr_short, totals_line};
-use crate::ui::{button, heading, icon, num, pad, segmented, sport_tag, title};
+use crate::ui::theme::blend;
+use crate::ui::{button, heading, icon, num, pad, quantity, segmented, sport_icon, title};
+use crate::views::{Page, Width, today};
+use chrono::{Days, NaiveDate};
 use gpui_kit::assets::IconName;
-use chrono::Days;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder, *};
+use std::{collections::HashMap, time::Instant};
 
 const ROW_H: f32 = 36.;
+/// The name stops growing here when the profile is shown: the rest of the row is its.
+const NAME_MAX: f32 = 320.;
+/// The setting of the columns. The first version's ("journal_columns") had other columns: it is
+/// left as it was, and the new defaults apply once.
+const SETTING: &str = "journal_columns_v2";
+/// An altitude profile never spreads less than this over its height, in metres: a flat outing
+/// reads flat.
+const PROFILE_SPAN: f32 = 120.;
 
 pub struct JournalView {
     data: Entity<Data>,
@@ -27,8 +36,10 @@ pub struct JournalView {
     rows: Vec<Row>,
     /// The columns shown, as chosen in the menu and kept in the settings.
     columns: Vec<Column>,
-    /// The biggest outing of each sport, for the bars.
-    maxima: HashMap<Sport, f64>,
+    /// Each outing's gap to the usual pace (see `columns::gaps`).
+    gaps: HashMap<i64, f64>,
+    /// The maximum heart rate the zones are set against: the highest held a minute in all the files.
+    hr_max: Option<f32>,
     menu: bool,
     /// When a press outside just closed the menu: the same press must not reopen it.
     closed: Option<Instant>,
@@ -56,8 +67,8 @@ impl JournalView {
             }),
         ];
         let snap = data.read(cx).snapshot();
-        let columns = columns::parse(data.read(cx).settings.get("journal_columns").map(String::as_str).unwrap_or(""));
-        let mut view = JournalView { data, snap, width, sport: None, search, rows: Vec::new(), columns, maxima: HashMap::new(), menu: false, closed: None, selected: None, list: UniformListScrollHandle::new(), _subscriptions: subs };
+        let columns = columns::parse(data.read(cx).settings.get(SETTING).map(String::as_str).unwrap_or(""));
+        let mut view = JournalView { data, snap, width, sport: None, search, rows: Vec::new(), columns, gaps: HashMap::new(), hr_max: None, menu: false, closed: None, selected: None, list: UniformListScrollHandle::new(), _subscriptions: subs };
         view.refresh(cx);
         view
     }
@@ -66,13 +77,14 @@ impl JournalView {
     fn refresh(&mut self, cx: &App) {
         let needle = fold(&self.search.read(cx).value());
         self.rows = rows(&self.snap.acts, self.sport, &needle);
-        self.maxima = columns::maxima(&self.snap.acts);
+        self.gaps = columns::gaps(&self.snap.acts);
+        self.hr_max = columns::observed_max(self.snap.derived.values().map(|d| d.hr_bands.as_slice()));
     }
 
     fn toggle_column(&mut self, column: Column, cx: &mut Context<Self>) {
         self.columns = columns::toggle(&self.columns, column);
         let value = columns::encode(&self.columns);
-        self.data.update(cx, |d, cx| d.set_setting("journal_columns", value, cx));
+        self.data.update(cx, |d, cx| d.set_setting(SETTING, value, cx));
     }
 
     fn set_sport(&mut self, sport: Option<Sport>, cx: &mut Context<Self>) {
@@ -110,45 +122,85 @@ impl JournalView {
         })
     }
 
-    /// One line of the table: the date, the name taking what is left, then the columns that fit,
-    /// each in its fixed width. `cells` come for the columns of `shown`, in order.
+    /// One line of the table: the date, the name, then the columns that fit, each in its width.
+    /// The name takes what is left, unless the profile is shown: then the name stops at
+    /// `NAME_MAX` and the profile takes the rest. `cells` come for the columns shown, in order.
     fn line(&self, date: Div, name: Div, cells: Vec<(Column, Div)>) -> Div {
-        let mut line = div().w_full().flex().items_center().gap(px(GAP)).child(date.w(px(DATE_W)).flex_none().whitespace_nowrap()).child(name.flex_1().min_w_0());
+        let grows = cells.iter().any(|(c, _)| *c == Column::Profile);
+        let mut line = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(GAP))
+            .child(date.w(px(DATE_W)).flex_none().whitespace_nowrap())
+            .child(name.flex_1().min_w(px(NAME_MIN.min(120.))).when(grows, |d| d.max_w(px(NAME_MAX))));
         for (c, cell) in cells {
-            line = line.child(if c.right() { cell.w(px(c.width())).flex_none().flex().justify_end().whitespace_nowrap() } else { cell.w(px(c.width())).flex_none().flex() });
+            line = line.child(match c {
+                Column::Profile => cell.flex_1().min_w(px(c.width())),
+                c if c.chart() => cell.w(px(c.width())).flex_none(),
+                c => cell.w(px(c.width())).flex_none().flex().justify_end().whitespace_nowrap(),
+            });
         }
         line
     }
 
-    /// The cell of a column for an activity.
-    fn cell(&self, c: Column, a: &act::Activity, rank: Option<(usize, usize)>) -> Div {
+    /// The cell of a column for an activity; `ix` keeps the ids of its parts apart.
+    fn cell(&self, c: Column, a: &act::Activity, ix: usize) -> Div {
         let t = self.snap.theme;
+        let derived = self.snap.derived.get(&a.activity_id);
         match c {
-            Column::Sport => sport_tag(a.sport(), t),
-            Column::Bar => {
-                let share = columns::share(a, &self.maxima);
-                div().h(px(6.)).rounded(px(3.)).bg(t.border).child(div().h_full().w(relative(share)).rounded(px(3.)).bg(blend(t.accent, t.bg, 0.7)))
+            Column::Gap => div().text_color(t.soft).children(self.gaps.get(&a.activity_id).map(|g| quantity(&columns::gap_label(a.sport(), *g), t))),
+            Column::Zones => {
+                let (Some(max), Some(bands)) = (self.hr_max, derived.map(|d| &d.hr_bands)) else { return div() };
+                let z = columns::zones(bands, max);
+                let total: f32 = z.iter().sum();
+                if total < 60.0 {
+                    return div();
+                }
+                let shade = |k: usize| blend(t.accent, t.bg, [0.15, 0.3, 0.5, 0.72, 0.95][k]);
+                let tip = format!(
+                    "Zones de FC (max observée : {} bpm) : {}",
+                    max,
+                    z.iter().enumerate().map(|(k, s)| format!("Z{} {:.0} %", k + 1, s / total * 100.0)).collect::<Vec<_>>().join(" · ")
+                );
+                div().child(
+                    div()
+                        .id(("zones", ix))
+                        .h(px(8.))
+                        .flex()
+                        .gap(px(1.))
+                        .rounded(px(2.))
+                        .overflow_hidden()
+                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                        .children(z.iter().enumerate().filter(|(_, s)| **s > 0.0).map(|(k, s)| div().h_full().w(relative(s / total)).bg(shade(k)))),
+                )
             }
-            Column::Trace => {
-                let line = self.snap.derived.get(&a.activity_id).map(|d| d.line.clone()).filter(|l| l.len() >= 2);
-                let color = t.soft;
-                div().h(px(24.)).child(
+            Column::Profile => {
+                let line = derived.map(|d| d.profile.clone()).filter(|p| p.len() >= 2);
+                let (fill, stroke) = (blend(t.accent, t.bg, 0.16), blend(t.accent, t.bg, 0.75));
+                div().h(px(22.)).child(
                     canvas(
                         |_, _, _| {},
                         move |b, _, window, _| {
-                            let Some(line) = &line else { return };
-                            let (w, h) = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
-                            let Some(bb) = bbox(std::iter::once(line.as_slice()), 0.0) else { return };
-                            let view = View::fit(bb, w, h, 2.0);
-                            let at = |p: &[f32; 2]| {
-                                let (x, y) = view.screen(p[0] as f64, p[1] as f64, w, h);
-                                point(b.origin.x + px(x as f32), b.origin.y + px(y as f32))
-                            };
-                            let mut path = PathBuilder::stroke(px(1.2));
-                            path.move_to(at(&line[0]));
-                            line[1..].iter().for_each(|p| path.line_to(at(p)));
-                            if let Ok(p) = path.build() {
-                                window.paint_path(p, color);
+                            let Some(p) = &line else { return };
+                            let lo = p.iter().copied().fold(f32::INFINITY, f32::min);
+                            let hi = p.iter().copied().fold(f32::NEG_INFINITY, f32::max).max(lo + PROFILE_SPAN);
+                            let (w, h) = (b.size.width / px(1.), b.size.height / px(1.));
+                            let at = |i: usize, v: f32| point(b.origin.x + px(w * i as f32 / (p.len() - 1) as f32), b.origin.y + px(h * (1.0 - (v - lo) / (hi - lo))));
+                            let bottom = b.origin.y + b.size.height;
+                            let mut area = PathBuilder::fill();
+                            area.move_to(point(b.origin.x, bottom));
+                            p.iter().enumerate().for_each(|(i, v)| area.line_to(at(i, *v)));
+                            area.line_to(point(b.origin.x + b.size.width, bottom));
+                            area.close();
+                            if let Ok(path) = area.build() {
+                                window.paint_path(path, fill);
+                            }
+                            let mut top = PathBuilder::stroke(px(1.2));
+                            top.move_to(at(0, p[0]));
+                            p.iter().enumerate().skip(1).for_each(|(i, v)| top.line_to(at(i, *v)));
+                            if let Ok(path) = top.build() {
+                                window.paint_path(path, stroke);
                             }
                         },
                     )
@@ -156,7 +208,8 @@ impl JournalView {
                 )
             }
             _ => {
-                let text = num(columns::text(c, a, rank));
+                let rank = (c == Column::Rank).then(|| act::rank(&self.snap.acts, a));
+                let text = quantity(&columns::text(c, a, rank), t);
                 if matches!(c, Column::Distance | Column::Time) { text } else { text.text_color(t.soft) }
             }
         }
@@ -166,7 +219,6 @@ impl JournalView {
         let t = self.snap.theme;
         match row {
             Row::Week(monday) => {
-                let w = act::totals(&self.snap.acts, monday, monday + Days::new(6), self.sport);
                 div()
                     .id(("row", ix))
                     .w_full()
@@ -181,7 +233,7 @@ impl JournalView {
                     .border_color(t.border)
                     .text_size(px(12.))
                     .child(div().font_weight(FontWeight::BOLD).whitespace_nowrap().child(format!("Semaine du {}", fr_day(monday, today()))))
-                    .child(num(totals_line(&w)).text_color(t.soft).truncate())
+                    .child(div().text_color(t.soft).truncate().child(week_totals(&self.snap.acts, monday, self.sport)))
                     .into_any_element()
             }
             Row::Act(i) => {
@@ -190,7 +242,7 @@ impl JournalView {
                 let id = a.activity_id;
                 let time = a.start().map(|d| d.format(" · %H:%M").to_string()).unwrap_or_default();
                 let shown = columns::visible(&self.columns, width);
-                let cells = shown.iter().map(|c| (*c, self.cell(*c, a, (*c == Column::Rank).then(|| act::rank(&self.snap.acts, a))))).collect();
+                let cells = shown.iter().map(|c| (*c, self.cell(*c, a, ix))).collect();
                 div()
                     .id(("row", ix))
                     .w_full()
@@ -205,7 +257,7 @@ impl JournalView {
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
                     .child(self.line(
                         num(format!("{}{time}", a.date().map(fr_short).unwrap_or_default())).text_size(px(12.)).text_color(t.soft),
-                        div().truncate().child(name(a)),
+                        div().flex().items_center().gap(px(8.)).child(icon(sport_icon(a.sport()), t.soft, 14.)).child(div().min_w_0().truncate().child(short_name(a))),
                         cells,
                     ))
                     .into_any_element()
@@ -246,15 +298,15 @@ impl Render for JournalView {
                         format!("Cette semaine : {}", totals_line(&week))
                     }))
                     .when(streak.weeks > 0, |d| {
-                        let s = |n: u32| if n > 1 { "s" } else { "" };
-                        let days = if streak.days > 0 { format!(" · {} jour{} d'affilée", streak.days, s(streak.days)) } else { String::new() };
-                        d.child(div().text_color(t.soft).child(format!(
-                            "Série : {} semaine{} d'affilée{days} · record {} jour{}",
-                            streak.weeks,
-                            s(streak.weeks),
-                            streak.longest_days,
-                            s(streak.longest_days)
-                        )))
+                        let weeks = |n: u32| format!("{n} semaine{}", if n > 1 { "s" } else { "" });
+                        let record = if streak.longest_weeks > streak.weeks {
+                            format!(" · record : {}", weeks(streak.longest_weeks))
+                        } else if streak.weeks > 1 {
+                            ", la plus longue à ce jour".into()
+                        } else {
+                            String::new()
+                        };
+                        d.child(div().text_color(t.soft).child(format!("Série : {} d'affilée{record}", weeks(streak.weeks))))
                     }),
             )
             .when(!self.snap.acts.is_empty(), |d| {
@@ -388,6 +440,11 @@ impl JournalView {
                                 cx.notify();
                             }))
                             .children(rows)
+                            .children(self.hr_max.map(|m| {
+                                div().px(px(8.)).pt(px(6.)).text_size(px(12.)).text_color(t.dim).child(format!(
+                                    "Zones : 50, 60, 70, 80 et 90 % de ta FC max observée, {m} bpm (la plus haute tenue une minute dans tes fichiers)."
+                                ))
+                            }))
                             .child(div().px(px(8.)).py(px(6.)).text_size(px(12.)).text_color(t.dim).child("Une colonne qui ne tient pas dans la fenêtre se replie : les moins utiles d'abord. Agrandis la fenêtre pour les revoir.")),
                     )
                     .with_priority(1),
@@ -420,4 +477,28 @@ impl JournalView {
                 )
             })
     }
+}
+
+/// "5 activités · 6h25 · Course 41,1 km · Vélo 53,0 km · 482 m D+": across sports the
+/// kilometres are told sport by sport, never added up.
+fn week_totals(acts: &[act::Activity], monday: NaiveDate, sport: Option<Sport>) -> String {
+    let sunday = monday + Days::new(6);
+    let all = act::totals(acts, monday, sunday, sport);
+    if sport.is_some() {
+        return totals_line(&all);
+    }
+    let mut parts = vec![format!("{} activité{}", group(all.count as i64), if all.count > 1 { "s" } else { "" })];
+    if all.duration > 0.0 {
+        parts.push(fmt_duration(all.duration));
+    }
+    for s in Sport::ALL.into_iter().filter(|s| s.has_distance()) {
+        let d = act::totals(acts, monday, sunday, Some(s)).distance;
+        if d > 0.0 {
+            parts.push(format!("{} {}", s.label(), fmt_km(d)));
+        }
+    }
+    if all.elevation >= 1.0 {
+        parts.push(format!("{} D+", fmt_m(all.elevation)));
+    }
+    parts.join(" · ")
 }

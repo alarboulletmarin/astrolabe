@@ -9,7 +9,7 @@ use crate::logic::calendar as cal;
 use crate::logic::dashboard as dash;
 use crate::logic::journal::{name, sports_present};
 use crate::logic::records::{self, Broken};
-use crate::ui::format::{fr_day, fr_short, fr_weekday, month_short};
+use crate::ui::format::{fr_day, fr_short, fr_weekday, month_short, split_unit};
 use crate::ui::theme::{Theme, blend};
 use crate::ui::{heading, icon, num, page, segmented, sport_icon, title};
 use crate::views::{Page, Width, today};
@@ -56,20 +56,6 @@ impl DashboardView {
             this.sport = if i == 0 { None } else { Some(present[i - 1]) };
         })
     }
-}
-
-/// "4,0 km" → ("4,0", "km"), "27min" → ("27", "min"), "153h" → ("153", "h"); "4h26" stays whole.
-fn split_unit(s: &str) -> (String, String) {
-    if let Some((n, u)) = s.rsplit_once('\u{a0}').filter(|(_, u)| !u.is_empty() && u.chars().all(char::is_alphabetic)) {
-        return (n.into(), u.into());
-    }
-    let digits = |n: &str| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == '\u{a0}');
-    for unit in ["min", "h"] {
-        if let Some(n) = s.strip_suffix(unit).filter(|n| digits(n)) {
-            return (n.into(), unit.into());
-        }
-    }
-    (s.into(), String::new())
 }
 
 /// A dashed horizontal line: dashes clipped to the width (a dashed border is not drawn on a line
@@ -443,22 +429,10 @@ impl Render for DashboardView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Metric, count, split_unit, tick_label};
+    use super::{Metric, count, tick_label};
 
     #[test]
-    fn units_counts_and_grid_labels() {
-        assert_eq!(split_unit("4,0\u{a0}km"), ("4,0".into(), "km".into()));
-        assert_eq!(split_unit("1\u{a0}941\u{a0}km"), ("1\u{a0}941".into(), "km".into()));
-        assert_eq!(split_unit("16h18"), ("16h18".into(), String::new()));
-        assert_eq!(split_unit("27min"), ("27".into(), "min".into()));
-        assert_eq!(split_unit("0min"), ("0".into(), "min".into()));
-        assert_eq!(split_unit("153h"), ("153".into(), "h".into()));
-        assert_eq!(split_unit("1\u{a0}020h"), ("1\u{a0}020".into(), "h".into()));
-        assert_eq!(split_unit("min"), ("min".into(), String::new()));
-        assert_eq!(split_unit("h"), ("h".into(), String::new()));
-        assert_eq!(split_unit("34\u{a0}semaines"), ("34".into(), "semaines".into()));
-        assert_eq!(split_unit("1\u{a0}000"), ("1\u{a0}000".into(), String::new()));
-        assert_eq!(split_unit(""), (String::new(), String::new()));
+    fn counts_and_grid_labels() {
         assert_eq!(count(0, "semaine", "semaines"), "0\u{a0}semaine");
         assert_eq!(count(1, "jour actif", "jours actifs"), "1\u{a0}jour actif");
         assert_eq!(count(1_200, "jour actif", "jours actifs"), "1\u{a0}200\u{a0}jours actifs");
