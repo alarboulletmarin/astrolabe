@@ -1,13 +1,14 @@
 //! The journal: every activity in a table that takes the whole width, grouped by week.
 //! Columns fold away as the window narrows; a click opens the activity.
 
-use crate::app::{Home, View, today};
-use crate::logic::activity::{self as act, fmt_clock, fmt_km, fmt_m};
-use crate::logic::journal::{Row, name, sports_present};
+use crate::data::{Data, Snapshot};
+use crate::logic::activity::{self as act, Sport, fmt_clock, fmt_km, fmt_m};
+use crate::logic::journal::{Row, fold, name, rows, sports_present};
+use crate::views::{Page, Width, today};
 use crate::ui::format::{fr_day, fr_short, totals_line};
 use crate::ui::{button, heading, num, pad, segmented, sport_tag, title};
 use chrono::Days;
-use gpui_kit::component::input::Input;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{prelude::FluentBuilder, *};
 
 const ROW_H: f32 = 36.;
@@ -17,12 +18,79 @@ fn columns_for(width: f32) -> (bool, bool, bool, bool) {
     (width >= 700.0, width >= 860.0, width >= 1000.0, width >= 1140.0)
 }
 
-impl Home {
-    pub fn sport_filter(&self, id: &'static str, cx: &mut Context<Self>) -> Div {
-        let present = sports_present(&self.acts);
+pub struct JournalView {
+    data: Entity<Data>,
+    snap: Snapshot,
+    width: Width,
+    sport: Option<Sport>,
+    search: Entity<InputState>,
+    rows: Vec<Row>,
+    pub selected: Option<i64>,
+    list: UniformListScrollHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<Page> for JournalView {}
+
+impl JournalView {
+    pub fn new(data: Entity<Data>, width: Width, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Chercher une activité"));
+        let subs = vec![
+            cx.observe(&data, |this, data, cx| {
+                this.snap = data.read(cx).snapshot();
+                this.refresh(cx);
+                cx.notify();
+            }),
+            cx.subscribe(&search, |this, _, e: &InputEvent, cx| {
+                if matches!(e, InputEvent::Change) {
+                    this.refresh(cx);
+                    cx.notify();
+                }
+            }),
+        ];
+        let snap = data.read(cx).snapshot();
+        let mut view = JournalView { data, snap, width, sport: None, search, rows: Vec::new(), selected: None, list: UniformListScrollHandle::new(), _subscriptions: subs };
+        view.refresh(cx);
+        view
+    }
+
+    /// Rebuilds the rows after the data, the filter or the search changed.
+    fn refresh(&mut self, cx: &App) {
+        let needle = fold(&self.search.read(cx).value());
+        self.rows = rows(&self.snap.acts, self.sport, &needle);
+    }
+
+    fn set_sport(&mut self, sport: Option<Sport>, cx: &mut Context<Self>) {
+        self.sport = sport;
+        self.refresh(cx);
+    }
+
+    /// Selects an activity and brings its row into sight.
+    pub fn select(&mut self, id: i64) {
+        self.selected = Some(id);
+        if let Some(row) = self.snap.index_of(id).and_then(|ix| self.rows.iter().position(|r| *r == Row::Act(ix))) {
+            self.list.scroll_to_item(row, ScrollStrategy::Center);
+        }
+    }
+
+    pub fn select_step(&mut self, step: isize, cx: &mut Context<Self>) {
+        let listed: Vec<usize> = self.rows.iter().filter_map(|r| if let Row::Act(i) = r { Some(*i) } else { None }).collect();
+        let at = self.selected.and_then(|id| listed.iter().position(|i| self.snap.acts[*i].activity_id == id));
+        let next = match at {
+            Some(p) => p.saturating_add_signed(step).min(listed.len().saturating_sub(1)),
+            None => 0,
+        };
+        if let Some(i) = listed.get(next) {
+            self.select(self.snap.acts[*i].activity_id);
+            cx.notify();
+        }
+    }
+
+    fn sport_filter(&self, id: &'static str, cx: &mut Context<Self>) -> Div {
+        let present = sports_present(&self.snap.acts);
         let mut items = vec![("Tout".into(), self.sport.is_none())];
         items.extend(present.iter().map(|s| (s.label().into(), self.sport == Some(*s))));
-        segmented(id, items, self.theme, cx, move |this: &mut Home, i, _, cx| {
+        segmented(id, items, self.snap.theme, cx, move |this: &mut JournalView, i, _, cx| {
             this.set_sport(if i == 0 { None } else { Some(present[i - 1]) }, cx);
         })
     }
@@ -48,10 +116,10 @@ impl Home {
     }
 
     fn row(&self, ix: usize, row: Row, width: f32, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.theme;
+        let t = self.snap.theme;
         match row {
             Row::Week(monday) => {
-                let w = act::totals(&self.acts, monday, monday + Days::new(6), self.sport);
+                let w = act::totals(&self.snap.acts, monday, monday + Days::new(6), self.sport);
                 div()
                     .id(("row", ix))
                     .w_full()
@@ -70,7 +138,7 @@ impl Home {
                     .into_any_element()
             }
             Row::Act(i) => {
-                let a = &self.acts[i];
+                let a = &self.snap.acts[i];
                 let on = self.selected == Some(a.activity_id);
                 let id = a.activity_id;
                 let time = a.start().map(|d| d.format(" · %H:%M").to_string()).unwrap_or_default();
@@ -86,7 +154,7 @@ impl Home {
                     .cursor_pointer()
                     .when(on, |d| d.bg(t.selection))
                     .when(!on, |d| d.hover(|d| d.bg(t.panel)))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open(id, window, cx)))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
                     .child(self.cells(
                         width,
                         [
@@ -105,12 +173,16 @@ impl Home {
         }
     }
 
-    pub fn journal(&mut self, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = self.theme;
+}
+
+impl Render for JournalView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = self.width.get(window);
+        let t = self.snap.theme;
         let p = pad(width);
         let today = today();
-        let week = act::totals(&self.acts, act::week_start(today), today, None);
-        let streak = act::streaks(&self.acts, today);
+        let week = act::totals(&self.snap.acts, act::week_start(today), today, None);
+        let streak = act::streaks(&self.snap.acts, today);
         let inner = width - 2.0 * p;
 
         let header = div()
@@ -145,7 +217,7 @@ impl Home {
                         )))
                     }),
             )
-            .when(!self.acts.is_empty(), |d| {
+            .when(!self.snap.acts.is_empty(), |d| {
                 d.child(
                     div()
                         .flex()
@@ -157,7 +229,7 @@ impl Home {
                 )
             });
 
-        let body = if self.acts.is_empty() {
+        let body = if self.snap.acts.is_empty() {
             self.journal_empty(p, cx).into_any_element()
         } else if self.rows.is_empty() {
             div().px(px(p + 10.)).py(px(20.)).text_color(t.soft).child("Aucune activité ne correspond.").into_any_element()
@@ -198,9 +270,12 @@ impl Home {
         div().size_full().flex().flex_col().child(header).child(body)
     }
 
+}
+
+impl JournalView {
     fn journal_empty(&self, p: f32, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let no_key = self.key.is_none() && self.key_loaded;
+        let t = self.snap.theme;
+        let no_key = self.data.read(cx).key.is_none() && self.data.read(cx).key_loaded;
         div()
             .px(px(p))
             .py(px(12.))
@@ -218,7 +293,7 @@ impl Home {
                 d.child(
                     div().flex().child(
                         button("empty-settings", "Ajouter ma clé", true, t)
-                            .on_click(cx.listener(|this, _, window, cx| this.set_view(View::Settings, window, cx))),
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(Page::Settings))),
                     ),
                 )
             })

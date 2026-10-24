@@ -1,17 +1,55 @@
 //! Statistics, set to the day: a measure, a grouping, any range, any sports, bars or a running
 //! total, compared with the period before or the year before. A click on a group lists it.
 
-use crate::app::{Chart, Compare, Home, Menu, presets, today};
-use crate::logic::activity::{self as act, Activity, Group, Measure, Point, Query, Sport, fmt_clock, fmt_duration, fmt_km, fmt_m};
+use crate::data::{Data, Snapshot};
+use crate::logic::activity::{self as act, Activity, Group, Measure, Point, Query, Sport, fmt_clock, fmt_duration, fmt_km, fmt_m, week_start};
 use crate::logic::journal::{name, sports_present};
 use crate::ui::format::{fr_day, fr_short, month_short, totals_line};
 use crate::ui::theme::blend;
-use crate::ui::{heading, icon, num, pad, page, segmented, sport_tag, title};
+use crate::ui::{Plots, heading, icon, num, pad, page, segmented, sport_tag, title};
+use crate::views::{Page, Width, today};
 use gpui_kit::assets::IconName;
 use chrono::{Datelike, Days, NaiveDate};
-use gpui_kit::component::date_picker::DatePicker;
+use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::{prelude::FluentBuilder, *};
 use std::sync::Arc;
+use std::time::Instant;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Chart {
+    Bars,
+    Cumul,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Compare {
+    None,
+    Previous,
+    Year,
+}
+
+/// The menus of the stats sentence.
+#[derive(Clone, Copy, PartialEq)]
+enum Menu {
+    Measure,
+    Group,
+    Period,
+    Sports,
+    Compare,
+}
+
+/// The presets of the stats range.
+fn presets(today: NaiveDate) -> [(&'static str, NaiveDate, NaiveDate); 6] {
+    let months = |n: u32| today.checked_sub_months(chrono::Months::new(n)).unwrap() + Days::new(1);
+    [
+        ("Les 4 dernières semaines", week_start(today) - Days::new(21), today),
+        ("Les 3 derniers mois", months(3), today),
+        ("Les 6 derniers mois", months(6), today),
+        ("Les 12 derniers mois", months(12), today),
+        ("Cette année", today.with_ordinal(1).unwrap(), today),
+        ("Depuis le début", NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(), today),
+    ]
+}
 
 const GUTTER: f32 = 64.;
 const PLOT_H: f32 = 280.;
@@ -71,31 +109,96 @@ pub fn ticks(max: f64) -> Vec<f64> {
     (1..).map(|i| i as f64 * step).take_while(|v| *v <= max * 1.0001).collect()
 }
 
-impl Home {
+pub struct StatsView {
+    snap: Snapshot,
+    width: Width,
+    query: Query,
+    chart: Chart,
+    compare: Compare,
+    /// Index of the preset in use, `None` once the range was set by hand.
+    preset: Option<usize>,
+    hover: Option<usize>,
+    pick: Option<usize>,
+    cal_hover: Option<usize>,
+    range: Entity<DatePickerState>,
+    /// Dates picked by hand: the sentence shows the date picker instead of the period word.
+    custom: bool,
+    menu: Option<Menu>,
+    /// Which menu a press outside just closed, and when.
+    closed: Option<(Menu, Instant)>,
+    plots: Plots,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<Page> for StatsView {}
+
+impl StatsView {
+    pub fn new(data: Entity<Data>, width: Width, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let today = today();
+        let range = cx.new(|cx| {
+            let mut s = DatePickerState::range(window, cx);
+            s.set_date((today.with_ordinal(1).unwrap(), today), window, cx);
+            s
+        });
+        let subs = vec![
+            cx.observe(&data, |this, data, cx| {
+                this.snap = data.read(cx).snapshot();
+                cx.notify();
+            }),
+            cx.subscribe(&range, |this, _, e: &DatePickerEvent, cx| {
+                let DatePickerEvent::Change(v) = e;
+                if let gpui_kit::component::calendar::Date::Range(Some(a), Some(b)) = v.date() {
+                    this.query.from = a.min(b);
+                    this.query.to = a.max(b);
+                    this.preset = None;
+                    this.pick = None;
+                    cx.notify();
+                }
+            }),
+        ];
+        StatsView {
+            snap: data.read(cx).snapshot(),
+            width,
+            query: Query { measure: Measure::Distance, group: Group::Week, from: today.with_ordinal(1).unwrap(), to: today, sports: vec![] },
+            chart: Chart::Bars,
+            compare: Compare::None,
+            preset: Some(4),
+            hover: None,
+            pick: None,
+            cal_hover: None,
+            range,
+            custom: false,
+            menu: None,
+            closed: None,
+            plots: Plots::default(),
+            _subscriptions: subs,
+        }
+    }
+
     fn bike_only(&self) -> bool {
-        self.stats.query.sports == [Sport::Bike]
+        self.query.sports == [Sport::Bike]
     }
 
     fn compared(&self) -> Option<Query> {
-        match self.stats.compare {
+        match self.compare {
             Compare::None => None,
-            Compare::Previous => Some(self.stats.query.shifted(false)),
-            Compare::Year => Some(self.stats.query.shifted(true)),
+            Compare::Previous => Some(self.query.shifted(false)),
+            Compare::Year => Some(self.query.shifted(true)),
         }
     }
 
     fn set_range(&mut self, from: NaiveDate, to: NaiveDate, preset: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         // "Tout" starts at the first activity, not in 2000.
-        let first = self.acts.iter().filter_map(|a| a.date()).min().unwrap_or(from);
+        let first = self.snap.acts.iter().filter_map(|a| a.date()).min().unwrap_or(from);
         let from = from.max(first.min(to));
-        self.stats.query.from = from;
-        self.stats.query.to = to;
-        self.stats.preset = preset;
-        self.stats.pick = None;
-        self.stats.range.update(cx, |s, cx| s.set_date((from, to), window, cx));
+        self.query.from = from;
+        self.query.to = to;
+        self.preset = preset;
+        self.pick = None;
+        self.range.update(cx, |s, cx| s.set_date((from, to), window, cx));
         // A long range by day is a wall of slivers: pick a sensible grouping.
         let days = (to - from).num_days();
-        let g = &mut self.stats.query.group;
+        let g = &mut self.query.group;
         if days > 800 && matches!(g, Group::Day | Group::Week) {
             *g = Group::Month;
         } else if days > 120 && *g == Group::Day {
@@ -103,17 +206,21 @@ impl Home {
         }
     }
 
-    pub fn stats(&mut self, width: f32, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = self.theme;
-        if self.acts.is_empty() {
+}
+
+impl Render for StatsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = self.width.get(window);
+        let t = self.snap.theme;
+        if self.snap.acts.is_empty() {
             return page("stats", width)
                 .child(title("Statistiques"))
                 .child(div().text_color(t.soft).child("Les graphiques se dessinent dès la première synchronisation."))
                 .into_any_element();
         }
-        let q = self.stats.query.clone();
+        let q = self.query.clone();
         let mut tot = act::Totals::default();
-        for a in self.acts.iter().filter(|a| q.keeps(a)) {
+        for a in self.snap.acts.iter().filter(|a| q.keeps(a)) {
             tot.count += 1;
             tot.distance += a.distance.unwrap_or(0.0);
             tot.duration += a.duration.unwrap_or(0.0);
@@ -121,12 +228,12 @@ impl Home {
         }
         let chart_tabs = segmented(
             "chart",
-            vec![("Barres".into(), self.stats.chart == Chart::Bars), ("Cumul".into(), self.stats.chart == Chart::Cumul)],
+            vec![("Barres".into(), self.chart == Chart::Bars), ("Cumul".into(), self.chart == Chart::Cumul)],
             t,
             cx,
-            |this: &mut Home, i, _, _| {
-                this.stats.chart = if i == 0 { Chart::Bars } else { Chart::Cumul };
-                this.stats.pick = None;
+            |this: &mut StatsView, i, _, _| {
+                this.chart = if i == 0 { Chart::Bars } else { Chart::Cumul };
+                this.pick = None;
             },
         );
         let header = div()
@@ -139,7 +246,7 @@ impl Home {
 
         // The plots' width: known before their first frame, so labels and cells fit at once.
         let inner = width - 2.0 * pad(width);
-        let chart = match self.stats.chart {
+        let chart = match self.chart {
             Chart::Bars => self.bars(inner - GUTTER, cx).into_any_element(),
             Chart::Cumul => self.cumul(inner - GUTTER, cx).into_any_element(),
         };
@@ -155,13 +262,16 @@ impl Home {
         page("stats", width).gap(px(36.)).child(header).child(chart).child(below).child(self.calendar(inner, cx)).into_any_element()
     }
 
+}
+
+impl StatsView {
     /// The settings as one sentence: "Distance par semaine · cette année · tous les sports ·
     /// sans comparaison". Each word opens its menu; the rest stays out of sight.
     fn sentence(&mut self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let q = self.stats.query.clone();
+        let t = self.snap.theme;
+        let q = self.query.clone();
         let today = today();
-        let period = match self.stats.preset {
+        let period = match self.preset {
             Some(i) => presets(today)[i].0.to_lowercase(),
             None => format!("du {} au {}", fr_day(q.from, NaiveDate::MIN), fr_day(q.to, NaiveDate::MIN)),
         };
@@ -171,7 +281,7 @@ impl Home {
             [a, b] => format!("{} et {}", a.label().to_lowercase(), b.label().to_lowercase()),
             more => format!("{} sports", more.len()),
         };
-        let compare = match self.stats.compare {
+        let compare = match self.compare {
             Compare::None => "sans comparaison",
             Compare::Previous => "comparé à la période d'avant",
             Compare::Year => "comparé à un an avant",
@@ -185,7 +295,7 @@ impl Home {
                 .cursor_pointer()
                 .hover(|d| d.bg(t.panel))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    let q = &this.stats.query;
+                    let q = &this.query;
                     let s = if back { q.shifted(false) } else { Query { from: q.to + Days::new(1), to: q.to + Days::new(q.days() as u64), ..q.clone() } };
                     this.set_range(s.from, s.to, None, window, cx);
                 }))
@@ -201,8 +311,8 @@ impl Home {
             .child(self.word("tok-group", Menu::Group, format!("par {}", q.group.label().to_lowercase()), cx))
             .child(dot())
             .child(step("prev-range", IconName::ChevronLeft, true, cx))
-            .child(if self.stats.custom {
-                div().w(px(260.)).text_size(px(13.)).child(DatePicker::new(&self.stats.range).number_of_months(2)).into_any_element()
+            .child(if self.custom {
+                div().w(px(260.)).text_size(px(13.)).child(DatePicker::new(&self.range).number_of_months(2)).into_any_element()
             } else {
                 self.word("tok-period", Menu::Period, period, cx).into_any_element()
             })
@@ -215,8 +325,8 @@ impl Home {
 
     /// A word of the sentence: bold, a small chevron; its menu floats under it while open.
     fn word(&mut self, id: &'static str, menu: Menu, label: String, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let open = self.stats.menu == Some(menu);
+        let t = self.snap.theme;
+        let open = self.menu == Some(menu);
         div()
             .relative()
             .child(
@@ -234,8 +344,8 @@ impl Home {
                     .hover(|d| d.bg(t.panel))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         // The press that closed this menu (outside it) must not reopen it.
-                        let just_closed = this.stats.closed.is_some_and(|(m, at)| m == menu && at.elapsed().as_millis() < 250);
-                        this.stats.menu = if this.stats.menu == Some(menu) || just_closed { None } else { Some(menu) };
+                        let just_closed = this.closed.is_some_and(|(m, at)| m == menu && at.elapsed().as_millis() < 250);
+                        this.menu = if this.menu == Some(menu) || just_closed { None } else { Some(menu) };
                         cx.notify();
                     }))
                     .child(label)
@@ -245,54 +355,54 @@ impl Home {
     }
 
     fn menu_panel(&mut self, menu: Menu, cx: &mut Context<Self>) -> Stateful<Div> {
-        let t = self.theme;
-        let q = self.stats.query.clone();
+        let t = self.snap.theme;
+        let q = self.query.clone();
         let today = today();
         // (label, chosen, action); `keep`: the menu stays open (several sports at once).
-        let mut rows: Vec<(String, bool, Box<dyn Fn(&mut Home, &mut Window, &mut Context<Home>)>)> = Vec::new();
+        let mut rows: Vec<(String, bool, Box<dyn Fn(&mut StatsView, &mut Window, &mut Context<StatsView>)>)> = Vec::new();
         let mut keep = false;
         match menu {
             Menu::Measure => {
                 for m in Measure::ALL {
-                    rows.push((m.label().into(), m == q.measure, Box::new(move |h, _, _| h.stats.query.measure = m)));
+                    rows.push((m.label().into(), m == q.measure, Box::new(move |h, _, _| h.query.measure = m)));
                 }
             }
             Menu::Group => {
                 for g in Group::ALL {
                     rows.push((format!("par {}", g.label().to_lowercase()), g == q.group, Box::new(move |h, _, _| {
-                        h.stats.query.group = g;
-                        h.stats.pick = None;
+                        h.query.group = g;
+                        h.pick = None;
                     })));
                 }
             }
             Menu::Period => {
                 for (i, (label, from, to)) in presets(today).into_iter().enumerate() {
-                    rows.push((label.into(), self.stats.preset == Some(i) && !self.stats.custom, Box::new(move |h, w, cx| {
-                        h.stats.custom = false;
+                    rows.push((label.into(), self.preset == Some(i) && !self.custom, Box::new(move |h, w, cx| {
+                        h.custom = false;
                         h.set_range(from, to, Some(i), w, cx);
                     })));
                 }
-                rows.push(("Choisir les dates…".into(), self.stats.custom, Box::new(|h, _, _| h.stats.custom = true)));
+                rows.push(("Choisir les dates…".into(), self.custom, Box::new(|h, _, _| h.custom = true)));
             }
             Menu::Sports => {
                 keep = true;
-                rows.push(("Tous les sports".into(), q.sports.is_empty(), Box::new(|h, _, _| h.stats.query.sports.clear())));
-                for s in sports_present(&self.acts) {
+                rows.push(("Tous les sports".into(), q.sports.is_empty(), Box::new(|h, _, _| h.query.sports.clear())));
+                for s in sports_present(&self.snap.acts) {
                     rows.push((s.label().into(), q.sports.contains(&s), Box::new(move |h, _, _| {
-                        let list = &mut h.stats.query.sports;
+                        let list = &mut h.query.sports;
                         match list.iter().position(|x| *x == s) {
                             Some(p) => {
                                 list.remove(p);
                             }
                             None => list.push(s),
                         }
-                        h.stats.pick = None;
+                        h.pick = None;
                     })));
                 }
             }
             Menu::Compare => {
                 for (label, c) in [("Sans comparaison", Compare::None), ("Avec la période d'avant", Compare::Previous), ("Avec la même période un an avant", Compare::Year)] {
-                    rows.push((label.into(), self.stats.compare == c, Box::new(move |h, _, _| h.stats.compare = c)));
+                    rows.push((label.into(), self.compare == c, Box::new(move |h, _, _| h.compare = c)));
                 }
             }
         }
@@ -313,7 +423,7 @@ impl Home {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         act(this, window, cx);
                         if !keep {
-                            this.stats.menu = None;
+                            this.menu = None;
                         }
                         cx.notify();
                     }))
@@ -336,8 +446,8 @@ impl Home {
             .flex()
             .flex_col()
             .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
-                this.stats.menu = None;
-                this.stats.closed = Some((menu, std::time::Instant::now()));
+                this.menu = None;
+                this.closed = Some((menu, Instant::now()));
                 cx.notify();
             }))
             .children(rows)
@@ -345,7 +455,7 @@ impl Home {
 
     /// Y axis labels, right-aligned in the gutter, and the plot beside them.
     fn plot_frame(&self, floor: f64, max: f64, measure: Measure, plot: AnyElement) -> Div {
-        let t = self.theme;
+        let t = self.snap.theme;
         let bike = self.bike_only();
         let labels = ticks(max).into_iter().filter(|v| *v >= floor).map(|v| {
             let top = PLOT_H * (1.0 - ((v - floor) / (max - floor)) as f32) - 8.0;
@@ -361,11 +471,11 @@ impl Home {
     }
 
     fn bars(&mut self, plot_w: f32, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let q = self.stats.query.clone();
+        let t = self.snap.theme;
+        let q = self.query.clone();
         let bike = self.bike_only();
-        let cur = q.series(&self.acts);
-        let prev: Vec<Point> = self.compared().map(|c| c.series(&self.acts)).unwrap_or_default();
+        let cur = q.series(&self.snap.acts);
+        let prev: Vec<Point> = self.compared().map(|c| c.series(&self.snap.acts)).unwrap_or_default();
         let sums = q.measure.sums();
         let vals = |s: &[Point]| s.iter().map(|p| p.value).collect::<Vec<_>>();
         let (cv, pv) = (vals(&cur), vals(&prev));
@@ -376,8 +486,8 @@ impl Home {
         let floor = if floor.is_finite() { floor } else { 0.0 };
         let max = if peak > 0.0 { (peak * 1.08).max(floor + 1.0) } else { 1.0 };
         let n = cur.len();
-        let hover = self.stats.hover;
-        let pick = self.stats.pick;
+        let hover = self.hover;
+        let pick = self.pick;
         let shown = hover.or(pick).or(n.checked_sub(1));
         let today = today();
         let readout = shown.and_then(|i| cur.get(i)).map_or(String::new(), |p| {
@@ -396,7 +506,7 @@ impl Home {
 
         let (cur_c, hi_c, prev_c, grid) = (blend(t.accent, t.bg, 0.55), t.accent, t.mark(), t.border);
         let compare = !pv.is_empty();
-        let bounds = self.plot("bars");
+        let bounds = self.plots.get("bars");
         let cell = bounds.clone();
         let (cva, pva) = (Arc::new(cv), Arc::new(pv));
         let line = !sums;
@@ -458,18 +568,18 @@ impl Home {
                 let b = bounds.get();
                 if b.contains(&e.position) && n > 0 {
                     let f = ((e.position.x - b.origin.x) / b.size.width).clamp(0.0, 0.9999);
-                    this.stats.hover = Some((f * n as f32) as usize);
+                    this.hover = Some((f * n as f32) as usize);
                     cx.notify();
                 }
             }))
             .on_hover(cx.listener(|this, on: &bool, _, cx| {
                 if !on {
-                    this.stats.hover = None;
+                    this.hover = None;
                     cx.notify();
                 }
             }))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.stats.pick = this.stats.hover;
+                this.pick = this.hover;
                 cx.notify();
             }));
 
@@ -504,8 +614,8 @@ impl Home {
     }
 
     fn legend(&self, cur: Hsla, prev: Hsla) -> Div {
-        let t = self.theme;
-        let q = &self.stats.query;
+        let t = self.snap.theme;
+        let q = &self.query;
         let c = self.compared().unwrap();
         let key = |color: Hsla, label: String| div().flex().items_center().gap(px(6.)).child(div().size(px(10.)).rounded(px(2.)).bg(color)).child(label);
         div()
@@ -519,18 +629,18 @@ impl Home {
     }
 
     fn cumul(&mut self, pw: f32, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let q = self.stats.query.clone();
+        let t = self.snap.theme;
+        let q = self.query.clone();
         let bike = self.bike_only();
-        let cur = q.running(&self.acts);
-        let prev = self.compared().map(|c| c.running(&self.acts)).unwrap_or_default();
+        let cur = q.running(&self.snap.acts);
+        let prev = self.compared().map(|c| c.running(&self.snap.acts)).unwrap_or_default();
         let n = cur.len().max(prev.len());
         let all = || cur.iter().chain(prev.iter()).flatten().copied();
         let peak = all().fold(0.0f64, f64::max);
         let floor = if q.measure.sums() { 0.0 } else { (all().fold(f64::INFINITY, f64::min) * 0.95).min(peak) };
         let floor = if floor.is_finite() { floor } else { 0.0 };
         let max = if peak > 0.0 { (peak * 1.1).max(floor + 1.0) } else { 1.0 };
-        let at = self.stats.hover.or(self.stats.pick).unwrap_or(cur.len().saturating_sub(1));
+        let at = self.hover.or(self.pick).unwrap_or(cur.len().saturating_sub(1));
         let today = today();
         let date = q.from + Days::new(at as u64);
         let now = cur.get(at).copied().flatten();
@@ -546,8 +656,8 @@ impl Home {
             s
         };
         let (cur_c, prev_c, guide, grid) = (t.accent, t.soft, t.dim, t.border);
-        let hover = self.stats.hover;
-        let bounds = self.plot("cumul");
+        let hover = self.hover;
+        let bounds = self.plots.get("cumul");
         let cell = bounds.clone();
         let (ca, pa) = (Arc::new(cur.clone()), Arc::new(prev.clone()));
         let plot = canvas(
@@ -625,18 +735,18 @@ impl Home {
                 let b = bounds.get();
                 if b.contains(&e.position) && n > 1 {
                     let f = ((e.position.x - b.origin.x) / b.size.width).clamp(0.0, 1.0);
-                    this.stats.hover = Some((f * (n - 1) as f32).round() as usize);
+                    this.hover = Some((f * (n - 1) as f32).round() as usize);
                     cx.notify();
                 }
             }))
             .on_hover(cx.listener(|this, on: &bool, _, cx| {
                 if !on {
-                    this.stats.hover = None;
+                    this.hover = None;
                     cx.notify();
                 }
             }))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.stats.pick = this.stats.hover;
+                this.pick = this.hover;
                 cx.notify();
             }));
 
@@ -670,24 +780,24 @@ impl Home {
 
     /// The activities of the group clicked (the last one by default).
     fn selection(&mut self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let q = self.stats.query.clone();
+        let t = self.snap.theme;
+        let q = self.query.clone();
         let bike = self.bike_only();
-        let (from, to) = match self.stats.chart {
+        let (from, to) = match self.chart {
             Chart::Bars => {
-                let s = q.series(&self.acts);
-                match self.stats.pick.or(s.len().checked_sub(1)).and_then(|i| s.get(i)) {
+                let s = q.series(&self.snap.acts);
+                match self.pick.or(s.len().checked_sub(1)).and_then(|i| s.get(i)) {
                     Some(p) => (p.from, p.to),
                     None => (q.from, q.to),
                 }
             }
-            Chart::Cumul => match self.stats.pick {
+            Chart::Cumul => match self.pick {
                 Some(i) => (q.from + Days::new(i as u64), q.from + Days::new(i as u64)),
                 None => (q.from, q.to),
             },
         };
         let sub = Query { from, to, ..q.clone() };
-        let list: Vec<Activity> = self.acts.iter().filter(|a| sub.keeps(a)).cloned().collect();
+        let list: Vec<Activity> = self.snap.acts.iter().filter(|a| sub.keeps(a)).cloned().collect();
         let today = today();
         let title_text = if from == to { fr_day(from, today) } else { format!("{} → {}", fr_day(from, today), fr_day(to, today)) };
         div()
@@ -712,7 +822,7 @@ impl Home {
                     .rounded(px(6.))
                     .cursor_pointer()
                     .hover(|d| d.bg(t.panel))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open(id, window, cx)))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
                     .child(num(a.date().map(fr_short).unwrap_or_default()).w(px(96.)).flex_none().text_size(px(12.)).text_color(t.soft))
                     .child(div().flex().w(px(110.)).flex_none().child(sport_tag(a.sport(), t)))
                     .child(div().flex_1().min_w_0().truncate().child(name(a)))
@@ -723,16 +833,16 @@ impl Home {
 
     /// The range sport by sport, with the change against the compared period.
     fn by_sport(&self) -> Div {
-        let t = self.theme;
-        let q = self.stats.query.clone();
+        let t = self.snap.theme;
+        let q = self.query.clone();
         let cmp = self.compared();
-        let sports: Vec<Sport> = if q.sports.is_empty() { sports_present(&self.acts) } else { q.sports.clone() };
+        let sports: Vec<Sport> = if q.sports.is_empty() { sports_present(&self.snap.acts) } else { q.sports.clone() };
         let rows: Vec<(Sport, Point, Option<Point>)> = sports
             .into_iter()
             .map(|s| {
                 let one = Query { sports: vec![s], ..q.clone() };
-                let before = cmp.as_ref().map(|c| Query { sports: vec![s], ..c.clone() }.total(&self.acts));
-                (s, one.total(&self.acts), before)
+                let before = cmp.as_ref().map(|c| Query { sports: vec![s], ..c.clone() }.total(&self.snap.acts));
+                (s, one.total(&self.snap.acts), before)
             })
             .filter(|(_, p, b)| p.count > 0 || b.is_some_and(|b| b.count > 0))
             .collect();
@@ -791,14 +901,14 @@ impl Home {
     /// Day by day, as many recent weeks as the width holds (up to a year): the cells keep a size
     /// one can point at, the grid always fits.
     fn calendar(&mut self, w: f32, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
+        let t = self.snap.theme;
         let today = today();
-        let q = self.stats.query.clone();
+        let q = self.query.clone();
         let (label_w, gap) = (34.0, 3.0);
         let weeks = (((w - label_w + gap) / (15.0 + gap)) as usize).clamp(6, 53);
         let cell = ((w - label_w - (weeks as f32 - 1.0) * gap) / weeks as f32).clamp(9.0, 22.0);
         let first = act::week_start(today) - Days::new((weeks as u64 - 1) * 7);
-        let days = Query { group: Group::Day, from: first, to: today, ..q.clone() }.series(&self.acts);
+        let days = Query { group: Group::Day, from: first, to: today, ..q.clone() }.series(&self.snap.acts);
         let vals: Vec<f64> = days.iter().map(|p| if p.count > 0 { p.value.unwrap_or(0.0).max(1e-6) } else { 0.0 }).collect();
         let mut sorted: Vec<f64> = vals.iter().copied().filter(|v| *v > 0.0).collect();
         sorted.sort_by(f64::total_cmp);
@@ -808,7 +918,7 @@ impl Home {
             run = if *v > 0.0 { run + 1 } else { 0 };
             longest = longest.max(run);
         }
-        let hover = self.stats.cal_hover;
+        let hover = self.cal_hover;
         let summary = match hover.and_then(|i| days.get(i)) {
             Some(p) if p.count > 0 => format!("{} · {}", fr_day(p.from, today), q.measure.fmt(p.value.unwrap_or(0.0), self.bike_only())),
             Some(p) => format!("{} · repos", fr_day(p.from, today)),
@@ -818,7 +928,7 @@ impl Home {
         let (rest, accent, bg, ink) = (t.border, t.accent, t.bg, t.text);
         let vals = Arc::new(vals);
         let n = vals.len();
-        let bounds = self.plot("calendar");
+        let bounds = self.plots.get("calendar");
         let cell_b = bounds.clone();
         let plot = canvas(
             move |b, _, _| cell_b.set(b),
@@ -870,21 +980,21 @@ impl Home {
                             let (x, y) = ((e.position.x - b.origin.x) / px(1.), (e.position.y - b.origin.y) / px(1.));
                             let (col, row) = ((x / (cell + gap)) as usize, (y / (cell + gap)) as usize);
                             let i = col * 7 + row;
-                            this.stats.cal_hover = (x >= 0.0 && y >= 0.0 && row < 7 && i < n).then_some(i);
+                            this.cal_hover = (x >= 0.0 && y >= 0.0 && row < 7 && i < n).then_some(i);
                             cx.notify();
                         }))
                         .on_hover(cx.listener(|this, on: &bool, _, cx| {
                             if !on {
-                                this.stats.cal_hover = None;
+                                this.cal_hover = None;
                                 cx.notify();
                             }
                         }))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             // A day becomes the range, its activities listed above.
-                            if let Some(i) = this.stats.cal_hover {
+                            if let Some(i) = this.cal_hover {
                                 let d = first + Days::new(i as u64);
-                                this.stats.query.group = Group::Day;
-                                this.stats.custom = true;
+                                this.query.group = Group::Day;
+                                this.custom = true;
                                 this.set_range(d, d, None, window, cx);
                             }
                         })),

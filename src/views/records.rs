@@ -1,32 +1,55 @@
 //! Records: the best efforts over the classic distances (from the tracks, like Strava's), the
 //! longest outings, the biggest climbs. Road running and trail apart; a podium for each.
 
-use crate::app::Home;
+use crate::data::{Data, Snapshot};
 use crate::logic::journal::name;
 use crate::logic::records::{BOARDS, Board, podium, show};
 use crate::ui::format::fr_day;
 use crate::ui::{heading, num, pad, segmented, title};
+use crate::views::{Page, Width, today, tracks_progress};
 use chrono::Datelike;
 use gpui_kit::{prelude::FluentBuilder, *};
 
-impl Home {
-    pub fn records(&mut self, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = self.theme;
+pub struct RecordsView {
+    data: Entity<Data>,
+    snap: Snapshot,
+    width: Width,
+    /// `None`: all years.
+    year: Option<i32>,
+    _subscription: Subscription,
+}
+
+impl EventEmitter<Page> for RecordsView {}
+
+impl RecordsView {
+    pub fn new(data: Entity<Data>, width: Width, cx: &mut Context<Self>) -> Self {
+        let sub = cx.observe(&data, |this, data, cx| {
+            this.snap = data.read(cx).snapshot();
+            cx.notify();
+        });
+        RecordsView { snap: data.read(cx).snapshot(), data, width, year: None, _subscription: sub }
+    }
+}
+
+impl Render for RecordsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = self.width.get(window);
+        let t = self.snap.theme;
         let p = pad(width);
-        let mut years: Vec<i32> = self.acts.iter().filter_map(|a| a.date()).map(|d| d.year()).collect();
+        let mut years: Vec<i32> = self.snap.acts.iter().filter_map(|a| a.date()).map(|d| d.year()).collect();
         years.sort_unstable_by(|a, b| b.cmp(a));
         years.dedup();
-        let year = self.record_year;
+        let year = self.year;
         let mut items = vec![("Toutes les années".into(), year.is_none())];
         items.extend(years.iter().map(|y| (y.to_string().into(), year == Some(*y))));
         let ys = years.clone();
-        let filter = segmented("record-year", items, t, cx, move |this: &mut Home, i, _, _| {
-            this.record_year = if i == 0 { None } else { Some(ys[i - 1]) };
+        let filter = segmented("record-year", items, t, cx, move |this: &mut RecordsView, i, _, _| {
+            this.year = if i == 0 { None } else { Some(ys[i - 1]) };
         });
 
-        let boards: Vec<&Board> = BOARDS.iter().filter(|b| self.acts.iter().any(|a| a.sport() == b.sport)).collect();
+        let boards: Vec<&Board> = BOARDS.iter().filter(|b| self.snap.acts.iter().any(|a| a.sport() == b.sport)).collect();
         let cols = if width - 2.0 * p < 900.0 { 1 } else if width - 2.0 * p < 1450.0 { 2 } else { 3 };
-        let waiting = self.acts.iter().filter(|a| boards.iter().any(|b| b.sport == a.sport()) && !self.derived.contains_key(&a.activity_id)).count();
+        let waiting = self.snap.acts.iter().filter(|a| boards.iter().any(|b| b.sport == a.sport()) && !self.snap.derived.contains_key(&a.activity_id)).count();
 
         let mut grid = div().grid().grid_cols(cols).gap_x(px(48.)).gap_y(px(40.));
         for board in boards.iter() {
@@ -60,19 +83,22 @@ impl Home {
                         .flex_col()
                         .gap(px(6.))
                         .child(div().text_color(t.soft).child("Les temps sur distance se calculent à partir des traces : la page se complète au fil du téléchargement."))
-                        .child(self.tracks_progress(cx)),
+                        .child(tracks_progress(&self.data, cx)),
                 )
             })
             .when(boards.is_empty(), |d| d.child(div().text_color(t.soft).child("Pas encore d'activité.")))
             .child(grid)
     }
 
+}
+
+impl RecordsView {
     fn board(&self, board: &'static Board, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
+        let t = self.snap.theme;
         let mut col = div().flex().flex_col().child(heading(board.title).mb(px(8.)));
         for (i, (label, kind)) in board.rows.iter().enumerate() {
-            let top = podium(&self.acts, &self.derived, board, *kind, self.record_year, 3);
-            let today = crate::app::today();
+            let top = podium(&self.snap.acts, &self.snap.derived, board, *kind, self.year, 3);
+            let today = today();
             let first = top.first().copied();
             let (value, pace) = first.map_or(("—".into(), String::new()), |e| show(*kind, board.sport, e.value));
             let row = div()
@@ -87,7 +113,7 @@ impl Home {
                 .border_b_1()
                 .border_color(t.border)
                 .when_some(first, |d, e| {
-                    d.cursor_pointer().hover(|d| d.bg(t.panel)).on_click(cx.listener(move |this, _, window, cx| this.open(e.id, window, cx)))
+                    d.cursor_pointer().hover(|d| d.bg(t.panel)).on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(e.id))))
                 })
                 .child(
                     div()
@@ -105,7 +131,7 @@ impl Home {
                                     .truncate()
                                     .text_size(px(12.))
                                     .text_color(t.soft)
-                                    .child(format!("{} · {}", self.activity(e.id).map(name).unwrap_or_default(), fr_day(e.date, today))),
+                                    .child(format!("{} · {}", self.snap.activity(e.id).map(name).unwrap_or_default(), fr_day(e.date, today))),
                             )
                         }),
                 )
@@ -117,7 +143,7 @@ impl Home {
                                 .id(SharedString::from(format!("pod-{}-{i}-{k}", board.title)))
                                 .cursor_pointer()
                                 .hover(|d| d.text_color(t.text))
-                                .on_click(cx.listener(move |this, _, window, cx| this.open(id, window, cx)))
+                                .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
                                 .child(num(format!("{}e {} · {}", k + 2, show(*kind, board.sport, e.value).0, fr_day(e.date, today))))
                         },
                     )))

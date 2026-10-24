@@ -1,17 +1,53 @@
 //! Settings: the Garmin key, the map tiles, and where the data goes. A centred column, like a note.
 
-use crate::app::Home;
-use crate::platform::store;
+use crate::data::{Data, Status};
+use crate::platform::{store, tiles};
 use crate::ui::{button, heading, icon, pill, title};
+use crate::views::{Width, tracks_progress};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::input::Input;
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::{prelude::FluentBuilder, *};
 
-impl Home {
-    pub fn settings(&mut self, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = self.theme;
-        let has = self.key.is_some();
-        let checking = self.busy() && self.key_error.is_none();
+pub struct SettingsView {
+    data: Entity<Data>,
+    width: Width,
+    key_input: Entity<InputState>,
+    tiles_input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
+impl SettingsView {
+    pub fn new(data: Entity<Data>, width: Width, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let key_input = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("GCDC_…"));
+        let saved = data.read(cx).settings.get("tiles").cloned().unwrap_or_default();
+        let tiles_input = cx.new(|cx| InputState::new(window, cx).placeholder(tiles::DEFAULT_TILES).default_value(saved));
+        let sub = cx.observe(&data, |_, _, cx| cx.notify());
+        SettingsView { data, width, key_input, tiles_input, _subscription: sub }
+    }
+
+    fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let raw = self.key_input.read(cx).value().to_string();
+        if self.data.update(cx, |d, cx| d.save_key(&raw, cx)) {
+            self.key_input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+    }
+
+    fn save_tiles(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.tiles_input.read(cx).value().to_string();
+        if self.data.update(cx, |d, cx| d.save_tiles(&value, cx)) && value.trim().is_empty() {
+            self.tiles_input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+    }
+}
+
+impl Render for SettingsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = self.width.get(window);
+        let d = self.data.read(cx);
+        let t = d.theme;
+        let has = d.key.is_some();
+        let checking = d.busy() && d.key_error.is_none();
+        let key_error = d.key_error.clone();
         let fact = |name: IconName, text: String| {
             div()
                 .flex()
@@ -52,7 +88,7 @@ impl Home {
                                 .mt(px(4.))
                                 .child(label(if has { "Remplacer par une nouvelle clé" } else { "Clé API personnelle" }))
                                 .child(Input::new(&self.key_input).mask_toggle())
-                                .child(match &self.key_error {
+                                .child(match &key_error {
                                     Some(e) => div().text_size(px(12.)).text_color(t.bad()).child(e.clone()),
                                     None => div().text_size(px(12.)).text_color(t.dim).child("Vérifiée auprès de Garmin avant d'être enregistrée."),
                                 }),
@@ -66,7 +102,7 @@ impl Home {
                                         .when(checking, |d| d.opacity(0.6))
                                         .on_click(cx.listener(|this, _, window, cx| this.save_key(window, cx))),
                                 )
-                                .when(has, |d| d.child(button("delete-key", "Retirer la clé", false, t).on_click(cx.listener(|this, _, _, cx| this.delete_key(cx))))),
+                                .when(has, |d| d.child(button("delete-key", "Retirer la clé", false, t).on_click(cx.listener(|this, _, _, cx| this.data.update(cx, |d, cx| d.delete_key(cx)))))),
                         ),
                 )
                 .child(
@@ -92,10 +128,7 @@ impl Home {
                                 .child(Input::new(&self.tiles_input).cleanable(true)),
                         )
                         .child(
-                            div().flex().gap(px(8.)).child(button("save-tiles", "Enregistrer", false, t).on_click(cx.listener(|this, _, window, cx| {
-                                let v = this.tiles_input.read(cx).value().to_string();
-                                this.save_tiles(v, window, cx);
-                            }))),
+                            div().flex().gap(px(8.)).child(button("save-tiles", "Enregistrer", false, t).on_click(cx.listener(|this, _, window, cx| this.save_tiles(window, cx)))),
                         ),
                 )
                 .child(
@@ -122,58 +155,14 @@ impl Home {
         )
     }
 
-    /// Where the track downloads stand, live: count, bar, the activity in progress, failures, and
-    /// the button to resume or stop.
-    pub fn tracks_progress(&self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let f = &self.fetch;
-        let (read, total) = (self.derived.len().min(self.acts.len()), self.acts.len());
-        let share = if total > 0 { read as f32 / total as f32 } else { 0.0 };
-        let g = |n: usize| crate::logic::activity::group(n as i64);
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child(div().font_weight(FontWeight::BOLD).child(format!("{} / {} traces lues", g(read), g(total))))
-                    .child(crate::ui::num(format!("{:.0} %", share * 100.0)).text_color(t.soft)),
-            )
-            .child(div().h(px(6.)).w_full().rounded(px(3.)).bg(t.border).child(div().h_full().rounded(px(3.)).bg(t.accent).w(relative(share))))
-            .when_some(f.current.as_ref().filter(|_| f.running), |d, name| {
-                d.child(div().text_size(px(12.)).text_color(t.soft).child(format!(
-                    "Téléchargement {} / {} de cette série : « {name} »",
-                    g((f.done + 1).min(f.total)),
-                    g(f.total)
-                )))
-            })
-            .when(!f.running && read < total && f.stopped.is_none() && self.key.is_some(), |d| {
-                d.child(div().text_size(px(12.)).text_color(t.soft).child(format!("{} encore à télécharger.", g(total - read))))
-            })
-            .when(self.key.is_none() && read < total, |d| {
-                d.child(div().text_size(px(12.)).text_color(t.soft).child("Ajoute ta clé API pour télécharger les traces."))
-            })
-            .when(f.failed > 0, |d| d.child(div().text_size(px(12.)).text_color(t.soft).child(format!("{} échec{} dans cette série", f.failed, if f.failed > 1 { "s" } else { "" }))))
-            .when_some(f.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(t.bad()).child(e)))
-            .when_some(f.stopped.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(t.bad()).child(e)))
-            .child(div().flex().gap(px(8.)).when(f.running, |d| {
-                d.child(button("fetch-stop", if f.cancel { "Arrêt après ce fichier…" } else { "Arrêter" }, false, t).on_click(cx.listener(|this, _, _, cx| {
-                    this.fetch.cancel = true;
-                    cx.notify();
-                })))
-            }).when(!f.running && read < total && self.key.is_some(), |d| {
-                d.child(button("fetch-go", "Reprendre le téléchargement", true, t).on_click(cx.listener(|this, _, _, cx| {
-                    this.fetch_tracks(cx);
-                })))
-            }))
-    }
+}
 
+impl SettingsView {
     /// Both steps of the synchronisation, live, with the button to start one.
-    pub fn sync_steps(&self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let listing = matches!(&self.status, crate::app::Status::Busy(s) if s.starts_with("Synchronisation"));
+    fn sync_steps(&self, cx: &mut Context<Self>) -> Div {
+        let d = self.data.read(cx);
+        let t = d.theme;
+        let listing = d.listing();
         let step = |n: &'static str, label: &'static str, state: String, on: bool| {
             div()
                 .flex()
@@ -183,22 +172,23 @@ impl Home {
                 .child(div().flex_1().min_w_0().text_color(t.soft).child(state))
         };
         let list_state = if listing {
-            match &self.status {
-                crate::app::Status::Busy(s) => s.trim_start_matches("Synchronisation : ").to_string(),
+            match &d.status {
+                Status::Busy(s) => s.trim_start_matches("Synchronisation : ").to_string(),
                 _ => String::new(),
             }
         } else {
-            self.note.clone().unwrap_or_else(|| "pas encore lancée".into())
+            d.note.clone().unwrap_or_else(|| "pas encore lancée".into())
         };
+        let (fetching, syncing, has_key) = (d.fetch.running, d.syncing(), d.key.is_some());
         div()
             .flex()
             .flex_col()
             .gap(px(12.))
             .child(step("1", "Activités", list_state, listing))
-            .child(step("2", "Fichiers", if self.fetch.running { "en cours".into() } else { String::new() }, self.fetch.running))
-            .child(self.tracks_progress(cx))
-            .when(!self.syncing() && self.key.is_some(), |d| {
-                d.child(div().flex().child(button("sync-now", "Synchroniser maintenant", false, t).on_click(cx.listener(|this, _, _, cx| this.sync(cx)))))
+            .child(step("2", "Fichiers", if fetching { "en cours".into() } else { String::new() }, fetching))
+            .child(tracks_progress(&self.data, cx))
+            .when(!syncing && has_key, |d| {
+                d.child(div().flex().child(button("sync-now", "Synchroniser maintenant", false, t).on_click(cx.listener(|this, _, _, cx| this.data.update(cx, |d, cx| d.sync(cx))))))
             })
     }
 }

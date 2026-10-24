@@ -1,42 +1,145 @@
 //! The heat map: every track at once, darker where more activities passed. Filter by sport and
 //! year; a click on the map lists the activities that went through that spot.
 
-use crate::app::Home;
+use crate::data::{Data, Snapshot};
+use crate::logic::activity::Sport;
 use crate::logic::journal::{name, sports_present};
 use crate::logic::map;
-use crate::ui::format::{fr_short};
+use crate::ui::format::fr_short;
 use crate::ui::theme::blend;
-use crate::ui::{heading, icon, num, segmented, sport_tag};
-use crate::views::map::Which;
+use crate::ui::{heading, icon, num, render_image, segmented, sport_tag};
+use crate::views::Page;
+use crate::views::map::{MapState, map_widget};
 use chrono::Datelike;
 use gpui_kit::assets::IconName;
 use gpui_kit::{prelude::FluentBuilder, *};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
-impl Home {
-    pub fn heatmap(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = self.theme;
-        let ids = self.heat_ids();
-        let subject = {
+#[derive(Default)]
+struct Heat {
+    /// The raster and the view it was drawn for.
+    image: Option<(Arc<RenderImage>, map::View, (f64, f64))>,
+    busy: bool,
+    drawn: Option<u64>,
+}
+
+pub struct HeatmapView {
+    data: Entity<Data>,
+    snap: Snapshot,
+    map: MapState,
+    /// Empty: every sport.
+    sports: Vec<Sport>,
+    year: Option<i32>,
+    heat: Heat,
+    /// The spot clicked, and the activities through it.
+    pick: Option<(Point<Pixels>, Vec<i64>)>,
+    _subscription: Subscription,
+}
+
+impl EventEmitter<Page> for HeatmapView {}
+
+impl HeatmapView {
+    pub fn new(data: Entity<Data>, cx: &mut Context<Self>) -> Self {
+        let sub = cx.observe(&data, |this, data, cx| {
+            this.snap = data.read(cx).snapshot();
+            cx.notify();
+        });
+        HeatmapView {
+            snap: data.read(cx).snapshot(),
+            data,
+            map: MapState::new(),
+            sports: vec![],
+            year: None,
+            heat: Heat::default(),
+            pick: None,
+            _subscription: sub,
+        }
+    }
+
+    /// Lines of the heat map, as filtered.
+    fn ids(&self) -> Vec<i64> {
+        self.snap
+            .acts
+            .iter()
+            .filter(|a| self.sports.is_empty() || self.sports.contains(&a.sport()))
+            .filter(|a| self.year.is_none_or(|y| a.date().is_some_and(|d| d.year() == y)))
+            .filter(|a| self.snap.derived.get(&a.activity_id).is_some_and(|d| !d.line.is_empty()))
+            .map(|a| a.activity_id)
+            .collect()
+    }
+
+    /// Redraws the heat raster when what it shows changed; one drawing at a time, the latest wins.
+    fn ensure_heat(&mut self, size: (f64, f64), scale: f32, cx: &mut Context<Self>) {
+        let ids = self.ids();
+        let view = self.map.view;
+        let theme = self.snap.theme;
+        let key = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            (&self.heat_sports, self.heat_year).hash(&mut h);
+            (view.cx.to_bits(), view.cy.to_bits(), view.z.to_bits(), size.0.to_bits(), size.1.to_bits(), theme.dark).hash(&mut h);
+            ids.hash(&mut h);
             h.finish()
         };
-        let bbox = map::bbox(ids.iter().filter_map(|id| self.derived.get(id)).map(|d| d.line.as_slice()), 0.02);
-        self.fit_map(Which::Heat, subject, bbox, false);
+        if self.heat.drawn == Some(key) || self.heat.busy || size.0 < 8.0 || size.1 < 8.0 {
+            return;
+        }
+        self.heat.busy = true;
+        let derived = self.snap.derived.clone();
+        let (w, h) = ((size.0 * scale as f64) as usize, (size.1 * scale as f64) as usize);
+        let scaled = map::View { cx: view.cx * scale as f64, cy: view.cy * scale as f64, z: view.z + (scale as f64).log2() };
+        let accent = theme.accent.to_rgb();
+        let a = [(accent.r * 255.0) as u8, (accent.g * 255.0) as u8, (accent.b * 255.0) as u8];
+        // Light theme: pale where one passage, deep where the most; dark theme: the reverse reads.
+        let shade = |k: f32| a.map(|c| (c as f32 * k).min(255.0) as u8);
+        let lift = |k: f32| a.map(|c| (c as f32 + (255.0 - c as f32) * k) as u8);
+        let (light, deep) = if theme.dark { (shade(0.55), lift(0.55)) } else { (lift(0.55), shade(0.45)) };
+        cx.spawn(async move |this, cx| {
+            let img = cx
+                .background_executor()
+                .spawn(async move {
+                    let lines: Vec<&[[f32; 2]]> = ids.iter().filter_map(|id| derived.get(id)).map(|d| d.line.as_slice()).collect();
+                    let counts = map::heat(&lines, &scaled, w, h);
+                    render_image(w as u32, h as u32, map::colorize(&counts, light, deep)).map(Arc::new)
+                })
+                .await;
+            this.update(cx, |h, cx| {
+                h.heat.busy = false;
+                h.heat.drawn = Some(key);
+                if let Some(img) = img {
+                    h.heat.image = Some((img, view, size));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
 
-        let b = self.heat_map.bounds.get();
+impl Render for HeatmapView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.snap.theme;
+        let ids = self.ids();
+        let subject = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (&self.sports, self.year).hash(&mut h);
+            h.finish()
+        };
+        let bbox = map::bbox(ids.iter().filter_map(|id| self.snap.derived.get(id)).map(|d| d.line.as_slice()), 0.02);
+        self.map.fit(subject, bbox, false);
+
+        let b = self.map.bounds.get();
         let (w, h) = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
         // A click (not a drag) on the map: the activities through that spot.
-        if let Some((Which::Heat, (sx, sy))) = self.map_click.take() {
-            let lines: Vec<(i64, &[[f32; 2]])> = ids.iter().filter_map(|id| self.derived.get(id).map(|d| (*id, d.line.as_slice()))).collect();
-            let found = map::near(&lines, &self.heat_map.view, w, h, sx, sy, 6.0);
-            self.heat_pick = Some((point(px(sx as f32), px(sy as f32)), found));
+        if let Some((sx, sy)) = self.map.click.take() {
+            let lines: Vec<(i64, &[[f32; 2]])> = ids.iter().filter_map(|id| self.snap.derived.get(id).map(|d| (*id, d.line.as_slice()))).collect();
+            let found = map::near(&lines, &self.map.view, w, h, sx, sy, 6.0);
+            self.pick = Some((point(px(sx as f32), px(sy as f32)), found));
         }
         self.ensure_heat((w, h), window.scale_factor(), cx);
 
         // The raster drawn for an earlier view follows the map until the new one is ready.
-        let view = self.heat_map.view;
+        let view = self.map.view;
         let overlay = self.heat.image.as_ref().map(|(raster, v0, s0)| {
             let k = 2f64.powf(view.z - v0.z);
             let left = (v0.cx - s0.0 / 2.0) * k - (view.cx - w / 2.0);
@@ -49,7 +152,7 @@ impl Home {
                 .h(px((s0.1 * k) as f32))
                 .into_any_element()
         });
-        let pick_dot = self.heat_pick.as_ref().map(|(p, _)| {
+        let pick_dot = self.pick.as_ref().map(|(p, _)| {
             div().absolute().left(p.x - px(5.)).top(p.y - px(5.)).size(px(10.)).rounded_full().bg(t.text).into_any_element()
         });
         let overlay = div().absolute().size_full().children(overlay).children(pick_dot).into_any_element();
@@ -57,18 +160,20 @@ impl Home {
         div()
             .size_full()
             .relative()
-            .child(self.map_widget(Which::Heat, "heat-map", Some(overlay), bbox, false, cx))
-            .child(self.heat_panel(&ids, cx))
+            .child(map_widget(&self.map, |v: &mut HeatmapView| &mut v.map, &self.data, "heat-map", Some(overlay), bbox, false, cx))
+            .child(self.panel(&ids, cx))
     }
+}
 
-    fn heat_panel(&mut self, ids: &[i64], cx: &mut Context<Self>) -> Stateful<Div> {
-        let t = self.theme;
-        let present = sports_present(&self.acts);
-        let chosen = self.heat_sports.clone();
+impl HeatmapView {
+    fn panel(&mut self, ids: &[i64], cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = self.snap.theme;
+        let present = sports_present(&self.snap.acts);
+        let chosen = self.sports.clone();
         let mut chips: Vec<(SharedString, bool)> = vec![("Tous".into(), chosen.is_empty())];
         chips.extend(present.iter().map(|s| (s.label().into(), chosen.contains(s))));
-        let sports = segmented("heat-sports", chips, t, cx, move |this: &mut Home, i, _, _| {
-            let list = &mut this.heat_sports;
+        let sports = segmented("heat-sports", chips, t, cx, move |this: &mut HeatmapView, i, _, _| {
+            let list = &mut this.sports;
             if i == 0 {
                 list.clear();
             } else if let Some(p) = list.iter().position(|x| *x == present[i - 1]) {
@@ -76,25 +181,25 @@ impl Home {
             } else {
                 list.push(present[i - 1]);
             }
-            this.heat_pick = None;
+            this.pick = None;
         });
-        let mut years: Vec<i32> = self.acts.iter().filter_map(|a| a.date()).map(|d| d.year()).collect();
+        let mut years: Vec<i32> = self.snap.acts.iter().filter_map(|a| a.date()).map(|d| d.year()).collect();
         years.sort_unstable_by(|a, b| b.cmp(a));
         years.dedup();
-        let mut ys: Vec<(SharedString, bool)> = vec![("Toujours".into(), self.heat_year.is_none())];
-        ys.extend(years.iter().map(|y| (y.to_string().into(), self.heat_year == Some(*y))));
+        let mut ys: Vec<(SharedString, bool)> = vec![("Toujours".into(), self.year.is_none())];
+        ys.extend(years.iter().map(|y| (y.to_string().into(), self.year == Some(*y))));
         let year_list = years.clone();
-        let year = segmented("heat-year", ys, t, cx, move |this: &mut Home, i, _, _| {
-            this.heat_year = if i == 0 { None } else { Some(year_list[i - 1]) };
-            this.heat_pick = None;
+        let year = segmented("heat-year", ys, t, cx, move |this: &mut HeatmapView, i, _, _| {
+            this.year = if i == 0 { None } else { Some(year_list[i - 1]) };
+            this.pick = None;
         });
 
-        let km: f64 = ids.iter().filter_map(|id| self.activity(*id)).filter_map(|a| a.distance).sum();
+        let km: f64 = ids.iter().filter_map(|id| self.snap.activity(*id)).filter_map(|a| a.distance).sum();
         let ramp_light = blend(t.accent, t.bg, if t.dark { 0.45 } else { 0.4 });
         let ramp_deep = if t.dark { blend(t.text, t.accent, 0.35) } else { blend(t.text, t.accent, 0.45) };
-        let waiting = self.acts.iter().filter(|a| !self.derived.contains_key(&a.activity_id)).count();
+        let waiting = self.snap.acts.iter().filter(|a| !self.snap.derived.contains_key(&a.activity_id)).count();
 
-        let picks = self.heat_pick.as_ref().map(|(_, found)| found.clone());
+        let picks = self.pick.as_ref().map(|(_, found)| found.clone());
         div()
             .id("heat-panel")
             .absolute()
@@ -152,14 +257,14 @@ impl Home {
                                         .id("pick-close")
                                         .cursor_pointer()
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.heat_pick = None;
+                                            this.pick = None;
                                             cx.notify();
                                         }))
                                         .child(icon(IconName::X, t.soft, 14.)),
                                 ),
                         )
                         .children(found.iter().take(30).enumerate().filter_map(|(i, id)| {
-                            let a = self.activity(*id)?;
+                            let a = self.snap.activity(*id)?;
                             let id = *id;
                             Some(
                                 div()
@@ -173,7 +278,7 @@ impl Home {
                                     .rounded(px(6.))
                                     .cursor_pointer()
                                     .hover(|d| d.bg(t.panel))
-                                    .on_click(cx.listener(move |this, _, window, cx| this.open(id, window, cx)))
+                                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
                                     .child(num(a.date().map(fr_short).unwrap_or_default()).w(px(100.)).flex_none().text_size(px(12.)).text_color(t.soft))
                                     .child(sport_tag(a.sport(), t))
                                     .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).child(name(a))),

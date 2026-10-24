@@ -1,16 +1,17 @@
 //! An activity's page: its figures, its map, its profiles (pace, heart rate, altitude) sharing
 //! one pointer, its kilometre splits and laps, and where it stands among the previous ones.
 
-use crate::app::{Home, TrackState, View};
+use crate::data::{Data, Snapshot};
 use crate::logic::activity::{self as act, Activity, Metric, Sport, fmt_clock, fmt_km, fmt_m};
-use crate::logic::fit::Track;
+use crate::logic::fit::{Split, Track};
 use crate::logic::journal::name;
 use crate::logic::profiles::profiles;
 use crate::ui::chart::{Series, line_chart, nearest};
 use crate::ui::format::{fr_long, fr_short};
 use crate::ui::theme::blend;
-use crate::ui::{button, figure, heading, icon, num, page, sport_tag, title};
-use crate::views::map::{Which, line_bbox};
+use crate::ui::{Plots, button, figure, heading, icon, num, page, sport_tag, title};
+use crate::views::map::{MapState, line_bbox, map_widget};
+use crate::views::{Page, Width};
 use gpui_kit::assets::IconName;
 use gpui_kit::{prelude::FluentBuilder, *};
 use std::sync::Arc;
@@ -23,17 +24,116 @@ fn speed_fmt(v: f32, sport: Sport) -> String {
     }
 }
 
-impl Home {
-    pub fn activity_page(&mut self, id: i64, width: f32, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = self.theme;
-        let Some(a) = self.activity(id).cloned() else {
+struct Loaded {
+    id: i64,
+    track: Arc<Track>,
+    splits: Vec<Split>,
+}
+
+enum TrackState {
+    None,
+    Loading(i64),
+    Failed(i64, String),
+}
+
+pub struct ActivityView {
+    data: Entity<Data>,
+    snap: Snapshot,
+    width: Width,
+    /// The activity shown.
+    id: i64,
+    track: Option<Loaded>,
+    track_state: TrackState,
+    /// The sample under the pointer, on the profiles (and its spot on the map).
+    hover: Option<usize>,
+    /// The bar under the pointer, in "Avant celle-ci".
+    hist_hover: Option<i64>,
+    map: MapState,
+    plots: Plots,
+    _subscription: Subscription,
+}
+
+impl EventEmitter<Page> for ActivityView {}
+
+impl ActivityView {
+    pub fn new(data: Entity<Data>, width: Width, cx: &mut Context<Self>) -> Self {
+        let sub = cx.observe(&data, |this, data, cx| {
+            this.snap = data.read(cx).snapshot();
+            cx.notify();
+        });
+        ActivityView {
+            snap: data.read(cx).snapshot(),
+            data,
+            width,
+            id: 0,
+            track: None,
+            track_state: TrackState::None,
+            hover: None,
+            hist_hover: None,
+            map: MapState::new(),
+            plots: Plots::default(),
+            _subscription: sub,
+        }
+    }
+
+    pub fn show(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.id = id;
+        self.hover = None;
+        self.load_track(id, cx);
+        cx.notify();
+    }
+
+    /// The activity before or after the shown one, in time.
+    pub fn step(&mut self, older: bool, cx: &mut Context<Self>) {
+        let Some(i) = self.snap.index_of(self.id) else { return };
+        let j = if older { i + 1 } else { i.wrapping_sub(1) };
+        if let Some(a) = self.snap.acts.get(j) {
+            cx.emit(Page::Activity(a.activity_id));
+        }
+    }
+
+    /// Reads the activity's file (downloading it first if needed).
+    fn load_track(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.track.as_ref().is_some_and(|t| t.id == id) || matches!(self.track_state, TrackState::Loading(x) if x == id) {
+            return;
+        }
+        self.track = None;
+        self.track_state = TrackState::Loading(id);
+        let task = self.data.update(cx, |d, cx| d.track(id, cx));
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |v, cx| {
+                if !matches!(v.track_state, TrackState::Loading(x) if x == id) {
+                    return;
+                }
+                match res {
+                    Ok((track, splits)) => {
+                        v.track = Some(Loaded { id, track: Arc::new(track), splits });
+                        v.track_state = TrackState::None;
+                    }
+                    Err(e) => v.track_state = TrackState::Failed(id, e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for ActivityView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = self.width.get(window);
+        let id = self.id;
+        let t = self.snap.theme;
+        let Some(a) = self.snap.activity(id).cloned() else {
             return page("activity", width).child(div().text_color(t.soft).child("Cette activité n'existe plus.")).into_any_element();
         };
         let s = a.sport();
         let wide = width >= 1180.0;
         let loaded = self.track.as_ref().filter(|l| l.id == id).map(|l| (l.track.clone(), l.splits.clone()));
-        let older = self.index_of(id).and_then(|i| self.acts.get(i + 1)).is_some();
-        let newer = self.index_of(id).is_some_and(|i| i > 0);
+        let older = self.snap.index_of(id).and_then(|i| self.snap.acts.get(i + 1)).is_some();
+        let newer = self.snap.index_of(id).is_some_and(|i| i > 0);
 
         let nav = div()
             .flex()
@@ -48,7 +148,7 @@ impl Home {
                     .text_color(t.soft)
                     .cursor_pointer()
                     .hover(|d| d.text_color(t.text))
-                    .on_click(cx.listener(|this, _, window, cx| this.set_view(View::Journal, window, cx)))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(Page::Journal)))
                     .child(icon(IconName::ChevronLeft, t.soft, 14.))
                     .child("Journal"),
             )
@@ -56,11 +156,11 @@ impl Home {
                 div()
                     .flex()
                     .gap(px(6.))
-                    .when(older, |d| d.child(button("older", "‹ Plus ancienne", false, t).on_click(cx.listener(|this, _, w, cx| this.step_activity(true, w, cx)))))
-                    .when(newer, |d| d.child(button("newer", "Plus récente ›", false, t).on_click(cx.listener(|this, _, w, cx| this.step_activity(false, w, cx))))),
+                    .when(older, |d| d.child(button("older", "‹ Plus ancienne", false, t).on_click(cx.listener(|this, _, _, cx| this.step(true, cx)))))
+                    .when(newer, |d| d.child(button("newer", "Plus récente ›", false, t).on_click(cx.listener(|this, _, _, cx| this.step(false, cx))))),
             );
 
-        let (rank, of) = act::rank(&self.acts, &a);
+        let (rank, of) = act::rank(&self.snap.acts, &a);
         let rank_text = match (rank, of) {
             (_, 1) => "Ta première dans ce sport.".to_string(),
             (1, n) => format!("Ta plus longue, sur {n}."),
@@ -127,9 +227,11 @@ impl Home {
 
         page("activity", width).gap(px(22.)).child(nav).child(head).child(figures).child(body).into_any_element()
     }
+}
 
+impl ActivityView {
     fn activity_map(&mut self, id: i64, track: Option<Arc<Track>>, wide: bool, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
+        let t = self.snap.theme;
         let height = if wide { 460. } else { 340. };
         let placeholder = |text: String, retry: bool, cx: &mut Context<Self>| {
             div()
@@ -162,10 +264,10 @@ impl Home {
             return placeholder("Pas de position GPS : activité en salle, ou sans GPS.".into(), false, cx);
         }
         let bbox = line_bbox(&line);
-        self.fit_map(Which::Activity, id as u64, bbox, false);
-        let view = self.act_map.view;
-        let bounds = self.act_map.bounds.get();
-        let hover = self.act_hover.and_then(|i| track.samples.get(i)).and_then(|s| Some([s.lat?, s.lon?]));
+        self.map.fit(id as u64, bbox, false);
+        let view = self.map.view;
+        let bounds = self.map.bounds.get();
+        let hover = self.hover.and_then(|i| track.samples.get(i)).and_then(|s| Some([s.lat?, s.lon?]));
         let (accent, ink, bg) = (t.accent, t.text, t.bg);
         let points = Arc::new(line);
         let overlay = canvas(
@@ -199,20 +301,20 @@ impl Home {
         .absolute()
         .size_full()
         .into_any_element();
-        div().h(px(height)).rounded(px(8.)).overflow_hidden().child(self.map_widget(Which::Activity, "act-map", Some(overlay), bbox, true, cx))
+        div().h(px(height)).rounded(px(8.)).overflow_hidden().child(map_widget(&self.map, |v: &mut ActivityView| &mut v.map, &self.data, "act-map", Some(overlay), bbox, true, cx))
     }
 
     fn profile_charts(&mut self, track: &Track, sport: Sport, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
+        let t = self.snap.theme;
         let p = profiles(track, sport);
-        let hover = self.act_hover;
+        let hover = self.hover;
         let at = |ys: &Arc<Vec<Option<f32>>>| hover.and_then(|i| ys.get(i).copied().flatten());
         let x_label = match hover.and_then(|i| p.xs.get(i)) {
             Some(x) if p.by_distance => format!("km {:.2}", x).replace('.', ","),
             Some(x) => format!("{:.0} min", x),
             None => String::new(),
         };
-        let bounds = self.plot("profiles");
+        let bounds = self.plots.get("profiles");
         let xs = p.xs.clone();
         let red = t.hue(0.0).1;
         let rows: Vec<(&'static str, Arc<Vec<Option<f32>>>, Hsla, bool, Box<dyn Fn(f32) -> String>)> = vec![
@@ -273,21 +375,21 @@ impl Home {
                         if b.contains(&e.position) && b.size.width > px(0.) {
                             let f = ((e.position.x - b.origin.x) / b.size.width).clamp(0.0, 1.0);
                             let (x0, x1) = (xs.first().copied().unwrap_or(0.0), xs.last().copied().unwrap_or(0.0));
-                            this.act_hover = nearest(&xs, x0 + f * (x1 - x0));
+                            this.hover = nearest(&xs, x0 + f * (x1 - x0));
                             cx.notify();
                         }
                     }))
                     .on_hover(cx.listener(|this, on: &bool, _, cx| {
                         if !on {
-                            this.act_hover = None;
+                            this.hover = None;
                             cx.notify();
                         }
                     })),
             )
     }
 
-    fn splits_table(&self, splits: &[crate::logic::fit::Split], track: &Track, sport: Sport) -> Div {
-        let t = self.theme;
+    fn splits_table(&self, splits: &[Split], track: &Track, sport: Sport) -> Div {
+        let t = self.snap.theme;
         let swim = sport == Sport::Swim;
         let fastest = splits.iter().filter(|s| s.metres >= 500.0).map(|s| s.seconds / s.metres).fold(f32::INFINITY, f32::min);
         let slowest = splits.iter().filter(|s| s.metres >= 500.0).map(|s| s.seconds / s.metres).fold(0.0, f32::max);
@@ -308,7 +410,7 @@ impl Home {
                     .child(cell(div().child("FC"), 56.))
                     .child(cell(div().child("D+"), 48.)),
             );
-        let splits_shown: Vec<crate::logic::fit::Split> = if swim { track.splits(100.0) } else { splits.to_vec() };
+        let splits_shown: Vec<Split> = if swim { track.splits(100.0) } else { splits.to_vec() };
         if splits_shown.is_empty() {
             return table.child(div().text_color(t.soft).child("Pas de distance enregistrée."));
         }
@@ -362,11 +464,11 @@ impl Home {
 
     /// The activity among the previous ones of its sport: one bar each, a click opens it.
     fn history(&self, a: &Activity, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
+        let t = self.snap.theme;
         let s = a.sport();
         let metric = if a.distance.is_some_and(|d| d > 0.0) { Metric::Distance } else { Metric::Time };
-        let start = self.index_of(a.activity_id).unwrap_or(0);
-        let mut past: Vec<&Activity> = self.acts[start..].iter().filter(|x| x.sport() == s).take(24).collect();
+        let start = self.snap.index_of(a.activity_id).unwrap_or(0);
+        let mut past: Vec<&Activity> = self.snap.acts[start..].iter().filter(|x| x.sport() == s).take(24).collect();
         past.reverse();
         let top = past.iter().map(|x| metric.of(x)).fold(1.0, f64::max);
         let readout = match self.act_hover_history(&past) {
@@ -393,7 +495,7 @@ impl Home {
                         this.hist_hover = if *on { Some(id) } else { this.hist_hover.filter(|h| *h != id) };
                         cx.notify();
                     }))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open(id, window, cx)))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
                     .child(div().w_full().h(px(h)).rounded_t(px(2.)).bg(if this_one {
                         t.accent
                     } else if self.hist_hover == Some(id) {

@@ -171,3 +171,19 @@ pub fn drag_window<E: InteractiveElement>(element: E) -> E {
         })
         .on_mouse_down(MouseButton::Right, |e, window, _| window.show_window_menu(e.position))
 }
+
+/// BGRA pixels into an image GPUI can draw.
+pub fn render_image(w: u32, h: u32, bgra: Vec<u8>) -> Option<RenderImage> {
+    let buf = image::RgbaImage::from_raw(w, h, bgra)?;
+    Some(RenderImage::new(vec![image::Frame::new(buf)]))
+}
+
+/// Plot areas, by name, as laid out at the last frame: hover reads positions against them.
+#[derive(Default)]
+pub struct Plots(std::collections::HashMap<&'static str, std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>>);
+
+impl Plots {
+    pub fn get(&mut self, name: &'static str) -> std::rc::Rc<std::cell::Cell<Bounds<Pixels>>> {
+        self.0.entry(name).or_default().clone()
+    }
+}
