@@ -30,6 +30,9 @@ fn main() {
                 // Linux: the app draws its frame and buttons, the same on X11 and Wayland.
                 #[cfg(target_os = "linux")]
                 window_decorations: Some(WindowDecorations::Client),
+                // The margin around the frame carries its shadow: it must stay see-through.
+                window_background: WindowBackgroundAppearance::Transparent,
+                window_min_size: Some(size(px(360.), px(240.))),
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| app::Home::new(window, cx)))

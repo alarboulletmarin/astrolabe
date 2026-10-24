@@ -201,10 +201,8 @@ pub struct Home {
     /// Plot areas, by name, as laid out at the last frame: hover reads positions against them.
     pub plots: HashMap<&'static str, Rc<Cell<Bounds<Pixels>>>>,
     /// Width the views really get, measured at the last frame: the window's frame and shadow
-    /// (drawn by the app on Wayland) make the viewport a poor guess.
+    /// (drawn by gpui-kit on Linux) make the viewport a poor guess.
     content_w: Rc<Cell<f32>>,
-    /// Window edge under the pointer, when the app draws the frame (Wayland on GNOME).
-    edge: Option<ResizeEdge>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -300,7 +298,6 @@ impl Home {
             tiles_busy: 0,
             plots: HashMap::new(),
             content_w: Rc::new(Cell::new(0.0)),
-            edge: None,
             _subscriptions: subs,
         };
         home.apply_appearance(window, cx);
@@ -1022,27 +1019,6 @@ pub fn presets(today: NaiveDate) -> [(&'static str, NaiveDate, NaiveDate); 6] {
     ]
 }
 
-/// Room around the window for its shadow, and where the edges can be grabbed to resize.
-const SHADOW: Pixels = px(10.);
-
-/// Window edge or corner under the pointer, within the shadow's margin.
-fn resize_edge(pos: Point<Pixels>, size: Size<Pixels>) -> Option<ResizeEdge> {
-    let m = SHADOW;
-    let (left, right) = (pos.x < m, pos.x > size.width - m);
-    let (top, bottom) = (pos.y < m, pos.y > size.height - m);
-    Some(match (top, bottom, left, right) {
-        (true, _, true, _) => ResizeEdge::TopLeft,
-        (true, _, _, true) => ResizeEdge::TopRight,
-        (_, true, true, _) => ResizeEdge::BottomLeft,
-        (_, true, _, true) => ResizeEdge::BottomRight,
-        (true, ..) => ResizeEdge::Top,
-        (_, true, ..) => ResizeEdge::Bottom,
-        (_, _, true, _) => ResizeEdge::Left,
-        (_, _, _, true) => ResizeEdge::Right,
-        _ => return None,
-    })
-}
-
 impl Home {
     /// Minimise, maximise, close: a floating pill at the top right, which also moves the window.
     fn window_controls(&self, window: &Window) -> Div {
@@ -1088,19 +1064,12 @@ impl Home {
 impl Render for Home {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        // On Linux the app draws its frame (GNOME on Wayland gives none): rounded corners, shadow,
-        // edges to resize, the window buttons. Elsewhere the system does it.
-        let tiling = match window.window_decorations() {
-            Decorations::Client { tiling } => Some(tiling),
-            Decorations::Server => None,
-        };
-        let client = tiling.is_some();
-        let framed = tiling.is_some_and(|t| !t.is_tiled()) && !window.is_maximized() && !window.is_fullscreen();
-        let inset = if framed { SHADOW } else { px(0.) };
-        window.set_client_inset(inset);
+        // On Linux gpui-kit draws the frame (shadow, border, resize edges) and the app adds the
+        // window buttons. Elsewhere the system does it all.
+        let client = matches!(window.window_decorations(), Decorations::Client { .. });
         crate::ui::set_top(if client { 52.0 } else { 28.0 });
         let measured = self.content_w.get();
-        let width = if measured > 0.0 { measured } else { (window.viewport_size().width - inset * 2.) / px(1.) - 46.0 };
+        let width = if measured > 0.0 { measured } else { window.viewport_size().width / px(1.) - 46.0 };
         let body = match self.view {
             View::Journal => self.journal(width, cx).into_any_element(),
             View::Activity(id) => self.activity_page(id, width, window, cx).into_any_element(),
@@ -1109,7 +1078,7 @@ impl Render for Home {
             View::Heatmap => self.heatmap(window, cx).into_any_element(),
             View::Settings => self.settings(width, cx).into_any_element(),
         };
-        let content = div()
+        div()
             .size_full()
             .relative()
             .flex()
@@ -1118,15 +1087,6 @@ impl Render for Home {
             .text_color(t.text)
             .font_family(SANS)
             .text_size(px(13.))
-            .when(framed, |d| {
-                d.rounded(px(12.)).border_1().border_color(t.border).shadow(vec![BoxShadow {
-                    color: hsla(0., 0., 0., 0.35),
-                    offset: point(px(0.), px(2.)),
-                    blur_radius: SHADOW / 2.,
-                    spread_radius: px(0.),
-                    inset: false,
-                }])
-            })
             .track_focus(&self.focus)
             .key_context(match self.view {
                 View::Journal => "Journal",
@@ -1169,11 +1129,7 @@ impl Render for Home {
                     .child(body)
             })
             .child(self.status_line(cx))
-            .when(client, |d| d.child(self.window_controls(window)));
-
-        // The transparent margin carries the shadow and serves as the resize handle.
-        div()
-            .size_full()
+            .when(client, |d| d.child(self.window_controls(window)))
             // Alt + drag, anywhere: moves the window.
             .when(client, |d| {
                 d.capture_any_mouse_down(|e, window, cx| {
@@ -1183,32 +1139,5 @@ impl Render for Home {
                     }
                 })
             })
-            .when(framed, |d| {
-                d.p(SHADOW)
-                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
-                        let edge = resize_edge(e.position, window.viewport_size());
-                        if edge != this.edge {
-                            this.edge = edge;
-                            cx.notify();
-                        }
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, _| {
-                            if let Some(edge) = this.edge {
-                                window.start_window_resize(edge)
-                            }
-                        }),
-                    )
-                    .when_some(self.edge, |d, edge| {
-                        d.cursor(match edge {
-                            ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
-                            ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
-                            ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorStyle::ResizeUpLeftDownRight,
-                            ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
-                        })
-                    })
-            })
-            .child(content)
     }
 }
