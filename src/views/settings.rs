@@ -1,6 +1,7 @@
 //! Settings: the Garmin key, the map tiles, and where the data goes. A centred column, like a note.
 
 use crate::data::{Data, Status};
+use crate::platform::secrets::Store;
 use crate::platform::{store, tiles};
 use crate::ui::{button, heading, icon, pill, title};
 use crate::views::{Width, tracks_progress};
@@ -46,6 +47,7 @@ impl Render for SettingsView {
         let d = self.data.read(cx);
         let t = d.theme;
         let has = d.key.is_some();
+        let no_store = if let Store::Vault(why) = &d.key_store { Some(why.clone()) } else { None };
         let checking = d.busy() && d.key_error.is_none();
         let key_error = d.key_error.clone();
         let fact = |name: IconName, text: String| {
@@ -73,10 +75,13 @@ impl Render for SettingsView {
                 .child(
                     section(12.)
                         .child(div().flex().items_center().gap(px(10.)).child(heading("Clé API Garmin")).child(if has {
-                            pill("dans le trousseau", t.good())
+                            pill(if no_store.is_some() { "chiffrée dans l'app" } else { "dans le trousseau" }, t.good())
                         } else {
                             pill("aucune", (t.panel, t.soft))
                         }))
+                        .when_some(no_store.clone(), |d, why| {
+                            d.child(div().text_color(t.soft).child(format!("{why} La clé est donc chiffrée par l'app, dans un fichier que toi seul peux lire.")))
+                        })
                         .child(div().text_color(t.soft).child(
                             "Garmin Connect, sur le web : Paramètres du compte › Clé API personnelle. Elle ne s'affiche qu'une fois : colle-la ici directement.",
                         ))
@@ -136,7 +141,11 @@ impl Render for SettingsView {
                         .child(heading("Où vont tes données"))
                         .child(fact(
                             IconName::Lock,
-                            "La clé est confiée au trousseau du système (GNOME Keyring, KWallet, Trousseau macOS, Gestionnaire d'identifiants Windows) : chiffrée sur le disque, déverrouillée avec ta session. L'app ne l'écrit jamais dans un fichier.".into(),
+                            if no_store.is_some() {
+                                "Faute de trousseau système, la clé est chiffrée (XChaCha20-Poly1305) dans un fichier de l'app, et la clé qui l'ouvre est gardée à part, dans ton dossier de configuration. L'une sans l'autre ne sert à rien ; l'app ne l'écrit jamais en clair.".into()
+                            } else {
+                                "La clé est confiée au trousseau du système (GNOME Keyring, KWallet, Trousseau macOS, Gestionnaire d'identifiants Windows) : chiffrée sur le disque, déverrouillée avec ta session. L'app ne l'écrit jamais dans un fichier.".into()
+                            },
                         ))
                         .child(fact(
                             IconName::Globe,

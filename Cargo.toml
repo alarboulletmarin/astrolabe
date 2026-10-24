@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chacha20poly1305 = "0.11.0"
 chrono = { version = "0.4.45", features = ["serde"] }
 fitparser = "0.11"
 gpui-kit = "0.8.0"

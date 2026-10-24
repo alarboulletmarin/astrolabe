@@ -67,6 +67,8 @@ pub struct Data {
     pub theme: Theme,
     pub key: Option<String>,
     pub key_loaded: bool,
+    /// Where the key is kept on this machine (known once `key_loaded`).
+    pub key_store: secrets::Store,
     /// Why the last key was refused.
     pub key_error: Option<String>,
     token: Option<(String, Instant)>,
@@ -108,6 +110,7 @@ impl Data {
             theme,
             key: None,
             key_loaded: false,
+            key_store: secrets::Store::System,
             key_error: None,
             token: None,
             status: Status::Busy("Ouverture…".into()),
@@ -138,7 +141,7 @@ impl Data {
     /// Cache, derived tracks and keyring are read off the UI thread (the keyring may wait for an unlock prompt).
     fn start(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let (acts, derived, key) = cx
+            let (acts, derived, (key_store, key)) = cx
                 .background_executor()
                 .spawn(async { (store::load_cache(), store::load_derived(), secrets::load_key()) })
                 .await;
@@ -147,6 +150,7 @@ impl Data {
                 this.derived = Arc::new(derived);
                 this.key_loaded = true;
                 this.status = Status::Idle;
+                this.key_store = key_store;
                 match key {
                     Ok(Some(k)) => {
                         this.key = Some(k);
@@ -453,6 +457,7 @@ impl Data {
             }
         };
         self.key_error = None;
+        let key_store = self.key_store.clone();
         self.status = Status::Busy("Vérification de la clé…".into());
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -462,7 +467,7 @@ impl Data {
                     let key = key.clone();
                     async move {
                         let t = garmin::token(&key)?;
-                        secrets::store_key(&key)?;
+                        secrets::store_key(&key, &key_store)?;
                         Ok::<_, String>(t)
                     }
                 })
@@ -497,7 +502,7 @@ impl Data {
                     Ok(()) => {
                         this.key = None;
                         this.token = None;
-                        this.note = Some("clé retirée du trousseau".into());
+                        this.note = Some("clé retirée".into());
                     }
                     Err(e) => this.key_error = Some(e),
                 }

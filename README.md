@@ -17,7 +17,7 @@ An astrolabe is the old instrument of astronomers and sailors: you take the heig
 
 ## Your data
 
-- **Garmin personal API key**: create it on the Garmin Connect website (*Account settings › Personal API key*) and paste it in the settings. The app checks it with Garmin, then hands it to your system's keyring (GNOME Keyring, KWallet, macOS Keychain, Windows Credential Manager). It is never written to a file or logged.
+- **Garmin personal API key**: create it on the Garmin Connect website (*Account settings › Personal API key*) and paste it in the settings. The app checks it with Garmin, then hands it to your system's keyring (GNOME Keyring, KWallet, macOS Keychain, Windows Credential Manager). Where the system has no keyring, the app encrypts it itself (XChaCha20-Poly1305) in a file only you can read, with the key that opens it kept in a separate file in your config folder. It is never written in the clear or logged.
 - **Sync**: at launch, the list of your activities, then the file of each one (GPS track, heart rate, laps), downloaded in the background and kept on disk. A limit reached at Garmin pauses the download, which resumes at the next sync.
 - **On your machine**: activities and their files live in `~/.local/share/astrolabe`, readable by you only. Nothing goes anywhere else.
 - **Maps**: tiles come from OpenStreetMap, are cached in `~/.cache/astrolabe`, and are asked for without anything that identifies you. Another tile server can be set in the settings.
@@ -48,7 +48,7 @@ cd astrolabe
 cargo run --release
 ```
 
-On Linux the keyring needs a Secret Service (GNOME Keyring, KWallet or KeePassXC).
+On Linux the system keyring is a Secret Service (GNOME Keyring, KWallet or KeePassXC); without one, the app falls back to its own encrypted file, with nothing to install.
 
 ## Development
 
