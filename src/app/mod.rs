@@ -6,6 +6,7 @@ use crate::logic::history::History;
 use crate::ui::icon;
 use crate::ui::theme::{MONO, SANS, Theme};
 use crate::views::activity::ActivityView;
+use crate::views::dashboard::DashboardView;
 use crate::views::heatmap::HeatmapView;
 use crate::views::journal::JournalView;
 use crate::views::records::RecordsView;
@@ -39,6 +40,7 @@ pub struct Shell {
     data: Entity<Data>,
     page: Page,
     history: History<Page>,
+    dashboard: Entity<DashboardView>,
     journal: Entity<JournalView>,
     activity: Entity<ActivityView>,
     stats: Entity<StatsView>,
@@ -56,6 +58,7 @@ impl Shell {
         KitTheme::change(if theme.dark { ThemeMode::Dark } else { ThemeMode::Light }, Some(window), cx);
         let data = cx.new(|cx| Data::new(theme, cx));
         let width = Width::default();
+        let dashboard = cx.new(|cx| DashboardView::new(data.clone(), width.clone(), cx));
         let journal = cx.new(|cx| JournalView::new(data.clone(), width.clone(), window, cx));
         let activity = cx.new(|cx| ActivityView::new(data.clone(), width.clone(), cx));
         let stats = cx.new(|cx| StatsView::new(data.clone(), width.clone(), window, cx));
@@ -71,8 +74,9 @@ impl Shell {
             cx.observe(&data, |_, _, cx| cx.notify()),
             cx.subscribe_in(&data, window, |this, _, e: &DataEvent, window, cx| match e {
                 DataEvent::NeedKey => this.go(Page::Settings, window, cx),
-                DataEvent::KeyReady => this.go(Page::Journal, window, cx),
+                DataEvent::KeyReady => this.go(Page::Dashboard, window, cx),
             }),
+            cx.subscribe_in(&dashboard, window, Self::follow),
             cx.subscribe_in(&journal, window, Self::follow),
             cx.subscribe_in(&activity, window, Self::follow),
             cx.subscribe_in(&stats, window, Self::follow),
@@ -81,7 +85,7 @@ impl Shell {
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Shell { data, page: Page::Journal, history: History::new(Page::Journal), journal, activity, stats, records, heatmap, settings, focus, width, _subscriptions: subs }
+        Shell { data, page: Page::Dashboard, history: History::new(Page::Dashboard), dashboard, journal, activity, stats, records, heatmap, settings, focus, width, _subscriptions: subs }
     }
 
     /// Shows `page` and makes it the newest history entry. Moving from one activity to another
@@ -190,6 +194,7 @@ impl Shell {
             .gap(px(6.))
             .child(crate::ui::drag_window(div().id("rail-logo").w_full().flex().justify_center().pb(px(10.)).font_family(MONO).font_weight(FontWeight::BOLD).text_size(px(15.)).text_color(t.accent).child("m.")))
             .child(self.travel_buttons(cx))
+            .child(item("rail-dashboard", Page::Dashboard, IconName::LayoutDashboard, "Aujourd'hui", cx))
             .child(item("rail-journal", Page::Journal, IconName::NotebookText, "Journal", cx))
             .child(item("rail-stats", Page::Stats, IconName::ChartColumn, "Statistiques", cx))
             .child(item("rail-records", Page::Records, IconName::Trophy, "Records", cx))
@@ -342,6 +347,7 @@ impl Render for Shell {
         let client = matches!(window.window_decorations(), Decorations::Client { .. });
         crate::ui::set_top(if client { 52.0 } else { 28.0 });
         let body = match self.page {
+            Page::Dashboard => self.dashboard.clone().into_any_element(),
             Page::Journal => self.journal.clone().into_any_element(),
             Page::Activity(_) => self.activity.clone().into_any_element(),
             Page::Stats => self.stats.clone().into_any_element(),
@@ -397,7 +403,8 @@ impl Render for Shell {
                         canvas(
                             move |b, window, _| {
                                 let w = b.size.width / px(1.);
-                                // A new width lays the views out again at the next frame.
+                                // A new width lays the views out again at the next frame. (`refresh` does
+                                // nothing while drawing: a frame has to be asked for.)
                                 if (cell.get() - w).abs() > 0.5 {
                                     cell.set(w);
                                     window.request_animation_frame();

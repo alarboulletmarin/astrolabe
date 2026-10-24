@@ -110,15 +110,27 @@ impl Activity {
 
     /// Pace for foot sports, speed for bike, pace per 100 m for swimming.
     pub fn speed_label(&self) -> Option<String> {
-        let (d, t) = (self.distance?, self.duration?);
-        if d <= 0.0 || t <= 0.0 {
-            return None;
-        }
-        Some(match self.sport() {
-            Sport::Bike => format!("{:.1}\u{a0}km/h", d / t * 3.6).replace('.', ","),
-            Sport::Swim => format!("{} /100m", fmt_clock(t / d * 100.0)),
-            _ => format!("{} /km", fmt_clock(t / d * 1000.0)),
-        })
+        speed(self.sport(), self.distance?, self.duration?)
+    }
+}
+
+/// The same for any distance (metres) done in a time (seconds): a total as well as one outing.
+pub fn speed(sport: Sport, distance: f64, duration: f64) -> Option<String> {
+    if distance <= 0.0 || duration <= 0.0 {
+        return None;
+    }
+    Some(match sport {
+        Sport::Bike => format!("{:.1}\u{a0}km/h", distance / duration * 3.6).replace('.', ","),
+        Sport::Swim => format!("{} /100m", fmt_clock(duration / distance * 100.0)),
+        _ => format!("{} /km", fmt_clock(duration / distance * 1000.0)),
+    })
+}
+
+impl Sport {
+    /// Whether a distance means something for it: a strength session has none, and "other" is
+    /// anything, so its kilometres add up to nothing.
+    pub fn has_distance(self) -> bool {
+        !matches!(self, Sport::Strength | Sport::Other)
     }
 }
 

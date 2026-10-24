@@ -116,6 +116,46 @@ pub fn podium(acts: &[Activity], derived: &HashMap<i64, Derived>, board: &Board,
     out
 }
 
+/// A record that beat the one before it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Broken {
+    pub board: &'static str,
+    pub row: &'static str,
+    pub sport: Sport,
+    pub kind: Kind,
+    pub entry: Entry,
+    /// The record it beat, in the same unit as `entry.value`.
+    pub previous: f64,
+}
+
+/// The `n` most recent times a record was beaten, over every row of the boards (of one sport, or
+/// of all). The first outing in a row only sets a mark: there is nothing to beat yet; a tie does not
+/// beat it either.
+pub fn broken(acts: &[Activity], derived: &HashMap<i64, Derived>, sport: Option<Sport>, n: usize) -> Vec<Broken> {
+    let mut out = Vec::new();
+    for board in BOARDS.iter().filter(|b| sport.is_none_or(|s| s == b.sport)) {
+        for (row, kind) in board.rows {
+            let mut all = podium(acts, derived, board, *kind, None, usize::MAX);
+            all.sort_by_key(|e| (e.date, e.id));
+            let mut best: Option<f64> = None;
+            for entry in all {
+                let better = |prev: f64| if matches!(kind, Kind::Effort(_)) { entry.value < prev } else { entry.value > prev };
+                match best {
+                    Some(prev) if better(prev) => {
+                        out.push(Broken { board: board.title, row, sport: board.sport, kind: *kind, entry, previous: prev });
+                        best = Some(entry.value);
+                    }
+                    None => best = Some(entry.value),
+                    _ => {}
+                }
+            }
+        }
+    }
+    out.sort_by_key(|b| std::cmp::Reverse((b.entry.date, b.entry.id)));
+    out.truncate(n);
+    out
+}
+
 /// The value as it reads: a time and its pace for an effort.
 pub fn show(kind: Kind, sport: Sport, v: f64) -> (String, String) {
     match kind {
@@ -146,6 +186,34 @@ mod tests {
             "distance": dist, "duration": dur, "elevationGain": climb
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn records_beaten_newest_first() {
+        use super::broken;
+        let acts = vec![
+            a(1, "2026-01-01 07:00:00", "running", 10_000.0, 3000.0, 0.0),
+            a(2, "2026-02-01 07:00:00", "running", 8_000.0, 2400.0, 0.0),
+            a(3, "2026-03-01 07:00:00", "running", 12_000.0, 3000.0, 0.0),
+            a(4, "2026-04-01 07:00:00", "running", 12_000.0, 3000.0, 0.0),
+            a(5, "2026-05-01 07:00:00", "cycling", 50_000.0, 7200.0, 300.0),
+            a(6, "2026-06-01 07:00:00", "cycling", 60_000.0, 7200.0, 300.0),
+        ];
+        let eff = |s: f32| Derived { line: vec![], efforts: vec![Effort { metres: 5000.0, seconds: s }] };
+        let derived: HashMap<i64, Derived> = [(1, eff(1500.0)), (2, eff(1300.0)), (3, eff(1300.0)), (4, eff(1250.0))].into();
+        let all = broken(&acts, &derived, None, 10);
+        let line: Vec<_> = all.iter().map(|b| (b.row, b.entry.id, b.previous)).collect();
+        // Newest first. Outing 1 only set the marks; 3 tied the 5 km (not beaten); 4 beat it, and
+        // beat the longest run (12 km in 3 and 4: 4 ties 3, so only 3 beat 10 km).
+        assert_eq!(line, [("Plus longue sortie", 6, 50_000.0), ("5 km", 4, 1300.0), ("Plus longue course", 3, 10_000.0), ("5 km", 2, 1500.0)]);
+        // One sport only, and a cap.
+        assert_eq!(broken(&acts, &derived, Some(Sport::Bike), 10).len(), 1);
+        assert_eq!(broken(&acts, &derived, Some(Sport::Swim), 10), []);
+        assert_eq!(broken(&acts, &derived, None, 2).len(), 2);
+        assert!(broken(&acts, &derived, None, 0).is_empty());
+        assert!(broken(&[], &HashMap::new(), None, 5).is_empty());
+        // No tracks yet: distances still count, efforts cannot.
+        assert!(broken(&acts, &HashMap::new(), Some(Sport::Run), 5).iter().all(|b| matches!(b.kind, Kind::Longest)));
     }
 
     #[test]
