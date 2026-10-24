@@ -26,8 +26,6 @@ const BARS: f32 = 150.0;
 const AXIS: f32 = 52.0;
 /// A record shows here while it is this fresh, in days.
 const FRESH: u64 = 14;
-/// The content stops growing past this width: wider, the bars and the rows only spread out.
-const MAX_W: f32 = 1120.0;
 
 pub struct DashboardView {
     snap: Snapshot,
@@ -87,7 +85,8 @@ fn stat(label: String, value: String, notes: [String; 2], t: Theme) -> Div {
         .flex()
         .flex_col()
         .gap(px(4.))
-        .min_w(px(180.))
+        .flex_1()
+        .min_w(px(200.))
         .child(div().text_size(px(12.)).text_color(t.soft).child(label))
         .child(
             div()
@@ -138,7 +137,7 @@ fn outing_row(id: (&'static str, usize), date: Option<String>, sport: Sport, lab
 impl Render for DashboardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let width = self.width.get(window);
-        let inner = (width - 2.0 * crate::ui::pad(width)).min(MAX_W);
+        let inner = width - 2.0 * crate::ui::pad(width);
         let t = self.snap.theme;
         let today = today();
         let head = div()
@@ -320,8 +319,10 @@ impl Render for DashboardView {
             let names_w = 30.0;
             let room = inner - names_w;
             let n = (((room + gap) / (8.0 + gap)).floor() as usize).clamp(4, HEAT_WEEKS);
-            // Whole pixels: the cells are snapped to them, and fractions would add up past the width.
-            let cell = ((room + gap) / n as f32 - gap).clamp(8.0, 18.0).floor();
+            // The width is filled: the cells widen, their height stops at 18 px. Whole pixels: the
+            // cells are snapped to them, and fractions would add up past the width.
+            let cell_w = ((room + gap) / n as f32 - gap).max(8.0).floor();
+            let cell = cell_w.min(18.0);
             let days = cal::by_day(acts, sport);
             let seconds = |d: &NaiveDate| days.get(d).map_or(0.0, |l| l.iter().map(|i| acts[*i].duration.unwrap_or(0.0).max(0.0)).sum::<f64>());
             let mondays = dash::mondays(today, n);
@@ -332,7 +333,7 @@ impl Render for DashboardView {
             let columns = mondays.iter().enumerate().map(|(w, monday)| {
                 div().flex().flex_col().gap(px(gap)).children((0..7u64).map(|k| {
                     let day = *monday + Days::new(k);
-                    let slot = div().size(px(cell)).flex_none();
+                    let slot = div().w(px(cell_w)).h(px(cell)).flex_none();
                     if day > today {
                         return slot.into_any_element();
                     }
@@ -351,7 +352,7 @@ impl Render for DashboardView {
             });
             let months = mondays.iter().map(|m| {
                 let first = (0..7).map(|k| *m + Days::new(k)).find(|d| d.day() == 1);
-                div().w(px(cell)).flex_none().whitespace_nowrap().children(first.map(|d| month_short(d.month0())))
+                div().w(px(cell_w)).flex_none().whitespace_nowrap().children(first.map(|d| month_short(d.month0())))
             });
             let names = ["lun", "", "mer", "", "ven", "", ""];
             div()
@@ -413,20 +414,29 @@ impl Render for DashboardView {
             }));
         let since = today - Days::new(FRESH - 1);
         let fresh: Vec<Broken> = records::broken(acts, &self.snap.derived, sport, 5).into_iter().filter(|b| b.entry.date >= since).collect();
-        let records = (!fresh.is_empty()).then(|| {
-            div().flex().flex_col().gap(px(2.)).child(div().pb(px(6.)).child(heading("Records de ces deux semaines"))).children(fresh.into_iter().enumerate().map(|(k, b)| {
+        let records = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(div().pb(px(6.)).child(heading("Records de ces deux semaines")))
+            .when(fresh.is_empty(), |d| d.child(div().text_color(t.soft).child("Aucun record battu ces deux dernières semaines.")))
+            .children(fresh.into_iter().enumerate().map(|(k, b)| {
                 let id = b.entry.id;
                 let (now, _) = records::show(b.kind, b.sport, b.entry.value);
                 let (was, _) = records::show(b.kind, b.sport, b.previous);
                 outing_row(("dash-record", k), Some(fr_short(b.entry.date)).filter(|_| !narrow), b.sport, format!("{} · {}", b.row, b.board), [now, format!("avant {was}")], t)
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
-            }))
-        });
-        let bottom = div().flex().when(inner < 860.0, |d| d.flex_col()).gap(px(40.)).child(recent.flex_1().min_w_0().max_w(px(640.))).when_some(records, |d, r| d.child(r.flex_1().min_w_0()));
+            }));
+        let bottom = div().flex().when(inner < 860.0, |d| d.flex_col()).gap(px(40.)).child(recent.flex_1().min_w_0()).child(records.flex_1().min_w_0());
 
         page("dashboard", width)
             .track_scroll(self.width.scroll())
-            .child(div().w_full().max_w(px(MAX_W)).flex().flex_col().gap(px(36.)).child(head).child(figures).child(chart).child(regularity).child(bottom))
+            .gap(px(36.))
+            .child(head)
+            .child(figures)
+            .child(chart)
+            .child(regularity)
+            .child(bottom)
             .into_any_element()
     }
 }
