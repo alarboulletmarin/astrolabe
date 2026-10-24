@@ -1,7 +1,7 @@
 //! Settings: the Garmin key, the map tiles, and where the data goes. A centred column, like a note.
 
 use crate::app::Home;
-use crate::garmin;
+use crate::platform::store;
 use crate::ui::{button, heading, icon, pill, title};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
@@ -112,7 +112,7 @@ impl Home {
                         .child(fact(
                             IconName::HardDrive,
                             {
-                                let dir = garmin::data_dir().display().to_string();
+                                let dir = store::data_dir().display().to_string();
                                 let home = std::env::var("HOME").unwrap_or_default();
                                 let dir = if !home.is_empty() && dir.starts_with(&home) { dir.replacen(&home, "~", 1) } else { dir };
                                 format!("Tes activités et leurs traces restent sur ta machine, dans {dir}, lisibles par toi seul.")
@@ -129,7 +129,7 @@ impl Home {
         let f = &self.fetch;
         let (read, total) = (self.derived.len().min(self.acts.len()), self.acts.len());
         let share = if total > 0 { read as f32 / total as f32 } else { 0.0 };
-        let g = |n: usize| crate::activity::group(n as i64);
+        let g = |n: usize| crate::logic::activity::group(n as i64);
         div()
             .flex()
             .flex_col()

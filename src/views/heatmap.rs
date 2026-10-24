@@ -2,11 +2,12 @@
 //! year; a click on the map lists the activities that went through that spot.
 
 use crate::app::Home;
-use crate::journal::{name, sports_present};
-use crate::map;
-use crate::mapview::Which;
-use crate::theme::blend;
-use crate::ui::{fr_short, heading, icon, num, segmented, sport_tag};
+use crate::logic::journal::{name, sports_present};
+use crate::logic::map;
+use crate::ui::format::{fr_short};
+use crate::ui::theme::blend;
+use crate::ui::{heading, icon, num, segmented, sport_tag};
+use crate::views::map::Which;
 use chrono::Datelike;
 use gpui_kit::assets::IconName;
 use gpui_kit::{prelude::FluentBuilder, *};
@@ -116,7 +117,7 @@ impl Home {
             .child(div().text_size(px(12.)).text_color(t.soft).child(if ids.is_empty() {
                 "Aucune trace GPS ici pour l'instant : elles arrivent avec la synchronisation.".to_string()
             } else {
-                format!("{} activités tracées · {}", crate::activity::group(ids.len() as i64), crate::activity::fmt_km(km))
+                format!("{} activités tracées · {}", crate::logic::activity::group(ids.len() as i64), crate::logic::activity::fmt_km(km))
             }))
             .child(div().flex().flex_col().gap(px(5.)).child(div().text_size(px(12.)).text_color(t.soft).child("Sports")).child(sports))
             .child(div().flex().flex_col().gap(px(5.)).child(div().text_size(px(12.)).text_color(t.soft).child("Année")).child(year))

@@ -1,11 +1,12 @@
 //! Statistics, set to the day: a measure, a grouping, any range, any sports, bars or a running
 //! total, compared with the period before or the year before. A click on a group lists it.
 
-use crate::activity::{self as act, Activity, Group, Measure, Point, Query, Sport, fmt_clock, fmt_duration, fmt_km, fmt_m};
 use crate::app::{Chart, Compare, Home, Menu, presets, today};
-use crate::journal::{name, sports_present};
-use crate::theme::blend;
-use crate::ui::{fr_day, fr_short, heading, icon, month_short, num, pad, page, segmented, sport_tag, title, totals_line};
+use crate::logic::activity::{self as act, Activity, Group, Measure, Point, Query, Sport, fmt_clock, fmt_duration, fmt_km, fmt_m};
+use crate::logic::journal::{name, sports_present};
+use crate::ui::format::{fr_day, fr_short, month_short, totals_line};
+use crate::ui::theme::blend;
+use crate::ui::{heading, icon, num, pad, page, segmented, sport_tag, title};
 use gpui_kit::assets::IconName;
 use chrono::{Datelike, Days, NaiveDate};
 use gpui_kit::component::date_picker::DatePicker;
@@ -895,7 +896,7 @@ impl Home {
 #[cfg(test)]
 mod tests {
     use super::{group_label, period_label, ticks};
-    use crate::activity::Group;
+    use crate::logic::activity::Group;
     use chrono::NaiveDate;
 
     #[test]

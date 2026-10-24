@@ -1,13 +1,13 @@
 //! The window: state, background work (keyring, sync, tracks, tiles, heat), the rail and the
 //! status line. Each view is an `impl Home` of its own file.
 
-use crate::activity::{Activity, Group, Measure, Query, Sport, week_start};
-use crate::fit::{Derived, Split, Track};
-use crate::garmin::{self, Fail};
-use crate::journal::Row;
-use crate::map;
-use crate::theme::{MONO, SANS, Theme};
+use crate::logic::activity::{Activity, Group, Measure, Query, Sport, week_start};
+use crate::logic::fit::{Derived, Split, Track};
+use crate::logic::journal::Row;
+use crate::logic::map;
+use crate::platform::{garmin::{self, Fail}, secrets, store, tiles};
 use crate::ui::icon;
+use crate::ui::theme::{MONO, SANS, Theme};
 use chrono::{Datelike, Days, Local, NaiveDate};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -183,7 +183,7 @@ pub struct Home {
     pub hist_hover: Option<i64>,
     pub act_map: MapState,
     /// A click (a press and release without moving) on a map, in map pixels.
-    pub map_click: Option<(crate::mapview::Which, (f64, f64))>,
+    pub map_click: Option<(crate::views::map::Which, (f64, f64))>,
     /// When the wheel last tried to zoom a map without Ctrl: the hint shows a moment.
     pub map_hint: Option<Instant>,
 
@@ -213,10 +213,10 @@ pub fn today() -> NaiveDate {
 impl Home {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let key_input = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("GCDC_…"));
-        let settings = garmin::load_settings();
+        let settings = store::load_settings();
         let tiles_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder(garmin::DEFAULT_TILES)
+                .placeholder(tiles::DEFAULT_TILES)
                 .default_value(settings.get("tiles").cloned().unwrap_or_default())
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Chercher une activité"));
@@ -370,8 +370,8 @@ impl Home {
 
     /// Rebuilds the journal rows after the data, the filter or the search changed.
     pub fn refresh(&mut self, cx: &App) {
-        let needle = crate::journal::fold(&self.search.read(cx).value());
-        self.rows = crate::journal::rows(&self.acts, self.sport, &needle);
+        let needle = crate::logic::journal::fold(&self.search.read(cx).value());
+        self.rows = crate::logic::journal::rows(&self.acts, self.sport, &needle);
     }
 
     pub fn select_step(&mut self, step: isize, cx: &mut Context<Self>) {
@@ -394,7 +394,7 @@ impl Home {
         cx.spawn(async move |this, cx| {
             let (acts, derived, key) = cx
                 .background_executor()
-                .spawn(async { (garmin::load_cache(), garmin::load_derived(), garmin::load_key()) })
+                .spawn(async { (store::load_cache(), store::load_derived(), secrets::load_key()) })
                 .await;
             this.update(cx, |this, cx| {
                 this.acts = acts;
@@ -460,7 +460,7 @@ impl Home {
                             return false;
                         }
                         if n > 0 {
-                            h.status = Status::Busy(format!("Synchronisation : {} activités reçues…", crate::activity::group(n as i64)));
+                            h.status = Status::Busy(format!("Synchronisation : {} activités reçues…", crate::logic::activity::group(n as i64)));
                             cx.notify();
                         }
                         true
@@ -479,7 +479,7 @@ impl Home {
                         .spawn(async move {
                             let all = garmin::sync(&token, &known, &seen)?;
                             let added = all.len() - known.len();
-                            garmin::save_cache(&all)?;
+                            store::save_cache(&all)?;
                             Ok::<_, String>((all, added))
                         })
                         .await
@@ -517,7 +517,7 @@ impl Home {
             return;
         }
         let todo: Vec<(i64, String)> =
-            self.acts.iter().filter(|a| !self.derived.contains_key(&a.activity_id)).map(|a| (a.activity_id, crate::journal::name(a))).collect();
+            self.acts.iter().filter(|a| !self.derived.contains_key(&a.activity_id)).map(|a| (a.activity_id, crate::logic::journal::name(a))).collect();
         if todo.is_empty() {
             return;
         }
@@ -550,9 +550,9 @@ impl Home {
                         match garmin::download_fit(&token, id)? {
                             None => Ok(Derived::default()),
                             Some(zip) => {
-                                garmin::save_fit(id, &zip).map_err(Fail::Other)?;
-                                let track = crate::fit::unzip(&zip).and_then(|f| crate::fit::parse(&f)).map_err(Fail::Other)?;
-                                Ok(crate::fit::derive(&track))
+                                store::save_fit(id, &zip).map_err(Fail::Other)?;
+                                let track = crate::logic::fit::unzip(&zip).and_then(|f| crate::logic::fit::parse(&f)).map_err(Fail::Other)?;
+                                Ok(crate::logic::fit::derive(&track))
                             }
                         }
                     })
@@ -608,7 +608,7 @@ impl Home {
 
     fn save_derived(&self, cx: &mut Context<Self>) {
         let d = self.derived.clone();
-        cx.background_executor().spawn(async move { garmin::save_derived(&d) }).detach();
+        cx.background_executor().spawn(async move { store::save_derived(&d) }).detach();
     }
 
     /// Reads the activity's file (downloading it first if needed) for the activity page.
@@ -619,7 +619,7 @@ impl Home {
         self.track = None;
         self.track_state = TrackState::Loading(id);
         cx.spawn(async move |this, cx| {
-            let local = cx.background_executor().spawn(async move { garmin::load_fit(id) }).await;
+            let local = cx.background_executor().spawn(async move { store::load_fit(id) }).await;
             let zip = match local {
                 Some(z) => Ok(Some(z)),
                 None => match Self::token(&this, cx).await {
@@ -636,10 +636,10 @@ impl Home {
                 Ok(Some(zip)) => {
                     cx.background_executor()
                         .spawn(async move {
-                            garmin::save_fit(id, &zip)?;
-                            let track = crate::fit::parse(&crate::fit::unzip(&zip)?)?;
+                            store::save_fit(id, &zip)?;
+                            let track = crate::logic::fit::parse(&crate::logic::fit::unzip(&zip)?)?;
                             let splits = track.splits(1000.0);
-                            let derived = crate::fit::derive(&track);
+                            let derived = crate::logic::fit::derive(&track);
                             Ok::<_, String>((track, splits, derived))
                         })
                         .await
@@ -681,7 +681,7 @@ impl Home {
         }
         self.tiles.insert(k, Tile::Loading);
         self.tiles_busy += 1;
-        let template = self.settings.get("tiles").filter(|s| !s.is_empty()).cloned().unwrap_or(garmin::DEFAULT_TILES.into());
+        let template = self.settings.get("tiles").filter(|s| !s.is_empty()).cloned().unwrap_or(tiles::DEFAULT_TILES.into());
         let rgb = |c: Hsla| {
             let r = c.to_rgb();
             [(r.r * 255.0) as u8, (r.g * 255.0) as u8, (r.b * 255.0) as u8]
@@ -691,7 +691,7 @@ impl Home {
             let img = cx
                 .background_executor()
                 .spawn(async move {
-                    let png = garmin::tile(&template, k.0, k.1, k.2).ok()?;
+                    let png = tiles::tile(&template, k.0, k.1, k.2).ok()?;
                     let (w, h, px) = map::tint(&png, bg, fg)?;
                     Some(Arc::new(render_image(w, h, px)?))
                 })
@@ -769,7 +769,7 @@ impl Home {
         if self.busy() {
             return;
         }
-        let key = match garmin::clean_key(&self.key_input.read(cx).value()) {
+        let key = match secrets::clean_key(&self.key_input.read(cx).value()) {
             Ok(k) => k,
             Err(e) => {
                 self.key_error = Some(e.into());
@@ -788,7 +788,7 @@ impl Home {
                     let key = key.clone();
                     async move {
                         let t = garmin::token(&key)?;
-                        garmin::store_key(&key)?;
+                        secrets::store_key(&key)?;
                         Ok::<_, String>(t)
                     }
                 })
@@ -816,7 +816,7 @@ impl Home {
             return;
         }
         cx.spawn(async move |this, cx| {
-            let res = cx.background_executor().spawn(async { garmin::delete_key() }).await;
+            let res = cx.background_executor().spawn(async { secrets::delete_key() }).await;
             this.update(cx, |this, cx| {
                 match res {
                     Ok(()) => {
@@ -846,7 +846,7 @@ impl Home {
         self.settings.insert("tiles".into(), value);
         self.tiles.clear();
         let s = self.settings.clone();
-        cx.background_executor().spawn(async move { garmin::save_settings(&s) }).detach();
+        cx.background_executor().spawn(async move { store::save_settings(&s) }).detach();
         self.note = Some("serveur de tuiles enregistré".into());
         cx.notify();
     }
@@ -940,7 +940,7 @@ impl Home {
 
     /// Where the synchronisation stands, in words; `None` when nothing runs.
     pub fn sync_line(&self) -> Option<String> {
-        let g = |n: usize| crate::activity::group(n as i64);
+        let g = |n: usize| crate::logic::activity::group(n as i64);
         match &self.status {
             Status::Busy(s) if s.starts_with("Synchronisation") => Some(format!("1/2 · {}", s.trim_start_matches("Synchronisation : "))),
             _ if self.fetch.running => Some(format!("2/2 · fichiers des activités : {} / {}", g(self.fetch.done), g(self.fetch.total))),
@@ -957,7 +957,7 @@ impl Home {
     /// the synchronisation in the settings.
     fn status_line(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.theme;
-        let n = crate::activity::group(self.acts.len() as i64);
+        let n = crate::logic::activity::group(self.acts.len() as i64);
         let s = if self.acts.len() > 1 { "s" } else { "" };
         let (text, color) = if let Status::Failed(e) = &self.status {
             (e.clone(), t.bad())

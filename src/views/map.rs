@@ -2,7 +2,7 @@
 //! drag to move, wheel to zoom around the pointer, +/− and refit buttons, attribution.
 
 use crate::app::{Home, MapState};
-use crate::map::{self, View};
+use crate::logic::map::{self, View};
 use crate::ui::icon;
 use gpui_kit::assets::IconName;
 use gpui_kit::{prelude::FluentBuilder, *};
@@ -204,7 +204,7 @@ impl Home {
                     .bottom(px(0.))
                     .px(px(6.))
                     .py(px(2.))
-                    .bg(crate::theme::blend(t.bg, t.panel, 0.8))
+                    .bg(crate::ui::theme::blend(t.bg, t.panel, 0.8))
                     .text_size(px(11.))
                     .text_color(t.soft)
                     .cursor_pointer()

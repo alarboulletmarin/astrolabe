@@ -1,7 +1,7 @@
 //! Maps: Web Mercator projection, the tiles a view needs, tiles recolored in the theme,
 //! and the heat raster (how many activities pass through each pixel). Pure functions.
 
-use crate::fit::metres;
+use crate::logic::fit::metres;
 
 pub const TILE: f64 = 256.0;
 pub const MIN_Z: f64 = 2.0;

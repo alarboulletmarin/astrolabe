@@ -1,66 +1,14 @@
 //! The journal: every activity in a table that takes the whole width, grouped by week.
 //! Columns fold away as the window narrows; a click opens the activity.
 
-use crate::activity::{self as act, Activity, Sport, fmt_clock, fmt_km, fmt_m};
 use crate::app::{Home, View, today};
-use crate::ui::{button, fr_day, fr_short, heading, num, pad, segmented, sport_tag, title, totals_line};
-use chrono::{Days, NaiveDate};
+use crate::logic::activity::{self as act, fmt_clock, fmt_km, fmt_m};
+use crate::logic::journal::{Row, name, sports_present};
+use crate::ui::format::{fr_day, fr_short, totals_line};
+use crate::ui::{button, heading, num, pad, segmented, sport_tag, title};
+use chrono::Days;
 use gpui_kit::component::input::Input;
 use gpui_kit::{prelude::FluentBuilder, *};
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Row {
-    /// A week header, its Monday.
-    Week(NaiveDate),
-    /// An activity, index in `Home::acts`.
-    Act(usize),
-}
-
-/// Lowercase without accents, for a search that forgives "eclair" for "Éclair".
-pub fn fold(s: &str) -> String {
-    s.chars()
-        .flat_map(char::to_lowercase)
-        .map(|c| match c {
-            'à' | 'â' | 'ä' | 'á' | 'ã' => 'a',
-            'é' | 'è' | 'ê' | 'ë' => 'e',
-            'î' | 'ï' | 'í' => 'i',
-            'ô' | 'ö' | 'ó' | 'õ' => 'o',
-            'ù' | 'û' | 'ü' | 'ú' => 'u',
-            'ç' => 'c',
-            'ÿ' => 'y',
-            c => c,
-        })
-        .collect()
-}
-
-/// `acts` come newest first; one header before each week's first activity.
-/// `needle` (folded) keeps the activities whose name or sport holds it.
-pub fn rows(acts: &[Activity], sport: Option<Sport>, needle: &str) -> Vec<Row> {
-    let needle = needle.trim();
-    let mut out = Vec::new();
-    let mut week = None;
-    for (i, a) in acts.iter().enumerate() {
-        if !act::matches(a, sport) || (!needle.is_empty() && !fold(&format!("{} {}", name(a), a.sport().label())).contains(needle)) {
-            continue;
-        }
-        let w = a.date().map(act::week_start);
-        if let Some(monday) = w.filter(|_| w != week) {
-            out.push(Row::Week(monday));
-            week = w;
-        }
-        out.push(Row::Act(i));
-    }
-    out
-}
-
-pub fn name(a: &Activity) -> String {
-    a.activity_name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| a.sport().label().into())
-}
-
-/// The sports present in the data, for the filters.
-pub fn sports_present(acts: &[Activity]) -> Vec<Sport> {
-    Sport::ALL.into_iter().filter(|s| acts.iter().any(|a| a.sport() == *s)).collect()
-}
 
 const ROW_H: f32 = 36.;
 
@@ -280,39 +228,7 @@ impl Home {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's glob brings its own `test` macro.
-    use super::{Activity, NaiveDate, Row, Sport, columns_for, fold, name, rows};
-
-    fn a(id: i64, t: &str, key: &str, n: &str) -> Activity {
-        serde_json::from_value(serde_json::json!({
-            "activityId": id, "startTimeLocal": t, "activityType": {"typeKey": key}, "activityName": n
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn rows_group_filter_and_search() {
-        assert!(rows(&[], None, "").is_empty());
-        let acts = vec![
-            a(5, "2026-10-26 07:00:00", "running", "Footing"),
-            a(4, "2026-10-25 07:00:00", "road_biking", "Col de l'Écharpe"),
-            a(3, "2026-10-19 07:00:00", "trail_running", "Trail des Monts"),
-            a(2, "bad date", "running", ""),
-            a(1, "2026-09-01 07:00:00", "running", "Footing"),
-        ];
-        let d = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
-        assert_eq!(
-            rows(&acts, None, ""),
-            [Row::Week(d("2026-10-26")), Row::Act(0), Row::Week(d("2026-10-19")), Row::Act(1), Row::Act(2), Row::Act(3), Row::Week(d("2026-08-31")), Row::Act(4)]
-        );
-        assert_eq!(rows(&acts, Some(Sport::Trail), ""), [Row::Week(d("2026-10-19")), Row::Act(2)]);
-        assert!(rows(&acts, Some(Sport::Swim), "").is_empty());
-        // Accents and case forgiven; the sport's name matches too; spaces around ignored.
-        assert_eq!(rows(&acts, None, &fold(" echarpe ")), [Row::Week(d("2026-10-19")), Row::Act(1)]);
-        assert_eq!(rows(&acts, None, "velo"), [Row::Week(d("2026-10-19")), Row::Act(1)]);
-        assert!(rows(&acts, None, "zzz").is_empty());
-        assert_eq!(name(&acts[3]), "Course");
-        assert_eq!(fold("ÉCLAIR Çà"), "eclair ca");
-    }
+    use super::columns_for;
 
     #[test]
     fn columns_fold_as_the_width_shrinks() {
