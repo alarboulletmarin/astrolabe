@@ -19,6 +19,12 @@ pub fn fr_day(d: chrono::NaiveDate, today: chrono::NaiveDate) -> String {
     format!("{} {}{year}", d.day(), MONTHS[d.month0() as usize])
 }
 
+/// "samedi 24 octobre".
+pub fn fr_weekday(d: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
+    format!("{} {} {}", DAYS[d.weekday().num_days_from_monday() as usize], d.day(), MONTHS[d.month0() as usize])
+}
+
 /// "sam. 24 oct." for tables.
 pub fn fr_short(d: chrono::NaiveDate) -> String {
     use chrono::Datelike;

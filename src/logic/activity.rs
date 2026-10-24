@@ -260,6 +260,8 @@ pub struct Streaks {
     /// Consecutive Mon–Sun weeks with an activity, Strava style; the current week counts once active.
     pub weeks: u32,
     pub longest_days: u32,
+    /// The most weeks in a row with an activity, ever.
+    pub longest_weeks: u32,
 }
 
 pub fn streaks(acts: &[Activity], today: NaiveDate) -> Streaks {
@@ -284,22 +286,23 @@ pub fn streaks(acts: &[Activity], today: NaiveDate) -> Streaks {
         this_week - Days::new(7)
     };
 
-    let mut sorted: Vec<_> = days.iter().copied().collect();
-    sorted.sort();
-    let (mut longest, mut cur) = (0, 0);
-    for (i, d) in sorted.iter().enumerate() {
-        cur = if i > 0 && *d - sorted[i - 1] == chrono::Duration::days(1) {
-            cur + 1
-        } else {
-            1
-        };
-        longest = longest.max(cur);
-    }
+    // The longest run of dates `step` days apart.
+    let longest = |set: &HashSet<NaiveDate>, step: i64| {
+        let mut sorted: Vec<_> = set.iter().copied().collect();
+        sorted.sort();
+        let (mut longest, mut cur) = (0, 0);
+        for (i, d) in sorted.iter().enumerate() {
+            cur = if i > 0 && *d - sorted[i - 1] == chrono::Duration::days(step) { cur + 1 } else { 1 };
+            longest = longest.max(cur);
+        }
+        longest
+    };
 
     Streaks {
         days: run_back(&days, day_anchor, 1),
         weeks: run_back(&weeks, week_anchor, 7),
-        longest_days: longest,
+        longest_days: longest(&days, 1),
+        longest_weeks: longest(&weeks, 7),
     }
 }
 
@@ -641,7 +644,7 @@ mod tests {
     #[test]
     fn streaks_edge_cases() {
         let today = d("2026-10-24"); // Saturday
-        assert_eq!(streaks(&[], today), Streaks { days: 0, weeks: 0, longest_days: 0 });
+        assert_eq!(streaks(&[], today), Streaks { days: 0, weeks: 0, longest_days: 0, longest_weeks: 0 });
 
         // Yesterday + day before, nothing today: streak still alive.
         let acts = vec![
@@ -665,7 +668,15 @@ mod tests {
             act(4, "2026-10-24 07:00:00", "running", 0.0, 0.0),
         ];
         let s = streaks(&acts, today);
-        assert_eq!((s.days, s.weeks, s.longest_days), (1, 3, 1));
+        assert_eq!((s.days, s.weeks, s.longest_days, s.longest_weeks), (1, 3, 1, 3));
+        // The record stays when the run under way is shorter; a year's turn does not break it.
+        let acts: Vec<_> = ["2025-12-22", "2025-12-29", "2026-01-05", "2026-01-12", "2026-10-24"]
+            .iter()
+            .enumerate()
+            .map(|(i, day)| act(i as i64, &format!("{day} 07:00:00"), "running", 0.0, 0.0))
+            .collect();
+        let s = streaks(&acts, today);
+        assert_eq!((s.weeks, s.longest_weeks), (1, 4));
 
         // Longest streak crossing a month boundary.
         let acts: Vec<_> = (0..10)
