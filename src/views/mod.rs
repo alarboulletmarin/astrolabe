@@ -2,6 +2,7 @@
 //! asks for another page by emitting it (`cx.emit(Page::…)`): it never sees the window.
 
 pub mod activity;
+pub mod calendar;
 pub mod dashboard;
 pub mod heatmap;
 pub mod journal;
@@ -20,6 +21,7 @@ use std::{cell::Cell, rc::Rc};
 pub enum Page {
     Dashboard,
     Journal,
+    Calendar,
     Activity(i64),
     Stats,
     Records,

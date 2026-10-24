@@ -6,6 +6,7 @@ use crate::logic::history::History;
 use crate::ui::icon;
 use crate::ui::theme::{MONO, SANS, Theme};
 use crate::views::activity::ActivityView;
+use crate::views::calendar::CalendarView;
 use crate::views::dashboard::DashboardView;
 use crate::views::heatmap::HeatmapView;
 use crate::views::journal::JournalView;
@@ -21,7 +22,7 @@ use std::time::Duration;
 /// Height of the strip at the top of the window that moves it; the pages start lower.
 const HEADER: f32 = 36.0;
 
-actions!(astrolabe, [SelectNext, SelectPrev, OpenSelected, Back, GoBack, GoForward, Older, Newer]);
+actions!(astrolabe, [SelectNext, SelectPrev, OpenSelected, Back, GoBack, GoForward, Older, Newer, CalPrev, CalNext, CalToday]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -33,6 +34,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-]" } else { "alt-right" }, GoForward, None),
         KeyBinding::new("left", Older, Some("Activity")),
         KeyBinding::new("right", Newer, Some("Activity")),
+        KeyBinding::new("left", CalPrev, Some("Calendar")),
+        KeyBinding::new("right", CalNext, Some("Calendar")),
+        KeyBinding::new("t", CalToday, Some("Calendar")),
     ]);
 }
 
@@ -42,6 +46,7 @@ pub struct Shell {
     history: History<Page>,
     dashboard: Entity<DashboardView>,
     journal: Entity<JournalView>,
+    calendar: Entity<CalendarView>,
     activity: Entity<ActivityView>,
     stats: Entity<StatsView>,
     records: Entity<RecordsView>,
@@ -60,6 +65,7 @@ impl Shell {
         let width = Width::default();
         let dashboard = cx.new(|cx| DashboardView::new(data.clone(), width.clone(), cx));
         let journal = cx.new(|cx| JournalView::new(data.clone(), width.clone(), window, cx));
+        let calendar = cx.new(|cx| CalendarView::new(data.clone(), width.clone(), cx));
         let activity = cx.new(|cx| ActivityView::new(data.clone(), width.clone(), cx));
         let stats = cx.new(|cx| StatsView::new(data.clone(), width.clone(), window, cx));
         let records = cx.new(|cx| RecordsView::new(data.clone(), width.clone(), cx));
@@ -78,6 +84,7 @@ impl Shell {
             }),
             cx.subscribe_in(&dashboard, window, Self::follow),
             cx.subscribe_in(&journal, window, Self::follow),
+            cx.subscribe_in(&calendar, window, Self::follow),
             cx.subscribe_in(&activity, window, Self::follow),
             cx.subscribe_in(&stats, window, Self::follow),
             cx.subscribe_in(&records, window, Self::follow),
@@ -85,7 +92,7 @@ impl Shell {
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Shell { data, page: Page::Dashboard, history: History::new(Page::Dashboard), dashboard, journal, activity, stats, records, heatmap, settings, focus, width, _subscriptions: subs }
+        Shell { data, page: Page::Dashboard, history: History::new(Page::Dashboard), dashboard, journal, calendar, activity, stats, records, heatmap, settings, focus, width, _subscriptions: subs }
     }
 
     /// Shows `page` and makes it the newest history entry. Moving from one activity to another
@@ -196,6 +203,7 @@ impl Shell {
             .child(self.travel_buttons(cx))
             .child(item("rail-dashboard", Page::Dashboard, IconName::LayoutDashboard, "Aujourd'hui", cx))
             .child(item("rail-journal", Page::Journal, IconName::NotebookText, "Journal", cx))
+            .child(item("rail-calendar", Page::Calendar, IconName::Calendar, "Calendrier", cx))
             .child(item("rail-stats", Page::Stats, IconName::ChartColumn, "Statistiques", cx))
             .child(item("rail-records", Page::Records, IconName::Trophy, "Records", cx))
             .child(item("rail-map", Page::Heatmap, IconName::Map, "Carte de chaleur", cx))
@@ -349,6 +357,7 @@ impl Render for Shell {
         let body = match self.page {
             Page::Dashboard => self.dashboard.clone().into_any_element(),
             Page::Journal => self.journal.clone().into_any_element(),
+            Page::Calendar => self.calendar.clone().into_any_element(),
             Page::Activity(_) => self.activity.clone().into_any_element(),
             Page::Stats => self.stats.clone().into_any_element(),
             Page::Records => self.records.clone().into_any_element(),
@@ -368,6 +377,7 @@ impl Render for Shell {
             .key_context(match self.page {
                 Page::Journal => "Journal",
                 Page::Activity(_) => "Activity",
+                Page::Calendar => "Calendar",
                 _ => "Home",
             })
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.journal.update(cx, |j, cx| j.select_step(1, cx))))
@@ -389,6 +399,9 @@ impl Render for Shell {
             // The mouse back and forward buttons.
             .on_mouse_down(MouseButton::Navigate(NavigationDirection::Back), cx.listener(|this, _, window, cx| this.travel(false, window, cx)))
             .on_mouse_down(MouseButton::Navigate(NavigationDirection::Forward), cx.listener(|this, _, window, cx| this.travel(true, window, cx)))
+            .on_action(cx.listener(|this, _: &CalPrev, _, cx| this.calendar.update(cx, |c, cx| c.step(-1, cx))))
+            .on_action(cx.listener(|this, _: &CalNext, _, cx| this.calendar.update(cx, |c, cx| c.step(1, cx))))
+            .on_action(cx.listener(|this, _: &CalToday, _, cx| this.calendar.update(cx, |c, cx| c.go_today(cx))))
             .on_action(cx.listener(|this, _: &Older, _, cx| this.activity.update(cx, |a, cx| a.step(true, cx))))
             .on_action(cx.listener(|this, _: &Newer, _, cx| this.activity.update(cx, |a, cx| a.step(false, cx))))
             .child(self.rail(cx))
