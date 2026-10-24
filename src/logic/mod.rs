@@ -1,6 +1,7 @@
 //! Pure: no gpui, no disk, no network. Activities, FIT files, maps, records, profiles.
 
 pub mod activity;
+pub mod columns;
 pub mod dashboard;
 pub mod fit;
 pub mod history;

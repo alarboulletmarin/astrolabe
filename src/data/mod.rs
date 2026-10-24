@@ -561,6 +561,14 @@ impl Data {
     }
 
     /// Another tile server (empty: the default one). `false` when the address can't be one.
+    /// Keeps a setting on disk (a word or a list of them), for the views to read back at their start.
+    pub fn set_setting(&mut self, key: &str, value: String, cx: &mut Context<Self>) {
+        self.settings.insert(key.into(), value);
+        let s = self.settings.clone();
+        cx.background_executor().spawn(async move { store::save_settings(&s) }).detach();
+        cx.notify();
+    }
+
     pub fn save_tiles(&mut self, value: &str, cx: &mut Context<Self>) -> bool {
         let value = value.trim().to_string();
         if !value.is_empty() && !(value.starts_with("https://") && value.contains("{z}") && value.contains("{x}") && value.contains("{y}")) {

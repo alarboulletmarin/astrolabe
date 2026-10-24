@@ -9,7 +9,7 @@ An astrolabe is the old instrument of astronomers and sailors: you take the heig
 ## Features
 
 - **Today**: the home page. This week against the same days of the one before, the last 30 days or the month so far (time across sports, distance sport by sport), twelve weeks at a glance, the last outing, the split of time by sport and the records beaten lately.
-- **Journal**: every activity, week by week, with the week's totals, a search and a filter by sport (running, trail, cycling, swimming, walking, hiking).
+- **Journal**: every activity, week by week, with the week's totals, a search and a filter by sport (running, trail, cycling, swimming, walking, hiking), and the columns you want: distance, time, pace, elevation, heart rate, calories, climb per kilometre, rank among the outings of the sport, a bar against the longest one, and a small sketch of the route. The ones that do not fit the window fold away, the least useful first.
 - **Activity sheet**: the map of the track, the pace, heart rate and elevation curves (pointing at one points at the others and on the map), the splits and the laps.
 - **Records**: best efforts on the road (1 km, 5 km, 10 km, half marathon, marathon), trail apart, cycling and swimming, for one year or all of them.
 - **Statistics**: pick the measure, the grouping (day, week, month, year), the period and the sports, and compare the running totals of several years.

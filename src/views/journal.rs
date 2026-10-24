@@ -2,21 +2,21 @@
 //! Columns fold away as the window narrows; a click opens the activity.
 
 use crate::data::{Data, Snapshot};
-use crate::logic::activity::{self as act, Sport, fmt_clock, fmt_km, fmt_m};
+use crate::logic::activity::{self as act, Sport};
+use crate::logic::columns::{self, Column, DATE_W, GAP};
 use crate::logic::journal::{Row, fold, name, rows, sports_present};
+use crate::logic::map::{View, bbox};
+use crate::ui::theme::blend;
+use std::{collections::HashMap, time::Instant};
 use crate::views::{Page, Width, today};
 use crate::ui::format::{fr_day, fr_short, totals_line};
-use crate::ui::{button, heading, num, pad, segmented, sport_tag, title};
+use crate::ui::{button, heading, icon, num, pad, segmented, sport_tag, title};
+use gpui_kit::assets::IconName;
 use chrono::Days;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{prelude::FluentBuilder, *};
 
 const ROW_H: f32 = 36.;
-
-/// Which optional columns fit: (sport, pace, elevation, heart rate).
-fn columns_for(width: f32) -> (bool, bool, bool, bool) {
-    (width >= 700.0, width >= 860.0, width >= 1000.0, width >= 1140.0)
-}
 
 pub struct JournalView {
     data: Entity<Data>,
@@ -25,6 +25,13 @@ pub struct JournalView {
     sport: Option<Sport>,
     search: Entity<InputState>,
     rows: Vec<Row>,
+    /// The columns shown, as chosen in the menu and kept in the settings.
+    columns: Vec<Column>,
+    /// The biggest outing of each sport, for the bars.
+    maxima: HashMap<Sport, f64>,
+    menu: bool,
+    /// When a press outside just closed the menu: the same press must not reopen it.
+    closed: Option<Instant>,
     pub selected: Option<i64>,
     list: UniformListScrollHandle,
     _subscriptions: Vec<Subscription>,
@@ -49,7 +56,8 @@ impl JournalView {
             }),
         ];
         let snap = data.read(cx).snapshot();
-        let mut view = JournalView { data, snap, width, sport: None, search, rows: Vec::new(), selected: None, list: UniformListScrollHandle::new(), _subscriptions: subs };
+        let columns = columns::parse(data.read(cx).settings.get("journal_columns").map(String::as_str).unwrap_or(""));
+        let mut view = JournalView { data, snap, width, sport: None, search, rows: Vec::new(), columns, maxima: HashMap::new(), menu: false, closed: None, selected: None, list: UniformListScrollHandle::new(), _subscriptions: subs };
         view.refresh(cx);
         view
     }
@@ -58,6 +66,13 @@ impl JournalView {
     fn refresh(&mut self, cx: &App) {
         let needle = fold(&self.search.read(cx).value());
         self.rows = rows(&self.snap.acts, self.sport, &needle);
+        self.maxima = columns::maxima(&self.snap.acts);
+    }
+
+    fn toggle_column(&mut self, column: Column, cx: &mut Context<Self>) {
+        self.columns = columns::toggle(&self.columns, column);
+        let value = columns::encode(&self.columns);
+        self.data.update(cx, |d, cx| d.set_setting("journal_columns", value, cx));
     }
 
     fn set_sport(&mut self, sport: Option<Sport>, cx: &mut Context<Self>) {
@@ -95,24 +110,56 @@ impl JournalView {
         })
     }
 
-    /// One table row: date, sport, name stretch; numbers right-aligned in fixed columns.
-    fn cells(&self, width: f32, cells: [Div; 8]) -> Div {
-        let (sport_on, pace_on, elev_on, hr_on) = columns_for(width);
-        let [date, sport, name, dist, time, pace, elev, hr] = cells;
-        let right = |d: Div, w: f32| d.w(px(w)).flex_none().flex().justify_end().whitespace_nowrap();
-        div()
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(16.))
-            .child(date.w(px(152.)).flex_none().whitespace_nowrap())
-            .when(sport_on, |d| d.child(sport.w(px(110.)).flex_none()))
-            .child(name.flex_1().min_w_0())
-            .child(right(dist, 86.))
-            .child(right(time, 78.))
-            .when(pace_on, |d| d.child(right(pace, 96.)))
-            .when(elev_on, |d| d.child(right(elev, 72.)))
-            .when(hr_on, |d| d.child(right(hr, 72.)))
+    /// One line of the table: the date, the name taking what is left, then the columns that fit,
+    /// each in its fixed width. `cells` come for the columns of `shown`, in order.
+    fn line(&self, date: Div, name: Div, cells: Vec<(Column, Div)>) -> Div {
+        let mut line = div().w_full().flex().items_center().gap(px(GAP)).child(date.w(px(DATE_W)).flex_none().whitespace_nowrap()).child(name.flex_1().min_w_0());
+        for (c, cell) in cells {
+            line = line.child(if c.right() { cell.w(px(c.width())).flex_none().flex().justify_end().whitespace_nowrap() } else { cell.w(px(c.width())).flex_none().flex() });
+        }
+        line
+    }
+
+    /// The cell of a column for an activity.
+    fn cell(&self, c: Column, a: &act::Activity, rank: Option<(usize, usize)>) -> Div {
+        let t = self.snap.theme;
+        match c {
+            Column::Sport => sport_tag(a.sport(), t),
+            Column::Bar => {
+                let share = columns::share(a, &self.maxima);
+                div().h(px(6.)).rounded(px(3.)).bg(t.border).child(div().h_full().w(relative(share)).rounded(px(3.)).bg(blend(t.accent, t.bg, 0.7)))
+            }
+            Column::Trace => {
+                let line = self.snap.derived.get(&a.activity_id).map(|d| d.line.clone()).filter(|l| l.len() >= 2);
+                let color = t.soft;
+                div().h(px(24.)).child(
+                    canvas(
+                        |_, _, _| {},
+                        move |b, _, window, _| {
+                            let Some(line) = &line else { return };
+                            let (w, h) = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
+                            let Some(bb) = bbox(std::iter::once(line.as_slice()), 0.0) else { return };
+                            let view = View::fit(bb, w, h, 2.0);
+                            let at = |p: &[f32; 2]| {
+                                let (x, y) = view.screen(p[0] as f64, p[1] as f64, w, h);
+                                point(b.origin.x + px(x as f32), b.origin.y + px(y as f32))
+                            };
+                            let mut path = PathBuilder::stroke(px(1.2));
+                            path.move_to(at(&line[0]));
+                            line[1..].iter().for_each(|p| path.line_to(at(p)));
+                            if let Ok(p) = path.build() {
+                                window.paint_path(p, color);
+                            }
+                        },
+                    )
+                    .size_full(),
+                )
+            }
+            _ => {
+                let text = num(columns::text(c, a, rank));
+                if matches!(c, Column::Distance | Column::Time) { text } else { text.text_color(t.soft) }
+            }
+        }
     }
 
     fn row(&self, ix: usize, row: Row, width: f32, cx: &mut Context<Self>) -> AnyElement {
@@ -142,7 +189,8 @@ impl JournalView {
                 let on = self.selected == Some(a.activity_id);
                 let id = a.activity_id;
                 let time = a.start().map(|d| d.format(" · %H:%M").to_string()).unwrap_or_default();
-                let opt = |v: Option<String>| num(v.unwrap_or_default());
+                let shown = columns::visible(&self.columns, width);
+                let cells = shown.iter().map(|c| (*c, self.cell(*c, a, (*c == Column::Rank).then(|| act::rank(&self.snap.acts, a))))).collect();
                 div()
                     .id(("row", ix))
                     .w_full()
@@ -155,18 +203,10 @@ impl JournalView {
                     .when(on, |d| d.bg(t.selection))
                     .when(!on, |d| d.hover(|d| d.bg(t.panel)))
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
-                    .child(self.cells(
-                        width,
-                        [
-                            num(format!("{}{time}", a.date().map(fr_short).unwrap_or_default())).text_size(px(12.)).text_color(t.soft),
-                            div().flex().child(sport_tag(a.sport(), t)),
-                            div().truncate().child(name(a)),
-                            opt(a.distance.filter(|d| *d > 0.0).map(fmt_km)),
-                            opt(a.duration.map(fmt_clock)),
-                            opt(a.speed_label()).text_color(t.soft),
-                            opt(a.elevation_gain.filter(|e| *e >= 1.0).map(fmt_m)).text_color(t.soft),
-                            opt(a.average_hr.map(|h| format!("{h:.0} bpm"))).text_color(t.soft),
-                        ],
+                    .child(self.line(
+                        num(format!("{}{time}", a.date().map(fr_short).unwrap_or_default())).text_size(px(12.)).text_color(t.soft),
+                        div().truncate().child(name(a)),
+                        cells,
                     ))
                     .into_any_element()
             }
@@ -225,7 +265,8 @@ impl Render for JournalView {
                         .items_center()
                         .gap(px(10.))
                         .child(div().w(px(220.)).child(Input::new(&self.search).cleanable(true)))
-                        .child(self.sport_filter("journal-sport", cx)),
+                        .child(self.sport_filter("journal-sport", cx))
+                        .child(self.columns_button(window.viewport_size().height / px(1.) - 230., cx)),
                 )
             });
 
@@ -247,9 +288,10 @@ impl Render for JournalView {
                         .pb(px(4.))
                         .text_size(px(12.))
                         .text_color(t.dim)
-                        .child(self.cells(
-                            inner,
-                            ["Date", "Sport", "Activité", "Distance", "Temps", "Allure", "D+", "FC"].map(|h| div().child(h)),
+                        .child(self.line(
+                            div().child("Date"),
+                            div().child("Activité"),
+                            columns::visible(&self.columns, inner).into_iter().map(|c| (c, div().child(c.label()))).collect(),
                         )),
                 )
                 .child(
@@ -273,6 +315,86 @@ impl Render for JournalView {
 }
 
 impl JournalView {
+    /// The "Colonnes" button and, while it is open, the list of columns to show or hide.
+    fn columns_button(&mut self, room: f32, cx: &mut Context<Self>) -> Div {
+        let t = self.snap.theme;
+        let open = self.menu;
+        let rows = columns::ALL.iter().copied().map(|c| {
+            let on = self.columns.contains(&c);
+            div()
+                .id(("column", c as usize))
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|d| d.bg(t.panel))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_column(c, cx);
+                    cx.notify();
+                }))
+                .child(div().w(px(14.)).flex_none().mt(px(2.)).child(if on { icon(IconName::Check, t.accent, 14.).into_any_element() } else { div().into_any_element() }))
+                .child(div().flex().flex_col().child(div().child(c.label())).child(div().text_size(px(12.)).text_color(t.dim).child(c.hint())))
+        });
+        div()
+            .relative()
+            .child(
+                div()
+                    .id("journal-columns")
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .px(px(9.))
+                    .py(px(3.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(t.border)
+                    .text_size(px(12.))
+                    .text_color(t.soft)
+                    .cursor_pointer()
+                    .when(open, |d| d.bg(t.panel))
+                    .hover(|d| d.text_color(t.text))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let just_closed = this.closed.is_some_and(|at| at.elapsed().as_millis() < 250);
+                        this.menu = !this.menu && !just_closed;
+                        cx.notify();
+                    }))
+                    .child("Colonnes")
+                    .child(icon(IconName::ChevronDown, t.soft, 13.)),
+            )
+            .when(open, |d| {
+                d.child(
+                    deferred(
+                        div()
+                            .id("columns-panel")
+                            .absolute()
+                            .top(px(30.))
+                            .right_0()
+                            .w(px(340.))
+                            .max_h(px(room.clamp(140., 460.)))
+                            .overflow_y_scroll()
+                            .p(px(4.))
+                            .rounded(px(8.))
+                            .bg(t.bg)
+                            .shadow_lg()
+                            .text_size(px(13.))
+                            .flex()
+                            .flex_col()
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.menu = false;
+                                this.closed = Some(Instant::now());
+                                cx.notify();
+                            }))
+                            .children(rows)
+                            .child(div().px(px(8.)).py(px(6.)).text_size(px(12.)).text_color(t.dim).child("Une colonne qui ne tient pas dans la fenêtre se replie : les moins utiles d'abord. Agrandis la fenêtre pour les revoir.")),
+                    )
+                    .with_priority(1),
+                )
+            })
+    }
+
     fn journal_empty(&self, p: f32, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
         let no_key = self.data.read(cx).key.is_none() && self.data.read(cx).key_loaded;
@@ -297,18 +419,5 @@ impl JournalView {
                     ),
                 )
             })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    // Not `super::*`: GPUI's glob brings its own `test` macro.
-    use super::columns_for;
-
-    #[test]
-    fn columns_fold_as_the_width_shrinks() {
-        assert_eq!(columns_for(1400.0), (true, true, true, true));
-        assert_eq!(columns_for(900.0), (true, true, false, false));
-        assert_eq!(columns_for(500.0), (false, false, false, false));
     }
 }
