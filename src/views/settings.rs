@@ -57,6 +57,7 @@ impl Render for SettingsView {
                 .child(icon(name, t.soft, 14.).flex_none().mt(px(3.)))
                 .child(div().flex_1().min_w_0().text_color(t.soft).child(text))
         };
+        let key_store = crate::logic::system::key_store(std::env::consts::OS);
         let label = |text: &'static str| div().text_size(px(12.)).text_color(t.soft).child(text);
         let section = |gap: f32| div().flex().flex_col().gap(px(gap));
 
@@ -75,7 +76,7 @@ impl Render for SettingsView {
                 .child(
                     section(12.)
                         .child(div().flex().items_center().gap(px(10.)).child(heading("Clé API Garmin")).child(if has {
-                            pill(if no_store.is_some() { "chiffrée dans l'app" } else { "dans le trousseau" }, t.good())
+                            pill(if no_store.is_some() { "chiffrée dans l'app" } else { key_store.pill }, t.good())
                         } else {
                             pill("aucune", (t.panel, t.soft))
                         }))
@@ -142,9 +143,9 @@ impl Render for SettingsView {
                         .child(fact(
                             IconName::Lock,
                             if no_store.is_some() {
-                                "Faute de trousseau système, la clé est chiffrée (XChaCha20-Poly1305) dans un fichier de l'app, et la clé qui l'ouvre est gardée à part, dans ton dossier de configuration. L'une sans l'autre ne sert à rien ; l'app ne l'écrit jamais en clair.".into()
+                                format!("{}, la clé est chiffrée (XChaCha20-Poly1305) dans un fichier de l'app, et la clé qui l'ouvre est gardée à part, dans ton dossier de configuration. L'une sans l'autre ne sert à rien ; l'app ne l'écrit jamais en clair.", key_store.missing)
                             } else {
-                                "La clé est confiée au trousseau du système (GNOME Keyring, KWallet, Trousseau macOS, Gestionnaire d'identifiants Windows) : chiffrée sur le disque, déverrouillée avec ta session. L'app ne l'écrit jamais dans un fichier.".into()
+                                format!("La clé est confiée {} : chiffrée sur le disque, déverrouillée avec ta session. L'app ne l'écrit jamais dans un fichier.", key_store.to)
                             },
                         ))
                         .child(fact(
@@ -155,8 +156,8 @@ impl Render for SettingsView {
                             IconName::HardDrive,
                             {
                                 let dir = store::data_dir().display().to_string();
-                                let home = std::env::var("HOME").unwrap_or_default();
-                                let dir = if !home.is_empty() && dir.starts_with(&home) { dir.replacen(&home, "~", 1) } else { dir };
+                                let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+                                let dir = crate::logic::system::tilde(&dir, &home);
                                 format!("Tes activités et leurs traces restent sur ta machine, dans {dir}, lisibles par toi seul.")
                             },
                         )),
