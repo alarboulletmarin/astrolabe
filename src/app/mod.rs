@@ -330,6 +330,9 @@ impl Shell {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|d| d.bg(t.border))
+                // Keeps the press from the pill below: its window move hands the pointer to the
+                // compositor, and the release (the click) never comes back.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(icon(name, t.soft, 14.))
         };
         crate::ui::drag_window(
