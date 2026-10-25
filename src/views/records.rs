@@ -2,10 +2,10 @@
 //! longest outings, the biggest climbs. Road running and trail apart; a podium for each.
 
 use crate::data::{Data, Snapshot};
-use crate::logic::journal::name;
+use crate::logic::journal::short_name;
 use crate::logic::records::{BOARDS, Board, podium, show};
-use crate::ui::format::fr_day;
-use crate::ui::{heading, num, pad, segmented, title};
+use crate::ui::format::{fr_day, split_unit};
+use crate::ui::{heading, pad, quantity, segmented, title};
 use crate::views::{Page, Width, today, tracks_progress};
 use chrono::Datelike;
 use gpui_kit::{prelude::FluentBuilder, *};
@@ -100,7 +100,7 @@ impl RecordsView {
             let top = podium(&self.snap.acts, &self.snap.derived, board, *kind, self.year, 3);
             let today = today();
             let first = top.first().copied();
-            let (value, pace) = first.map_or(("—".into(), String::new()), |e| show(*kind, board.sport, e.value));
+            let (value, pace) = first.map_or((String::new(), String::new()), |e| show(*kind, board.sport, e.value));
             let row = div()
                 .id(SharedString::from(format!("rec-{}-{i}", board.title)))
                 .flex()
@@ -110,8 +110,9 @@ impl RecordsView {
                 .px(px(10.))
                 .mx(px(-10.))
                 .rounded(px(6.))
-                .border_b_1()
-                .border_color(t.border)
+                .relative()
+                // The rule under the row lines up with the text; the hover reaches past it.
+                .child(div().absolute().bottom_0().left(px(10.)).right(px(10.)).h(px(1.)).bg(t.border))
                 .when_some(first, |d, e| {
                     d.cursor_pointer().hover(|d| d.bg(t.panel)).on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(e.id))))
                 })
@@ -121,8 +122,10 @@ impl RecordsView {
                         .items_baseline()
                         .gap(px(12.))
                         .child(div().w(px(130.)).flex_none().text_color(t.soft).child(*label))
-                        .child(num(value).text_size(px(18.)).font_weight(FontWeight::BOLD))
-                        .child(num(pace).text_size(px(12.)).text_color(t.soft))
+                        .when(first.is_none(), |d| d.child(div().text_size(px(13.)).text_color(t.dim).child("pas encore")))
+                        .child(quantity(&value, t).text_size(px(18.)).font_weight(FontWeight::BOLD))
+                        // Over 1 km the pace is the time itself: said once.
+                        .when(split_unit(&pace).0 != value, |d| d.child(quantity(&pace, t).text_size(px(12.)).text_color(t.soft)))
                         .child(div().flex_1())
                         .when_some(first, |d, e| {
                             d.child(
@@ -131,7 +134,7 @@ impl RecordsView {
                                     .truncate()
                                     .text_size(px(12.))
                                     .text_color(t.soft)
-                                    .child(format!("{} · {}", self.snap.activity(e.id).map(name).unwrap_or_default(), fr_day(e.date, today))),
+                                    .child(format!("{} · {}", self.snap.activity(e.id).map(short_name).unwrap_or_default(), fr_day(e.date, today))),
                             )
                         }),
                 )
@@ -144,7 +147,7 @@ impl RecordsView {
                                 .cursor_pointer()
                                 .hover(|d| d.text_color(t.text))
                                 .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
-                                .child(num(format!("{}e {} · {}", k + 2, show(*kind, board.sport, e.value).0, fr_day(e.date, today))))
+                                .child(format!("{}e {} · {}", k + 2, show(*kind, board.sport, e.value).0, fr_day(e.date, today)))
                         },
                     )))
                 });
