@@ -27,13 +27,27 @@ pub fn profiles(track: &Track, sport: Sport) -> Profiles {
             Some(*last)
         })
         .collect();
-    // Speed smoothed over ±5 samples: GPS speed is jumpy second to second.
+    // Speed as the median of a window: ±100 m along a distance axis, ±30 samples along time. GPS
+    // speed is jumpy, and on a distance axis a stop takes no width at all, so it was drawn as a
+    // needle down to the bottom. A median over distance drops stops and short dips; a slow
+    // stretch (a steep climb walked) keeps its real width.
     let raw: Vec<Option<f32>> = track.samples.iter().map(|s| s.speed).collect();
+    let (mut lo, mut hi) = (0, 0);
     let smooth: Vec<Option<f32>> = (0..raw.len())
         .map(|i| {
-            let w = &raw[i.saturating_sub(5)..(i + 6).min(raw.len())];
-            let v: Vec<f32> = w.iter().flatten().copied().collect();
-            (!v.is_empty()).then(|| v.iter().sum::<f32>() / v.len() as f32)
+            if by_distance {
+                while xs[lo] < xs[i] - 0.1 {
+                    lo += 1;
+                }
+                while hi < xs.len() && xs[hi] <= xs[i] + 0.1 {
+                    hi += 1;
+                }
+            } else {
+                (lo, hi) = (i.saturating_sub(30), (i + 31).min(raw.len()));
+            }
+            let mut v: Vec<f32> = raw[lo..hi].iter().flatten().copied().filter(|v| v.is_finite()).collect();
+            v.sort_by(f32::total_cmp);
+            v.get(v.len() / 2).copied()
         })
         .collect();
     let speed = smooth
@@ -71,9 +85,12 @@ mod tests {
         let run = profiles(&tr, Sport::Run);
         assert!(run.by_distance);
         assert!((run.xs[99] - 0.297).abs() < 1e-4);
-        // 3 m/s is 5:33 /km; the 30 m/s spike is smoothed, not drawn as is.
+        // 3 m/s is 5:33 /km; the 30 m/s spike is gone, not softened.
         assert!((run.speed[0].unwrap() - 333.3).abs() < 0.5);
-        assert!(run.speed[50].unwrap() > 100.0);
+        assert!((run.speed[50].unwrap() - 333.3).abs() < 0.5);
+        // A stop of a few samples in a steady run leaves no dip either.
+        let dip = Track { samples: (0..100).map(|i| Sample { t: i as f32, dist: Some(i as f32 * 3.0), speed: Some(if (40..46).contains(&i) { 0.9 } else { 3.0 }), ..Default::default() }).collect(), laps: vec![] };
+        assert!(profiles(&dip, Sport::Run).speed.iter().all(|v| (v.unwrap() - 333.3).abs() < 0.5));
         let bike = profiles(&tr, Sport::Bike);
         assert!((bike.speed[0].unwrap() - 10.8).abs() < 1e-3);
         // Standing still: no pace rather than an absurd one.

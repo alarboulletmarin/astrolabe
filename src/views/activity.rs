@@ -9,7 +9,7 @@ use crate::logic::profiles::profiles;
 use crate::ui::chart::{Series, line_chart, nearest};
 use crate::ui::format::{fr_long, fr_short};
 use crate::ui::theme::blend;
-use crate::ui::{Plots, button, figure, heading, icon, num, page, sport_tag, title};
+use crate::ui::{Plots, button, figure, heading, icon, num, page, quantity, sport_tag, title};
 use crate::views::map::{MapState, line_bbox, map_widget};
 use crate::views::{Page, Width};
 use gpui_kit::assets::IconName;
@@ -179,8 +179,10 @@ impl Render for ActivityView {
                     .items_center()
                     .gap(px(10.))
                     .child(sport_tag(s, t))
-                    .child(num(a.start().map(fr_long).unwrap_or_default()).text_size(px(12.)).text_color(t.soft))
-                    .child(div().text_color(t.soft).child(rank_text)),
+                    .child(div().text_color(t.dim).child("·"))
+                    .child(div().text_size(px(13.)).text_color(t.soft).child(a.start().map(fr_long).unwrap_or_default()))
+                    .child(div().text_color(t.dim).child("·"))
+                    .child(div().text_size(px(13.)).text_color(t.soft).child(rank_text)),
             );
 
         let mut figures = div().flex().flex_wrap().gap_x(px(40.)).gap_y(px(14.));
@@ -343,7 +345,7 @@ impl ActivityView {
                             .justify_between()
                             .text_size(px(12.))
                             .child(div().text_color(t.soft).child(label))
-                            .child(num(value).font_weight(FontWeight::BOLD)),
+                            .child(quantity(&value, t).font_weight(FontWeight::BOLD)),
                     )
                     .child(
                         div().h(px(96.)).child(
@@ -437,7 +439,7 @@ impl ActivityView {
                             .flex()
                             .items_center()
                             .child(div().absolute().left_0().top(px(3.)).h(px(14.)).rounded(px(3.)).w(relative(share.clamp(0.05, 1.0))).bg(if best { blend(t.accent, t.bg, 0.35) } else { t.panel }))
-                            .child(num(label).pl(px(6.)).relative()),
+                            .child(quantity(&label, t).pl(px(6.)).relative()),
                     )
                     .child(cell(num(sp.hr.map(|h| format!("{h:.0}")).unwrap_or_default()), 56.).text_color(t.soft))
                     .child(cell(num(format!("{:.0}", sp.ascent)), 48.).text_color(t.soft)),
@@ -453,9 +455,9 @@ impl ActivityView {
                     .items_center()
                     .text_size(px(12.))
                     .child(num((i + 1).to_string()).w(px(34.)).text_color(t.soft))
-                    .child(num(fmt_km(l.dist as f64)).w(px(70.)))
+                    .child(quantity(&fmt_km(l.dist as f64), t).w(px(70.)))
                     .child(num(fmt_clock(l.time as f64)).w(px(70.)))
-                    .child(num(if l.dist > 0.0 { speed_fmt(if sport == Sport::Bike { 3.6 / per } else { per * 1000.0 }, sport) } else { String::new() }).flex_1().text_color(t.soft))
+                    .child(quantity(&if l.dist > 0.0 { speed_fmt(if sport == Sport::Bike { 3.6 / per } else { per * 1000.0 }, sport) } else { String::new() }, t).flex_1().text_color(t.soft))
                     .child(cell(num(l.hr.map(|h| format!("{h:.0}")).unwrap_or_default()), 56.).text_color(t.soft))
             }));
         }

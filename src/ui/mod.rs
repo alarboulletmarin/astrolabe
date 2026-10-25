@@ -74,14 +74,22 @@ pub fn heading(text: impl Into<SharedString>) -> Div {
     div().text_size(px(15.)).font_weight(FontWeight::BOLD).child(text.into())
 }
 
-/// A label in `soft` over a big mono value.
+/// A label in `soft` over a big mono value, its unit after it in small sans.
 pub fn figure(label: &'static str, value: String, t: Theme) -> Div {
+    let (n, unit) = format::split_unit(&value);
     div()
         .flex()
         .flex_col()
         .gap(px(2.))
         .child(div().text_size(px(12.)).text_color(t.soft).child(label))
-        .child(num(value).text_size(px(22.)).font_weight(FontWeight::BOLD))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .gap(px(4.))
+                .child(num(n).text_size(px(22.)).font_weight(FontWeight::BOLD))
+                .when(!unit.is_empty(), |d| d.child(div().text_size(px(13.)).text_color(t.soft).child(unit))),
+        )
 }
 
 /// Tabs on a single line: `Tout · Course · Vélo`. The chosen one in `text` on `panel`.
