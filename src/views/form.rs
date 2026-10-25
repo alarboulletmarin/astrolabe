@@ -399,7 +399,6 @@ impl FormView {
 
     /// How the figures are worked out, and what they leave out.
     fn source(&self, form: &Form, t: crate::ui::theme::Theme) -> Div {
-        let line = |s: String| div().child(s);
         let max = match form.hr_max {
             Some(m) => trf(
                 format!("Maximum heart rate estimated at {m:.0} bpm: the second highest value held over any outing, so that one stray reading of the sensor does not set it."),
@@ -409,45 +408,45 @@ impl FormView {
         };
         let kinds = trf(
             format!(
-                "{} {} counted{}; {} {} without heart rate, left out.",
+                "{} {} counted{}{}.",
                 group(form.counted as i64),
                 plural(form.counted, "outing", "outings"),
                 if form.estimated > 0 { format!(", of which {} estimated from the average heart rate alone", group(form.estimated as i64)) } else { String::new() },
-                group(form.skipped as i64),
-                plural(form.skipped, "outing", "outings"),
+                if form.skipped > 0 { format!("; {} {} without heart rate, left out", group(form.skipped as i64), plural(form.skipped, "outing", "outings")) } else { String::new() },
             ),
             format!(
-                "{} {} comptée{}{} ; {} {} sans fréquence cardiaque, non comptée{}.",
+                "{} {} comptée{}{}{}.",
                 group(form.counted as i64),
                 plural(form.counted, "sortie", "sorties"),
                 if form.counted > 1 { "s" } else { "" },
                 if form.estimated > 0 { format!(", dont {} estimée{} par la fréquence cardiaque moyenne seule", group(form.estimated as i64), if form.estimated > 1 { "s" } else { "" }) } else { String::new() },
-                group(form.skipped as i64),
-                plural(form.skipped, "sortie", "sorties"),
-                if form.skipped > 1 { "s" } else { "" },
+                if form.skipped > 0 { format!(" ; {} {} sans fréquence cardiaque, non comptée{}", group(form.skipped as i64), plural(form.skipped, "sortie", "sorties"), if form.skipped > 1 { "s" } else { "" }) } else { String::new() },
             ),
         );
+        let text = [
+            tr(
+                "Each outing is given points of load: the minutes spent in each zone of heart rate, weighted from 1 (50-60% of the maximum) to 5 (90% and above); under 50%, nothing. The points of a day are added up, rest days count for zero.",
+                "Chaque sortie reçoit des points de charge : les minutes passées dans chaque zone de fréquence cardiaque, pondérées de 1 (50-60 % du maximum) à 5 (90 % et plus) ; sous 50 %, rien. Les points d'un jour s'additionnent, un jour de repos vaut zéro.",
+            ).to_string(),
+            trf(
+                format!("Fatigue is the daily load averaged over about {FATIGUE_DAYS:.0} days, form over about {FORM_DAYS:.0} days (each day weighs a little less than the one after it). Freshness is form minus fatigue, both at the end of the same day."),
+                format!("La fatigue est la charge quotidienne moyennée sur environ {FATIGUE_DAYS:.0} jours, la forme sur environ {FORM_DAYS:.0} jours (chaque jour pèse un peu moins que le suivant). La fraîcheur est la forme moins la fatigue, toutes deux en fin de journée."),
+            ),
+            max,
+            kinds,
+            tr(
+                "An estimate from heart rate alone: neither power nor pace is used, and a heart rate shaped by heat, sleep or illness is read like any other.",
+                "Une estimation à partir de la seule fréquence cardiaque : ni la puissance ni l'allure ne sont utilisées, et une fréquence cardiaque modifiée par la chaleur, le sommeil ou la maladie est lue comme les autres.",
+            ).to_string(),
+        ]
+        .join(" ");
         div()
             .flex()
             .flex_col()
             .gap(px(8.))
-            .max_w(px(760.))
             .text_color(t.soft)
             .child(heading(tr("Where these figures come from", "D'où viennent ces chiffres")).text_color(t.text))
-            .child(line(tr(
-                "Each outing is given points of load: the minutes spent in each zone of heart rate, weighted from 1 (50-60% of the maximum) to 5 (90% and above); under 50%, nothing. The points of a day are added up, rest days count for zero.",
-                "Chaque sortie reçoit des points de charge : les minutes passées dans chaque zone de fréquence cardiaque, pondérées de 1 (50-60 % du maximum) à 5 (90 % et plus) ; sous 50 %, rien. Les points d'un jour s'additionnent, un jour de repos vaut zéro.",
-            ).into()))
-            .child(line(trf(
-                format!("Fatigue is the daily load averaged over about {FATIGUE_DAYS:.0} days, form over about {FORM_DAYS:.0} days (each day weighs a little less than the one after it). Freshness is form minus fatigue, both at the end of the same day."),
-                format!("La fatigue est la charge quotidienne moyennée sur environ {FATIGUE_DAYS:.0} jours, la forme sur environ {FORM_DAYS:.0} jours (chaque jour pèse un peu moins que le suivant). La fraîcheur est la forme moins la fatigue, toutes deux en fin de journée."),
-            )))
-            .child(line(max))
-            .child(line(kinds))
-            .child(line(tr(
-                "An estimate from heart rate alone: neither power nor pace is used, and a heart rate shaped by heat, sleep or illness is read like any other.",
-                "Une estimation à partir de la seule fréquence cardiaque : ni la puissance ni l'allure ne sont utilisées, et une fréquence cardiaque modifiée par la chaleur, le sommeil ou la maladie est lue comme les autres.",
-            ).into()))
+            .child(text)
     }
 }
 
