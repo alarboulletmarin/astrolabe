@@ -41,7 +41,11 @@ fn dir_in(kind: Dir, os: &str, var: impl Fn(&str) -> Option<std::ffi::OsString>)
     }
 }
 
+/// Tests write in a folder of their own, never in the user's.
 fn dir(kind: Dir) -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("astrolabe-tests-{}", std::process::id())).join(["data", "config", "cache"][kind as usize]);
+    }
     dir_in(kind, std::env::consts::OS, |name| std::env::var_os(name))
 }
 
