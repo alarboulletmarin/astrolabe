@@ -125,6 +125,12 @@ impl Data {
         Data { acts: Arc::new(acts), key_loaded: true, status: Status::Idle, ..Self::blank(theme) }
     }
 
+    /// The same, with the tracks already read.
+    #[cfg(test)]
+    pub fn with_tracks(theme: Theme, acts: Vec<Activity>, derived: HashMap<i64, Derived>) -> Self {
+        Data { derived: Arc::new(derived), ..Self::with_activities(theme, acts) }
+    }
+
     fn blank(theme: Theme) -> Self {
         Data {
             acts: Arc::new(Vec::new()),

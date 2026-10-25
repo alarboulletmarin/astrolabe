@@ -9,6 +9,7 @@ use crate::ui::theme::{MONO, SANS, Theme};
 use crate::views::activity::ActivityView;
 use crate::views::calendar::CalendarView;
 use crate::views::dashboard::DashboardView;
+use crate::views::form::FormView;
 use crate::views::heatmap::HeatmapView;
 use crate::views::journal::JournalView;
 use crate::views::records::RecordsView;
@@ -50,6 +51,7 @@ pub struct Shell {
     calendar: Entity<CalendarView>,
     activity: Entity<ActivityView>,
     stats: Entity<StatsView>,
+    form: Entity<FormView>,
     records: Entity<RecordsView>,
     heatmap: Entity<HeatmapView>,
     settings: Entity<SettingsView>,
@@ -73,6 +75,7 @@ impl Shell {
         let calendar = cx.new(|cx| CalendarView::new(data.clone(), width.clone(), cx));
         let activity = cx.new(|cx| ActivityView::new(data.clone(), width.clone(), cx));
         let stats = cx.new(|cx| StatsView::new(data.clone(), width.clone(), window, cx));
+        let form = cx.new(|cx| FormView::new(data.clone(), width.clone(), cx));
         let records = cx.new(|cx| RecordsView::new(data.clone(), width.clone(), cx));
         let heatmap = cx.new(|cx| HeatmapView::new(data.clone(), cx));
         let settings = cx.new(|cx| SettingsView::new(data.clone(), width.clone(), window, cx));
@@ -92,12 +95,13 @@ impl Shell {
             cx.subscribe_in(&calendar, window, Self::follow),
             cx.subscribe_in(&activity, window, Self::follow),
             cx.subscribe_in(&stats, window, Self::follow),
+            cx.subscribe_in(&form, window, Self::follow),
             cx.subscribe_in(&records, window, Self::follow),
             cx.subscribe_in(&heatmap, window, Self::follow),
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Shell { data, page: Page::Dashboard, history: History::new(Page::Dashboard), dashboard, journal, calendar, activity, stats, records, heatmap, settings, focus, width, _subscriptions: subs }
+        Shell { data, page: Page::Dashboard, history: History::new(Page::Dashboard), dashboard, journal, calendar, activity, stats, form, records, heatmap, settings, focus, width, _subscriptions: subs }
     }
 
     /// Shows `page` and makes it the newest history entry. Moving from one activity to another
@@ -211,6 +215,7 @@ impl Shell {
             .child(item("rail-journal", Page::Journal, IconName::NotebookText, "Journal", cx))
             .child(item("rail-calendar", Page::Calendar, IconName::Calendar, tr("Calendar", "Calendrier"), cx))
             .child(item("rail-stats", Page::Stats, IconName::ChartColumn, tr("Statistics", "Statistiques"), cx))
+            .child(item("rail-form", Page::Form, IconName::HeartPulse, tr("Form", "Forme"), cx))
             .child(item("rail-records", Page::Records, IconName::Trophy, "Records", cx))
             .child(item("rail-map", Page::Heatmap, IconName::Map, tr("Heatmap", "Carte de chaleur"), cx))
             // The empty part of the rail moves the window, as in Bref.
@@ -365,6 +370,7 @@ impl Render for Shell {
             Page::Calendar => self.calendar.clone().into_any_element(),
             Page::Activity(_) => self.activity.clone().into_any_element(),
             Page::Stats => self.stats.clone().into_any_element(),
+            Page::Form => self.form.clone().into_any_element(),
             Page::Records => self.records.clone().into_any_element(),
             Page::Heatmap => self.heatmap.clone().into_any_element(),
             Page::Settings => self.settings.clone().into_any_element(),

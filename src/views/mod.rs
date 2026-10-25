@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod calendar;
 pub mod dashboard;
+pub mod form;
 pub mod heatmap;
 pub mod journal;
 pub mod map;
@@ -25,6 +26,7 @@ pub enum Page {
     Calendar,
     Activity(i64),
     Stats,
+    Form,
     Records,
     Heatmap,
     Settings,

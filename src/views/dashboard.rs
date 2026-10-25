@@ -66,7 +66,7 @@ fn dashes(color: Hsla) -> Div {
 }
 
 /// A key figure: its label, the value in big mono with its unit in small sans, and its notes.
-fn stat(label: String, value: String, notes: [String; 2], t: Theme) -> Div {
+pub(super) fn stat(label: String, value: String, notes: [String; 2], t: Theme) -> Div {
     let (n, unit) = split_unit(&value);
     div()
         .flex()

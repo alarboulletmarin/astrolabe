@@ -5,6 +5,7 @@ pub mod calendar;
 pub mod columns;
 pub mod dashboard;
 pub mod fit;
+pub mod form;
 pub mod history;
 pub mod journal;
 pub mod map;

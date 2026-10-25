@@ -58,7 +58,7 @@ fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
 fn the_rail_opens_pages_and_the_keys_walk_through_them(cx: &mut TestAppContext) {
     let (shell, cx) = start(cx, 5);
     assert_eq!(page(&shell, cx), Page::Dashboard);
-    for (rail, expected) in [("rail-journal", Page::Journal), ("rail-calendar", Page::Calendar), ("rail-stats", Page::Stats), ("rail-records", Page::Records), ("rail-map", Page::Heatmap), ("rail-settings", Page::Settings)] {
+    for (rail, expected) in [("rail-journal", Page::Journal), ("rail-calendar", Page::Calendar), ("rail-stats", Page::Stats), ("rail-form", Page::Form), ("rail-records", Page::Records), ("rail-map", Page::Heatmap), ("rail-settings", Page::Settings)] {
         click(cx, rail);
         assert_eq!(page(&shell, cx), expected, "{rail}");
     }
@@ -67,7 +67,7 @@ fn the_rail_opens_pages_and_the_keys_walk_through_them(cx: &mut TestAppContext) 
     cx.simulate_keystrokes("alt-left");
     assert_eq!(page(&shell, cx), Page::Heatmap);
     cx.simulate_keystrokes("alt-left alt-left");
-    assert_eq!(page(&shell, cx), Page::Stats);
+    assert_eq!(page(&shell, cx), Page::Form);
     cx.simulate_keystrokes("alt-right");
     assert_eq!(page(&shell, cx), Page::Records);
     // Back past the first page, and forward past the last: nothing breaks, nothing moves.
@@ -99,7 +99,7 @@ fn a_journal_row_opens_the_outing(cx: &mut TestAppContext) {
 fn every_page_draws_empty_and_full(cx: &mut TestAppContext) {
     for n in [0, 1, 1500] {
         let (shell, cx) = start(cx, n);
-        for rail in ["rail-journal", "rail-calendar", "rail-stats", "rail-records", "rail-map", "rail-settings", "rail-dashboard"] {
+        for rail in ["rail-journal", "rail-calendar", "rail-stats", "rail-form", "rail-records", "rail-map", "rail-settings", "rail-dashboard"] {
             click(cx, rail);
         }
         assert_eq!(page(&shell, cx), Page::Dashboard, "{n} outings");
@@ -134,7 +134,7 @@ fn every_page_draws_in_english(cx: &mut TestAppContext) {
     for n in [0, 1, 1500] {
         let (shell, cx) = start(cx, n);
         cx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(1600.)));
-        for rail in ["rail-journal", "rail-calendar", "rail-stats", "rail-records", "rail-map", "rail-settings", "rail-dashboard"] {
+        for rail in ["rail-journal", "rail-calendar", "rail-stats", "rail-form", "rail-records", "rail-map", "rail-settings", "rail-dashboard"] {
             click(cx, rail);
         }
         assert_eq!(page(&shell, cx), Page::Dashboard, "{n} outings");
@@ -147,4 +147,58 @@ fn every_page_draws_in_english(cx: &mut TestAppContext) {
     assert_eq!(ranks, 10);
     click(cx, "rank-road-5-3");
     assert!(matches!(page(&shell, cx), Page::Activity(_)));
+}
+
+/// `n` outings, one a day up to today, each with the time it spent in a band of heart rate; the
+/// highest `max_hr` of them is 190, the second 188.
+fn trained(cx: &mut TestAppContext, n: i64) -> (Entity<Shell>, &mut gpui::VisualTestContext) {
+    cx.update(gpui_kit::init);
+    cx.update(bind_keys);
+    cx.update(init_fonts);
+    let today = crate::views::today();
+    let acts: Vec<_> = (0..n)
+        .map(|i| {
+            let mut a = outing(1000 - i, 1, "running");
+            a.start_time_local = format!("{} 08:00:00", today - chrono::Days::new(i as u64));
+            a
+        })
+        .collect();
+    let derived = acts
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let mut bands = vec![0.0; 40];
+            bands[28] = 2400.0 + i as f32 * 10.0; // 140-145 bpm
+            (a.activity_id, crate::logic::fit::Derived { hr_bands: bands, max_hr: [190.0, 188.0, 170.0][i % 3], ..Default::default() })
+        })
+        .collect();
+    let (shell, cx) = cx.add_window_view(move |window, cx| {
+        let data = cx.new(|_| Data::with_tracks(Theme::for_appearance(window.appearance()), acts, derived));
+        Shell::with_data(data, window, cx)
+    });
+    cx.run_until_parked();
+    (shell, cx)
+}
+
+/// The form page says why when it has nothing to work out, and draws its figures when it has.
+#[gpui::test]
+fn the_form_page_draws_figures_when_heart_rates_are_known(cx: &mut TestAppContext) {
+    for english in [false, true] {
+        let _lang = crate::lang::force(!english);
+        // Outings, but no track read: no maximum heart rate, so no load.
+        let (_, cx) = start(cx, 5);
+        click(cx, "rail-form");
+        assert!(cx.debug_bounds("form-empty").is_some() && cx.debug_bounds("form-figures").is_none());
+        // None at all.
+        let (_, cx) = start(cx, 0);
+        click(cx, "rail-form");
+        assert!(cx.debug_bounds("form-empty").is_some());
+        // One outing, a few days, weeks, more than a year: figures every time.
+        for n in [1, 3, 8, 50, 400] {
+            let (_, cx) = trained(cx, n);
+            cx.simulate_resize(gpui::size(gpui::px(1300.), gpui::px(1500.)));
+            click(cx, "rail-form");
+            assert!(cx.debug_bounds("form-figures").is_some() && cx.debug_bounds("form-empty").is_none(), "{n} outings");
+        }
+    }
 }
