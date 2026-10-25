@@ -245,6 +245,7 @@ impl JournalView {
                 let cells = shown.iter().map(|c| (*c, self.cell(*c, a, ix))).collect();
                 div()
                     .id(("row", ix))
+                    .debug_selector(move || format!("row-{id}"))
                     .w_full()
                     .h(px(ROW_H))
                     .px(px(10.))

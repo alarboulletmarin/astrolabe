@@ -111,7 +111,19 @@ impl Snapshot {
 
 impl Data {
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
-        let mut data = Data {
+        let mut data = Self::blank(theme);
+        data.start(cx);
+        data
+    }
+
+    /// Data that never reads the disk nor the key store, never goes online: for the tests of the window.
+    #[cfg(test)]
+    pub fn with_activities(theme: Theme, acts: Vec<Activity>) -> Self {
+        Data { acts: Arc::new(acts), key_loaded: true, status: Status::Idle, ..Self::blank(theme) }
+    }
+
+    fn blank(theme: Theme) -> Self {
+        Data {
             acts: Arc::new(Vec::new()),
             derived: Arc::new(HashMap::new()),
             theme,
@@ -128,9 +140,7 @@ impl Data {
             fetch: Fetch::default(),
             tiles: HashMap::new(),
             tiles_busy: 0,
-        };
-        data.start(cx);
-        data
+        }
     }
 
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {

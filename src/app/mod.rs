@@ -62,6 +62,10 @@ impl Shell {
         let theme = Theme::for_appearance(window.appearance());
         KitTheme::change(if theme.dark { ThemeMode::Dark } else { ThemeMode::Light }, Some(window), cx);
         let data = cx.new(|cx| Data::new(theme, cx));
+        Self::with_data(data, window, cx)
+    }
+
+    fn with_data(data: Entity<Data>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let width = Width::default();
         let dashboard = cx.new(|cx| DashboardView::new(data.clone(), width.clone(), cx));
         let journal = cx.new(|cx| JournalView::new(data.clone(), width.clone(), window, cx));
@@ -150,6 +154,7 @@ impl Shell {
             let on = current == view;
             div()
                 .id(id)
+                .debug_selector(|| id.into())
                 .size(px(30.))
                 .rounded(px(6.))
                 .flex()
@@ -445,3 +450,6 @@ impl Render for Shell {
             })
     }
 }
+
+#[cfg(test)]
+mod tests;
