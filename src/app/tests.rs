@@ -36,6 +36,13 @@ fn start(cx: &mut TestAppContext, n: i64) -> (Entity<Shell>, &mut gpui::VisualTe
     (shell, cx)
 }
 
+/// A click on the top edge of `selector`, where a tall element (an unfolded row) has its own line.
+fn click_top(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+    let b = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not on screen"));
+    cx.simulate_click(b.origin + gpui::point(gpui::px(20.), gpui::px(14.)), gpui::Modifiers::none());
+    cx.run_until_parked();
+}
+
 fn page(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) -> Page {
     shell.read_with(cx, |s, _| s.page)
 }
@@ -97,4 +104,24 @@ fn every_page_draws_empty_and_full(cx: &mut TestAppContext) {
         }
         assert_eq!(page(&shell, cx), Page::Dashboard, "{n} outings");
     }
+}
+
+/// A record row opens on its ten best, a click on one opens its outing, and a second click on the row closes it.
+#[gpui::test]
+fn a_record_row_unfolds_its_ranking(cx: &mut TestAppContext) {
+    let (shell, cx) = start(cx, 30);
+    // Tall enough for the row to be laid out (what is below the window is not drawn).
+    cx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(1600.)));
+    click(cx, "rail-records");
+    assert!(cx.debug_bounds("rank-Course sur route-5-0").is_none(), "closed at first");
+    click(cx, "rec-Course sur route-5");
+    let ranks = (0..12).filter(|k| cx.debug_bounds(Box::leak(format!("rank-Course sur route-5-{k}").into_boxed_str())).is_some()).count();
+    assert_eq!(ranks, 10, "ten best, though there are fifteen runs");
+    // The row's own line closes it again.
+    click_top(cx, "rec-Course sur route-5");
+    assert!(cx.debug_bounds("rank-Course sur route-5-0").is_none());
+    // A click on a ranked outing opens it (and does not close nor open anything else).
+    click_top(cx, "rec-Course sur route-5");
+    click(cx, "rank-Course sur route-5-3");
+    assert!(matches!(page(&shell, cx), Page::Activity(_)));
 }

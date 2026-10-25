@@ -263,6 +263,14 @@ impl Track {
         out
     }
 
+    /// The highest mean heart rate over `HOLD` consecutive samples. A wrist sensor now and then
+    /// reads 220 for one beat; one reading is not a maximum. 0 without heart rate.
+    pub fn max_hr(&self) -> f32 {
+        const HOLD: usize = 5;
+        let hr: Vec<Option<f32>> = self.samples.iter().map(|s| s.hr.filter(|h| *h > 0.0 && *h < 300.0)).collect();
+        hr.windows(HOLD).filter_map(|w| w.iter().copied().sum::<Option<f32>>().map(|t| t / HOLD as f32)).fold(0.0, f32::max)
+    }
+
     /// Seconds per `BAND`-bpm band of heart rate. Each sample counts until the next one, at most
     /// 20 s: a pause is not time spent at the heart rate it started with.
     pub fn hr_bands(&self) -> Vec<f32> {
@@ -307,13 +315,16 @@ pub struct Derived {
     /// heart rate.
     #[serde(default)]
     pub hr_bands: Vec<f32>,
+    /// Highest heart rate held over a few seconds; 0 without heart rate.
+    #[serde(default)]
+    pub max_hr: f32,
     /// The `VERSION` that derived it: an older entry is derived again from its file.
     #[serde(default)]
     pub version: u32,
 }
 
 /// Raised when `derive` keeps something new.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const PROFILE: usize = 48;
 pub const BAND: f32 = 5.0;
 
@@ -322,7 +333,7 @@ pub const EFFORTS: [f64; 13] =
     [400.0, 1000.0, 1609.344, 5000.0, 10_000.0, 15_000.0, 20_000.0, 21_097.5, 42_195.0, 50_000.0, 100_000.0, 1500.0, 40_000.0];
 
 pub fn derive(track: &Track) -> Derived {
-    Derived { line: track.line(15.0), efforts: track.best_efforts(&EFFORTS), profile: track.altitude(PROFILE), hr_bands: track.hr_bands(), version: VERSION }
+    Derived { line: track.line(15.0), efforts: track.best_efforts(&EFFORTS), profile: track.altitude(PROFILE), hr_bands: track.hr_bands(), max_hr: track.max_hr(), version: VERSION }
 }
 
 #[cfg(test)]
@@ -452,6 +463,15 @@ mod tests {
         assert!(Track::default().hr_bands().is_empty());
         let junk = Track { samples: vec![Sample { hr: Some(0.0), ..Default::default() }, Sample { t: 5.0, hr: Some(900.0), ..Default::default() }, Sample { t: 9.0, ..Default::default() }], laps: vec![] };
         assert!(junk.hr_bands().is_empty());
+        // The highest mean over 5 samples: one spiked reading is not a maximum, a gap breaks the run.
+        let beats = |v: &[Option<f32>]| Track { samples: v.iter().enumerate().map(|(i, h)| Sample { t: i as f32, hr: *h, ..Default::default() }).collect(), laps: vec![] }.max_hr();
+        let mut steady = vec![Some(150.0); 20];
+        steady[10] = Some(220.0);
+        assert_eq!(beats(&steady), 164.0);
+        assert_eq!(beats(&[Some(150.0); 4]), 0.0);
+        assert_eq!(beats(&[Some(150.0), Some(150.0), None, Some(190.0), Some(190.0), Some(190.0), Some(190.0)]), 0.0);
+        assert_eq!(beats(&[Some(180.0); 5]), 180.0);
+        assert_eq!(Track::default().max_hr(), 0.0);
         // What is kept says which version kept it.
         assert_eq!(derive(&Track::default()).version, VERSION);
         assert_eq!(Derived::default().version, 0);

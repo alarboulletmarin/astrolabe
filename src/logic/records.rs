@@ -2,7 +2,7 @@
 
 use crate::logic::activity::{Activity, Sport, fmt_clock, fmt_km, fmt_m};
 use crate::logic::fit::Derived;
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, NaiveDate, Weekday};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -12,20 +12,39 @@ pub enum Kind {
     Longest,
     MostClimb,
     LongestTime,
+    /// Highest heart rate held a few seconds, in bpm.
+    MaxHr,
+    /// The week (Monday to Sunday) with the most kilometres, seconds or metres of climb.
+    WeekDistance,
+    WeekTime,
+    WeekClimb,
 }
 
+impl Kind {
+    pub fn is_week(self) -> bool {
+        matches!(self, Kind::WeekDistance | Kind::WeekTime | Kind::WeekClimb)
+    }
+
+    /// Whether the smaller the value, the better: a time over a distance.
+    pub fn is_time_over_distance(self) -> bool {
+        matches!(self, Kind::Effort(_))
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct Board {
     pub title: &'static str,
-    pub sport: Sport,
+    /// `None`: every sport together.
+    pub sport: Option<Sport>,
     /// Leaves out treadmill, indoor and virtual runs, whose distances are estimates.
     pub outdoor: bool,
     pub rows: &'static [(&'static str, Kind)],
 }
 
-pub const BOARDS: [Board; 4] = [
+pub const BOARDS: [Board; 5] = [
     Board {
         title: "Course sur route",
-        sport: Sport::Run,
+        sport: Some(Sport::Run),
         outdoor: true,
         rows: &[
             ("1 km", Kind::Effort(1000.0)),
@@ -38,7 +57,7 @@ pub const BOARDS: [Board; 4] = [
     },
     Board {
         title: "Trail",
-        sport: Sport::Trail,
+        sport: Some(Sport::Trail),
         outdoor: false,
         rows: &[
             ("Plus longue distance", Kind::Longest),
@@ -53,7 +72,7 @@ pub const BOARDS: [Board; 4] = [
     },
     Board {
         title: "Vélo",
-        sport: Sport::Bike,
+        sport: Some(Sport::Bike),
         outdoor: false,
         rows: &[
             ("20 km", Kind::Effort(20_000.0)),
@@ -65,13 +84,27 @@ pub const BOARDS: [Board; 4] = [
     },
     Board {
         title: "Natation",
-        sport: Sport::Swim,
+        sport: Some(Sport::Swim),
         outdoor: false,
         rows: &[
             ("400 m", Kind::Effort(400.0)),
             ("1 000 m", Kind::Effort(1000.0)),
             ("1 500 m", Kind::Effort(1500.0)),
             ("Plus longue nage", Kind::Longest),
+        ],
+    },
+    Board {
+        title: "En tout genre",
+        sport: None,
+        outdoor: false,
+        rows: &[
+            ("Plus longue sortie", Kind::Longest),
+            ("Plus longue durée", Kind::LongestTime),
+            ("Plus gros dénivelé", Kind::MostClimb),
+            ("FC maximale", Kind::MaxHr),
+            ("Semaine la plus longue", Kind::WeekDistance),
+            ("Semaine la plus chargée", Kind::WeekTime),
+            ("Semaine la plus haute", Kind::WeekClimb),
         ],
     },
 ];
@@ -91,29 +124,54 @@ pub struct Entry {
 
 /// The `n` best of a board's row, best first.
 pub fn podium(acts: &[Activity], derived: &HashMap<i64, Derived>, board: &Board, kind: Kind, year: Option<i32>, n: usize) -> Vec<Entry> {
-    let mut out: Vec<Entry> = acts
-        .iter()
-        .filter(|a| a.sport() == board.sport && (!board.outdoor || outdoor(a)))
-        .filter_map(|a| {
-            let date = a.date()?;
-            if year.is_some_and(|y| date.year() != y) {
-                return None;
-            }
-            let value = match kind {
-                Kind::Effort(m) => derived.get(&a.activity_id)?.efforts.iter().find(|e| (e.metres as f64 - m).abs() < 0.5)?.seconds as f64,
-                Kind::Longest => a.distance?,
-                Kind::MostClimb => a.elevation_gain?,
-                Kind::LongestTime => a.duration?,
-            };
-            (value > 0.0).then_some(Entry { id: a.activity_id, value, date })
-        })
-        .collect();
-    match kind {
-        Kind::Effort(_) => out.sort_by(|a, b| a.value.total_cmp(&b.value)),
-        _ => out.sort_by(|a, b| b.value.total_cmp(&a.value)),
+    let of_board = acts.iter().filter(|a| board.sport.is_none_or(|s| a.sport() == s) && (!board.outdoor || outdoor(a)));
+    let dated = of_board.filter_map(|a| Some((a, a.date()?))).filter(|(_, date)| year.is_none_or(|y| date.year() == y));
+    let mut out: Vec<Entry> = if kind.is_week() {
+        weeks(dated, kind)
+    } else {
+        dated
+            .filter_map(|(a, date)| {
+                let value = match kind {
+                    Kind::Effort(m) => derived.get(&a.activity_id)?.efforts.iter().find(|e| (e.metres as f64 - m).abs() < 0.5)?.seconds as f64,
+                    Kind::Longest => a.distance?,
+                    Kind::MostClimb => a.elevation_gain?,
+                    Kind::LongestTime => a.duration?,
+                    Kind::MaxHr => derived.get(&a.activity_id)?.max_hr as f64,
+                    _ => return None,
+                };
+                (value > 0.0).then_some(Entry { id: a.activity_id, value, date })
+            })
+            .collect()
+    };
+    if kind.is_time_over_distance() {
+        out.sort_by(|a, b| a.value.total_cmp(&b.value));
+    } else {
+        out.sort_by(|a, b| b.value.total_cmp(&a.value));
     }
     out.truncate(n);
     out
+}
+
+/// One entry per week: the sum, dated by the Monday, standing for the week's longest outing (what a
+/// click opens). ponytail: a week cut by the year filter counts only its days in that year.
+fn weeks<'a>(acts: impl Iterator<Item = (&'a Activity, NaiveDate)>, kind: Kind) -> Vec<Entry> {
+    let mut by_week: HashMap<NaiveDate, (f64, f64, i64)> = HashMap::new();
+    for (a, date) in acts {
+        let monday = date.week(Weekday::Mon).first_day();
+        let value = match kind {
+            Kind::WeekDistance => a.distance,
+            Kind::WeekTime => a.duration,
+            _ => a.elevation_gain,
+        }
+        .unwrap_or(0.0);
+        let longest = a.duration.unwrap_or(0.0);
+        let slot = by_week.entry(monday).or_insert((0.0, -1.0, a.activity_id));
+        slot.0 += value;
+        if longest > slot.1 {
+            (slot.1, slot.2) = (longest, a.activity_id);
+        }
+    }
+    by_week.into_iter().filter(|(_, (v, ..))| *v > 0.0).map(|(date, (value, _, id))| Entry { id, value, date }).collect()
 }
 
 /// A record that beat the one before it.
@@ -133,16 +191,17 @@ pub struct Broken {
 /// beat it either.
 pub fn broken(acts: &[Activity], derived: &HashMap<i64, Derived>, sport: Option<Sport>, n: usize) -> Vec<Broken> {
     let mut out = Vec::new();
-    for board in BOARDS.iter().filter(|b| sport.is_none_or(|s| s == b.sport)) {
+    // The board of every sport together has none of its own to name: a record there is not a sport's.
+    for (board, board_sport) in BOARDS.iter().filter_map(|b| Some((b, b.sport?))).filter(|(_, s)| sport.is_none_or(|x| x == *s)) {
         for (row, kind) in board.rows {
             let mut all = podium(acts, derived, board, *kind, None, usize::MAX);
             all.sort_by_key(|e| (e.date, e.id));
             let mut best: Option<f64> = None;
             for entry in all {
-                let better = |prev: f64| if matches!(kind, Kind::Effort(_)) { entry.value < prev } else { entry.value > prev };
+                let better = |prev: f64| if kind.is_time_over_distance() { entry.value < prev } else { entry.value > prev };
                 match best {
                     Some(prev) if better(prev) => {
-                        out.push(Broken { board: board.title, row, sport: board.sport, kind: *kind, entry, previous: prev });
+                        out.push(Broken { board: board.title, row, sport: board_sport, kind: *kind, entry, previous: prev });
                         best = Some(entry.value);
                     }
                     None => best = Some(entry.value),
@@ -169,7 +228,10 @@ pub fn show(kind: Kind, sport: Sport, v: f64) -> (String, String) {
         }
         Kind::Longest => (fmt_km(v), String::new()),
         Kind::MostClimb => (fmt_m(v), String::new()),
-        Kind::LongestTime => (fmt_clock(v), String::new()),
+        Kind::LongestTime | Kind::WeekTime => (fmt_clock(v), String::new()),
+        Kind::MaxHr => (format!("{v:.0} bpm"), String::new()),
+        Kind::WeekDistance => (fmt_km(v), String::new()),
+        Kind::WeekClimb => (fmt_m(v), String::new()),
     }
 }
 
@@ -241,5 +303,47 @@ mod tests {
         assert_eq!(show(Kind::Effort(5000.0), Sport::Run, 1250.0), ("20:50".into(), "4:10 /km".into()));
         assert_eq!(show(Kind::Effort(40_000.0), Sport::Bike, 3600.0).1, "40,0 km/h");
         assert_eq!(show(Kind::Effort(400.0), Sport::Swim, 400.0).1, "1:40 /100m");
+    }
+
+    #[test]
+    fn records_of_every_sport_together() {
+        use super::broken;
+        let all = BOARDS.iter().find(|b| b.sport.is_none()).unwrap();
+        // Sunday 4 Oct and Monday 5 Oct are two weeks; 6 + 8 Oct make one (Mon 5 to Sun 11).
+        let acts = vec![
+            a(1, "2026-10-04 23:59:00", "running", 30_000.0, 9000.0, 100.0),
+            a(2, "2026-10-05 00:00:00", "cycling", 20_000.0, 3000.0, 50.0),
+            a(3, "2026-10-06 08:00:00", "cycling", 25_000.0, 4000.0, 60.0),
+            a(4, "2026-10-08 08:00:00", "walking", 5_000.0, 3600.0, 10.0),
+            a(5, "2027-01-01 08:00:00", "running", 1_000.0, 300.0, 0.0),
+        ];
+        let km = podium(&acts, &HashMap::new(), all, Kind::WeekDistance, None, 10);
+        // Week of 5 Oct: 50 km, its longest outing (by time) is 3; week of 28 Sep: 30 km; 2026-12-28: 1 km.
+        assert_eq!(km.iter().map(|e| (e.id, e.value, e.date.to_string())).collect::<Vec<_>>(), [(3, 50_000.0, "2026-10-05".into()), (1, 30_000.0, "2026-09-28".into()), (5, 1_000.0, "2026-12-28".into())]);
+        assert_eq!(podium(&acts, &HashMap::new(), all, Kind::WeekTime, None, 1)[0].value, 10_600.0);
+        assert_eq!(podium(&acts, &HashMap::new(), all, Kind::WeekClimb, None, 1)[0].value, 120.0);
+        // The year filter keeps whole outings: 2027 has one week of one outing.
+        assert_eq!(podium(&acts, &HashMap::new(), all, Kind::WeekDistance, Some(2027), 10).len(), 1);
+        // Narrowed to one sport, the board counts that sport alone: the 30 km run, not the rides.
+        let runs = super::Board { sport: Some(Sport::Run), ..*all };
+        assert_eq!(podium(&acts, &HashMap::new(), &runs, Kind::WeekDistance, None, 1)[0].value, 30_000.0);
+        assert_eq!(podium(&acts, &HashMap::new(), &runs, Kind::Longest, None, 10).len(), 2);
+        let rides = super::Board { sport: Some(Sport::Bike), ..*all };
+        assert_eq!(podium(&acts, &HashMap::new(), &rides, Kind::WeekDistance, None, 1)[0].value, 45_000.0);
+        assert!(podium(&acts, &HashMap::new(), &super::Board { sport: Some(Sport::Swim), ..*all }, Kind::Longest, None, 10).is_empty());
+        // Every sport competes in the plain rows.
+        assert_eq!(podium(&acts, &HashMap::new(), all, Kind::Longest, None, 1)[0].id, 1);
+        // A week with nothing but zeros leaves no entry; no outing, no entry.
+        assert!(podium(&[a(9, "2026-10-05 08:00:00", "yoga", 0.0, 0.0, 0.0)], &HashMap::new(), all, Kind::WeekDistance, None, 3).is_empty());
+        assert!(podium(&[], &HashMap::new(), all, Kind::WeekTime, None, 3).is_empty());
+        // The highest heart rate comes from the tracks; no track, no entry.
+        let hr = |v: f32| Derived { max_hr: v, ..Default::default() };
+        let derived: HashMap<i64, Derived> = [(1, hr(171.0)), (2, hr(188.0)), (3, hr(0.0))].into();
+        assert_eq!(podium(&acts, &derived, all, Kind::MaxHr, None, 10).iter().map(|e| e.id).collect::<Vec<_>>(), [2, 1]);
+        assert!(podium(&acts, &HashMap::new(), all, Kind::MaxHr, None, 10).is_empty());
+        assert_eq!(show(Kind::MaxHr, Sport::Run, 188.4).0, "188 bpm");
+        assert_eq!(show(Kind::WeekTime, Sport::Run, 36_000.0).0, show(Kind::LongestTime, Sport::Run, 36_000.0).0);
+        // Not a sport's record: nothing to say in the list of records beaten.
+        assert!(broken(&acts, &HashMap::new(), None, 20).iter().all(|b| b.board != "En tout genre"));
     }
 }
