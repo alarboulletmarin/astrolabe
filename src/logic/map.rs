@@ -45,6 +45,24 @@ pub fn bbox<'a>(lines: impl Iterator<Item = &'a [[f32; 2]]>, trim: f64) -> Optio
     Some([lats[k], lons[k], lats[hi.max(k)], lons[hi.max(k)]])
 }
 
+/// The box around where most of the points are: the 0.1° cell that holds the most, and every
+/// point within `radius` metres of their middle, trimmed like `bbox`. A few outings far from
+/// home do not zoom the map out to a whole country; they are there when one zooms out.
+pub fn home_bbox<'a>(lines: impl Iterator<Item = &'a [[f32; 2]]>, radius: f64, trim: f64) -> Option<[f64; 4]> {
+    let pts: Vec<[f32; 2]> = lines.flatten().copied().collect();
+    let cell = |p: &[f32; 2]| ((p[0] * 10.0).floor() as i32, (p[1] * 10.0).floor() as i32);
+    let mut counts: std::collections::HashMap<(i32, i32), usize> = std::collections::HashMap::new();
+    for p in &pts {
+        *counts.entry(cell(p)).or_default() += 1;
+    }
+    // The busiest cell; a tie goes to the smallest cell, so the choice does not change run to run.
+    let (home, _) = counts.into_iter().max_by_key(|(c, n)| (*n, std::cmp::Reverse(*c)))?;
+    let inside: Vec<&[f32; 2]> = pts.iter().filter(|p| cell(p) == home).collect();
+    let mid = [inside.iter().map(|p| p[0] as f64).sum::<f64>() / inside.len() as f64, inside.iter().map(|p| p[1] as f64).sum::<f64>() / inside.len() as f64];
+    let near: Vec<[f32; 2]> = pts.iter().copied().filter(|p| metres(mid, [p[0] as f64, p[1] as f64]) <= radius).collect();
+    bbox(std::iter::once(near.as_slice()), trim)
+}
+
 impl View {
     /// The largest zoom at which the box fits `w × h`, minus `pad` pixels on each side.
     pub fn fit(b: [f64; 4], w: f64, h: f64, pad: f64) -> View {
@@ -206,6 +224,24 @@ pub fn tint(png: &[u8], bg: [u8; 3], fg: [u8; 3]) -> Option<(u32, u32, Vec<u8>)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_is_where_most_points_are() {
+        // 300 points around Nice, 20 in Lyon, 10 in Brittany.
+        let nice: Vec<[f32; 2]> = (0..300).map(|i| [43.70 + (i % 30) as f32 * 0.002, 7.20 + (i / 30) as f32 * 0.01]).collect();
+        let lyon: Vec<[f32; 2]> = (0..20).map(|i| [45.75 + i as f32 * 0.001, 4.85]).collect();
+        let brittany: Vec<[f32; 2]> = (0..10).map(|i| [48.78, -2.95 + i as f32 * 0.001]).collect();
+        let lines = [nice.as_slice(), lyon.as_slice(), brittany.as_slice()];
+        let b = home_bbox(lines.iter().copied(), 50_000.0, 0.0).unwrap();
+        assert!(b[0] >= 43.69 && b[2] <= 43.77 && b[1] >= 7.19 && b[3] <= 7.30, "{b:?}");
+        // Everything, as before, reaches Brittany.
+        assert!(bbox(lines.iter().copied(), 0.0).unwrap()[2] > 48.0);
+        // Most points elsewhere: home moves with them. One point, none.
+        let b = home_bbox([lyon.as_slice()].into_iter(), 50_000.0, 0.0).unwrap();
+        assert!(b[0] > 45.0);
+        assert_eq!(home_bbox([[[44.0f32, 5.0]].as_slice()].into_iter(), 50_000.0, 0.0), Some([44.0, 5.0, 44.0, 5.0]));
+        assert_eq!(home_bbox(std::iter::empty(), 50_000.0, 0.0), None);
+    }
 
     #[test]
     fn fit_keeps_every_corner_inside_the_padding() {

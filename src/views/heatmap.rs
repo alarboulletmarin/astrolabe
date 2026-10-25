@@ -24,6 +24,9 @@ struct Heat {
     drawn: Option<u64>,
 }
 
+/// The map opens on the points within this many metres of where most of them are.
+const HOME_RADIUS: f64 = 50_000.0;
+
 pub struct HeatmapView {
     data: Entity<Data>,
     snap: Snapshot,
@@ -125,7 +128,7 @@ impl Render for HeatmapView {
             (&self.sports, self.year).hash(&mut h);
             h.finish()
         };
-        let bbox = map::bbox(ids.iter().filter_map(|id| self.snap.derived.get(id)).map(|d| d.line.as_slice()), 0.02);
+        let bbox = map::home_bbox(ids.iter().filter_map(|id| self.snap.derived.get(id)).map(|d| d.line.as_slice()), HOME_RADIUS, 0.01);
         self.map.fit(subject, bbox, false);
 
         let b = self.map.bounds.get();
