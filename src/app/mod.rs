@@ -205,7 +205,7 @@ impl Shell {
             .items_center()
             .py(px(12.))
             .gap(px(6.))
-            .child(crate::ui::drag_window(div().id("rail-logo").w_full().flex().justify_center().pb(px(10.)).font_family(MONO).font_weight(FontWeight::BOLD).text_size(px(15.)).text_color(t.accent).child("m.")))
+            .child(crate::ui::drag_window(div().id("rail-logo").w_full().flex().justify_center().pb(px(10.)).child(crate::ui::logo::logo(30., t.text, t.accent))))
             .child(self.travel_buttons(cx))
             .child(item("rail-dashboard", Page::Dashboard, IconName::LayoutDashboard, tr("Today", "Aujourd'hui"), cx))
             .child(item("rail-journal", Page::Journal, IconName::NotebookText, "Journal", cx))

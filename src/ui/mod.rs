@@ -2,6 +2,7 @@
 
 pub mod chart;
 pub mod format;
+pub mod logo;
 pub mod theme;
 
 use crate::logic::activity::Sport;
