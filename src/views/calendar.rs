@@ -8,13 +8,16 @@ use crate::logic::columns::{self, Column};
 use crate::logic::journal::{name, sports_present};
 use crate::ui::format::{calendar_title, month_name};
 use crate::ui::theme::blend;
-use crate::ui::{button, icon, num, page, pad, segmented, sport_icon, sport_tag, title};
+use crate::ui::{button, icon, num, page, pad, quantity, segmented, sport_icon, sport_tag, title};
 use crate::views::{Page, Width, today};
 use chrono::{Datelike, NaiveDate};
 use gpui_kit::assets::IconName;
 use gpui_kit::{prelude::FluentBuilder, *};
 
+/// The least height of a day in the month; the weeks share the height of the window beyond it.
 const CELL_H: f32 = 112.0;
+/// Height around the month's weeks: margins, title and controls, the days' names.
+const MONTH_CHROME: f32 = 210.0;
 /// How many outings a day cell lists before saying "+ n".
 const CHIPS: usize = 3;
 /// Width of the weekly totals beside a month, where there is room for it.
@@ -98,13 +101,15 @@ impl CalendarView {
         if a.sport().has_distance() && !d.is_empty() { d } else { a.duration.filter(|d| *d > 0.0).map(fmt_duration).unwrap_or_default() }
     }
 
-    fn month(&self, days: &std::collections::HashMap<NaiveDate, Vec<usize>>, inner: f32, cx: &mut Context<Self>) -> Div {
+    fn month(&self, days: &std::collections::HashMap<NaiveDate, Vec<usize>>, inner: f32, height: f32, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
         let today = today();
         let totals = inner >= 760.0;
         let cell_w = (inner - if totals { TOTALS_W } else { 0.0 }) / 7.0;
         let compact = cell_w < 74.0;
         let weeks = cal::month_weeks(self.anchor);
+        // The weeks fill the window rather than leave its lower half empty.
+        let cell_h = ((height - MONTH_CHROME) / weeks.len() as f32).max(CELL_H);
         let head = div()
             .flex()
             .children(DAYS.map(|d| div().flex_1().min_w_0().px(px(5.)).text_size(px(11.)).text_color(t.dim).child(d)))
@@ -123,7 +128,7 @@ impl CalendarView {
                     .id(("day", day.num_days_from_ce() as usize))
                     .flex_1()
                     .min_w_0()
-                    .h(px(CELL_H))
+                    .h(px(cell_h))
                     .p(px(5.))
                     .flex()
                     .flex_col()
@@ -149,8 +154,8 @@ impl CalendarView {
                 .children(cells)
                 .when(totals, |d| {
                     d.child(
-                        div().w(px(TOTALS_W)).flex_none().h(px(CELL_H)).border_t_1().border_color(t.border).pl(px(8.)).pt(px(7.)).text_size(px(12.)).text_color(t.soft).when(count > 0, |d| {
-                            d.child(num(fmt_duration(secs)).text_color(t.text)).child(div().text_color(t.dim).child(format!("{} sortie{}", group(count as i64), if count > 1 { "s" } else { "" })))
+                        div().w(px(TOTALS_W)).flex_none().h(px(cell_h)).border_t_1().border_color(t.border).pl(px(8.)).pt(px(7.)).text_size(px(12.)).text_color(t.soft).when(count > 0, |d| {
+                            d.child(quantity(&fmt_duration(secs), t).text_color(t.text)).child(div().text_color(t.dim).child(format!("{} sortie{}", group(count as i64), if count > 1 { "s" } else { "" })))
                         }),
                     )
                 })
@@ -327,7 +332,7 @@ impl Render for CalendarView {
         let inner = width - 2.0 * pad(width);
         let days = cal::by_day(&self.snap.acts, self.sport);
         let body = match self.mode {
-            Mode::Month => self.month(&days, inner, cx),
+            Mode::Month => self.month(&days, inner, window.viewport_size().height / px(1.), cx),
             Mode::Week => self.week(&days, inner, cx),
             Mode::Year => self.year(&days, inner, cx),
         };
