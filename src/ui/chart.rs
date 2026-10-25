@@ -6,6 +6,8 @@ use std::sync::Arc;
 pub struct Series {
     pub xs: Arc<Vec<f32>>,
     pub ys: Arc<Vec<Option<f32>>>,
+    /// `range(&ys)`, kept by the caller: it sorts every value.
+    pub scale: Option<(f32, f32)>,
     pub line: Hsla,
     pub fill: Hsla,
     /// Higher values drawn lower (a pace: faster is up).
@@ -42,7 +44,7 @@ pub fn line_chart(s: Series, hover: Option<usize>, guide: Hsla) -> Canvas<()> {
     canvas(
         |_, _, _| {},
         move |b, _, window, _| {
-            let (Some((lo, hi)), Some(&x0), Some(&x1)) = (range(&s.ys), s.xs.first(), s.xs.last()) else { return };
+            let (Some((lo, hi)), Some(&x0), Some(&x1)) = (s.scale, s.xs.first(), s.xs.last()) else { return };
             let span = (hi - lo).max(1e-3);
             // A little air above and below.
             let (lo, hi) = (lo - span * 0.08, hi + span * 0.08);

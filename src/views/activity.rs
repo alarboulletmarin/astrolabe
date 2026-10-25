@@ -5,8 +5,8 @@ use crate::data::{Data, Snapshot};
 use crate::logic::activity::{self as act, Activity, Metric, Sport, fmt_clock, fmt_km, fmt_m};
 use crate::logic::fit::{Split, Track};
 use crate::logic::journal::name;
-use crate::logic::profiles::profiles;
-use crate::ui::chart::{Series, line_chart, nearest};
+use crate::logic::profiles::{Profiles, profiles};
+use crate::ui::chart::{Series, line_chart, nearest, range};
 use crate::ui::format::{fr_long, fr_short};
 use crate::ui::theme::blend;
 use crate::ui::{Plots, button, figure, heading, icon, num, page, quantity, sport_tag, title};
@@ -28,6 +28,26 @@ struct Loaded {
     id: i64,
     track: Arc<Track>,
     splits: Vec<Split>,
+    /// What the charts and the map draw, worked out once: a hover repaints the page on every
+    /// mouse move, and these cost far more than a frame on a long activity.
+    drawn: Arc<Drawn>,
+}
+
+struct Drawn {
+    /// The track thinned for the map (the full samples would be tessellated at every frame).
+    line: Arc<Vec<[f32; 2]>>,
+    profiles: Profiles,
+    /// The charts' scales, in the order speed, heart rate, altitude.
+    scales: [Option<(f32, f32)>; 3],
+}
+
+impl Drawn {
+    fn new(track: &Track, sport: Sport) -> Self {
+        let profiles = profiles(track, sport);
+        let scales = [&profiles.speed, &profiles.hr, &profiles.alt].map(|ys| range(ys));
+        // ponytail: 15 m between points; zoomed in far enough, the map shows the corners.
+        Drawn { line: Arc::new(track.line(15.0)), profiles, scales }
+    }
 }
 
 enum TrackState {
@@ -108,7 +128,9 @@ impl ActivityView {
                 }
                 match res {
                     Ok((track, splits)) => {
-                        v.track = Some(Loaded { id, track: Arc::new(track), splits });
+                        let sport = v.snap.activity(id).map_or(Sport::Run, |a| a.sport());
+                        let drawn = Arc::new(Drawn::new(&track, sport));
+                        v.track = Some(Loaded { id, track: Arc::new(track), splits, drawn });
                         v.track_state = TrackState::None;
                     }
                     Err(e) => v.track_state = TrackState::Failed(id, e),
@@ -131,7 +153,7 @@ impl Render for ActivityView {
         };
         let s = a.sport();
         let wide = width >= 1180.0;
-        let loaded = self.track.as_ref().filter(|l| l.id == id).map(|l| (l.track.clone(), l.splits.clone()));
+        let loaded = self.track.as_ref().filter(|l| l.id == id).map(|l| (l.track.clone(), l.splits.clone(), l.drawn.clone()));
         let older = self.snap.index_of(id).and_then(|i| self.snap.acts.get(i + 1)).is_some();
         let newer = self.snap.index_of(id).is_some_and(|i| i > 0);
 
@@ -205,16 +227,16 @@ impl Render for ActivityView {
             figures = figures.child(figure("Calories", format!("{} kcal", act::group(c.round() as i64)), t));
         }
 
-        let map = self.activity_map(id, loaded.as_ref().map(|l| l.0.clone()), wide, cx);
+        let map = self.activity_map(id, loaded.as_ref().map(|l| (l.0.clone(), l.2.line.clone())), wide, cx);
         let charts = match &loaded {
-            Some((track, _)) => self.profile_charts(track, s, cx).into_any_element(),
+            Some((_, _, drawn)) => self.profile_charts(drawn, s, cx).into_any_element(),
             None => div().into_any_element(),
         };
         let side = div()
             .flex()
             .flex_col()
             .gap(px(28.))
-            .when_some(loaded.as_ref(), |d, (track, splits)| d.child(self.splits_table(splits, track, s)))
+            .when_some(loaded.as_ref(), |d, (track, splits, _)| d.child(self.splits_table(splits, track, s)))
             .child(self.history(&a, cx));
 
         let body = if wide {
@@ -232,7 +254,7 @@ impl Render for ActivityView {
 }
 
 impl ActivityView {
-    fn activity_map(&mut self, id: i64, track: Option<Arc<Track>>, wide: bool, cx: &mut Context<Self>) -> Div {
+    fn activity_map(&mut self, id: i64, track: Option<(Arc<Track>, Arc<Vec<[f32; 2]>>)>, wide: bool, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
         let height = if wide { 460. } else { 340. };
         let placeholder = |text: String, retry: bool, cx: &mut Context<Self>| {
@@ -255,23 +277,21 @@ impl ActivityView {
                     })))
                 })
         };
-        let Some(track) = track else {
+        let Some((track, points)) = track else {
             return match &self.track_state {
                 TrackState::Failed(x, e) if *x == id => placeholder(e.clone(), true, cx),
                 _ => placeholder("Lecture de la trace…".into(), false, cx),
             };
         };
-        let line: Vec<[f32; 2]> = track.positions().map(|p| [p[0] as f32, p[1] as f32]).collect();
-        if line.len() < 2 {
+        if points.len() < 2 {
             return placeholder("Pas de position GPS : activité en salle, ou sans GPS.".into(), false, cx);
         }
-        let bbox = line_bbox(&line);
+        let bbox = line_bbox(&points);
         self.map.fit(id as u64, bbox, false);
         let view = self.map.view;
         let bounds = self.map.bounds.get();
         let hover = self.hover.and_then(|i| track.samples.get(i)).and_then(|s| Some([s.lat?, s.lon?]));
         let (accent, ink, bg) = (t.accent, t.text, t.bg);
-        let points = Arc::new(line);
         let overlay = canvas(
             |_, _, _| {},
             move |b, _, window, _| {
@@ -306,9 +326,9 @@ impl ActivityView {
         div().h(px(height)).rounded(px(8.)).overflow_hidden().child(map_widget(&self.map, |v: &mut ActivityView| &mut v.map, &self.data, "act-map", Some(overlay), bbox, true, cx))
     }
 
-    fn profile_charts(&mut self, track: &Track, sport: Sport, cx: &mut Context<Self>) -> Div {
+    fn profile_charts(&mut self, drawn: &Drawn, sport: Sport, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
-        let p = profiles(track, sport);
+        let p = &drawn.profiles;
         let hover = self.hover;
         let at = |ys: &Arc<Vec<Option<f32>>>| hover.and_then(|i| ys.get(i).copied().flatten());
         let x_label = match hover.and_then(|i| p.xs.get(i)) {
@@ -319,21 +339,22 @@ impl ActivityView {
         let bounds = self.plots.get("profiles");
         let xs = p.xs.clone();
         let red = t.hue(0.0).1;
-        let rows: Vec<(&'static str, Arc<Vec<Option<f32>>>, Hsla, bool, Box<dyn Fn(f32) -> String>)> = vec![
+        let rows: Vec<(&'static str, Arc<Vec<Option<f32>>>, Option<(f32, f32)>, Hsla, bool, Box<dyn Fn(f32) -> String>)> = vec![
             (
                 if sport == Sport::Bike { "Vitesse" } else { "Allure" },
                 p.speed.clone(),
+                drawn.scales[0],
                 t.accent,
                 sport != Sport::Bike,
                 Box::new(move |v| speed_fmt(v, sport)),
             ),
-            ("Fréquence cardiaque", p.hr.clone(), red, false, Box::new(|v| format!("{v:.0} bpm"))),
-            ("Altitude", p.alt.clone(), t.soft, false, Box::new(|v| format!("{v:.0} m"))),
+            ("Fréquence cardiaque", p.hr.clone(), drawn.scales[1], red, false, Box::new(|v| format!("{v:.0} bpm"))),
+            ("Altitude", p.alt.clone(), drawn.scales[2], t.soft, false, Box::new(|v| format!("{v:.0} m"))),
         ];
         let charts: Vec<Div> = rows
             .into_iter()
-            .filter(|(_, ys, ..)| ys.iter().flatten().count() > 1)
-            .map(|(label, ys, color, invert, fmt)| {
+            .filter(|(_, ys, ..)| ys.iter().flatten().nth(1).is_some())
+            .map(|(label, ys, scale, color, invert, fmt)| {
                 let value = at(&ys).map(|v| fmt(v)).unwrap_or_default();
                 div()
                     .flex()
@@ -349,7 +370,7 @@ impl ActivityView {
                     )
                     .child(
                         div().h(px(96.)).child(
-                            line_chart(Series { xs: p.xs.clone(), ys, line: color, fill: blend(color, t.bg, 0.12), invert }, hover, t.soft).size_full(),
+                            line_chart(Series { xs: p.xs.clone(), ys, scale, line: color, fill: blend(color, t.bg, 0.12), invert }, hover, t.soft).size_full(),
                         ),
                     )
             })
