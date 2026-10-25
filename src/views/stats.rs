@@ -2,9 +2,10 @@
 //! total, compared with the period before or the year before. A click on a group lists it.
 
 use crate::data::{Data, Snapshot};
-use crate::logic::activity::{self as act, Activity, Group, Measure, Point, Query, Sport, fmt_clock, fmt_duration, fmt_km, fmt_m, week_start};
+use crate::lang::{colon, pct, plural, tr, trf};
+use crate::logic::activity::{self as act, Activity, Group, Measure, Point, Query, Sport, fmt_clock, fmt_duration, fmt_km, fmt_m, outings, week_start};
 use crate::logic::journal::{short_name, sports_present};
-use crate::ui::format::{fr_day, fr_short, month_short, totals_line};
+use crate::ui::format::{day_label, day_month_short, month_short, short_date, totals_line, weekday_short};
 use crate::ui::theme::blend;
 use crate::ui::{Plots, heading, icon, num, pad, page, quantity, segmented, sport_icon, sport_tag, title};
 use crate::views::{Page, Width, today};
@@ -42,22 +43,22 @@ enum Menu {
 fn presets(today: NaiveDate) -> [(&'static str, NaiveDate, NaiveDate); 6] {
     let months = |n: u32| today.checked_sub_months(chrono::Months::new(n)).unwrap() + Days::new(1);
     [
-        ("Les 4 dernières semaines", week_start(today) - Days::new(21), today),
-        ("Les 3 derniers mois", months(3), today),
-        ("Les 6 derniers mois", months(6), today),
-        ("Les 12 derniers mois", months(12), today),
-        ("Cette année", today.with_ordinal(1).unwrap(), today),
-        ("Depuis le début", NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(), today),
+        (tr("Last 4 weeks", "Les 4 dernières semaines"), week_start(today) - Days::new(21), today),
+        (tr("Last 3 months", "Les 3 derniers mois"), months(3), today),
+        (tr("Last 6 months", "Les 6 derniers mois"), months(6), today),
+        (tr("Last 12 months", "Les 12 derniers mois"), months(12), today),
+        (tr("This year", "Cette année"), today.with_ordinal(1).unwrap(), today),
+        (tr("Since the start", "Depuis le début"), NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(), today),
     ]
 }
 
 const GUTTER: f32 = 64.;
 const PLOT_H: f32 = 280.;
 
-/// "12 oct.", "oct. 2026", "2026": a group as its axis reads it.
+/// "12 oct.", "oct. 2026", "2026" ("Oct 12", "Oct 2026"): a group as its axis reads it.
 pub fn group_label(g: Group, d: NaiveDate) -> String {
     match g {
-        Group::Day | Group::Week => format!("{} {}", d.day(), month_short(d.month0())),
+        Group::Day | Group::Week => day_month_short(d.day(), d.month0()),
         Group::Month => format!("{} {}", month_short(d.month0()), d.year()),
         Group::Year => d.year().to_string(),
     }
@@ -69,17 +70,17 @@ pub fn period_label(from: NaiveDate, to: NaiveDate) -> String {
     if from.ordinal() == 1 && from.year() == to.year() {
         from.year().to_string()
     } else {
-        format!("{} → {}", fr_day(from, NaiveDate::MIN), fr_day(to, NaiveDate::MIN))
+        format!("{} → {}", day_label(from, NaiveDate::MIN), day_label(to, NaiveDate::MIN))
     }
 }
 
 fn cumul_title(m: Measure) -> String {
     match m {
-        Measure::Time => "Temps cumulé jour après jour".into(),
-        Measure::Distance => "Distance cumulée jour après jour".into(),
-        Measure::Elevation => "Dénivelé cumulé jour après jour".into(),
-        Measure::Count => "Sorties cumulées jour après jour".into(),
-        m => format!("{}, moyenne depuis le début de la période", m.label()),
+        Measure::Time => tr("Time, accumulated day by day", "Temps cumulé jour après jour").into(),
+        Measure::Distance => tr("Distance, accumulated day by day", "Distance cumulée jour après jour").into(),
+        Measure::Elevation => tr("Elevation, accumulated day by day", "Dénivelé cumulé jour après jour").into(),
+        Measure::Count => tr("Outings, accumulated day by day", "Sorties cumulées jour après jour").into(),
+        m => format!("{}, {}", m.label(), tr("average since the start of the period", "moyenne depuis le début de la période")),
     }
 }
 
@@ -214,8 +215,8 @@ impl Render for StatsView {
         let t = self.snap.theme;
         if self.snap.acts.is_empty() {
             return page("stats", width).track_scroll(self.width.scroll())
-                .child(title("Statistiques"))
-                .child(div().text_color(t.soft).child("Les graphiques se dessinent dès la première synchronisation."))
+                .child(title(tr("Statistics", "Statistiques")))
+                .child(div().text_color(t.soft).child(tr("The charts draw themselves from the first synchronisation.", "Les graphiques se dessinent dès la première synchronisation.")))
                 .into_any_element();
         }
         let q = self.query.clone();
@@ -228,7 +229,7 @@ impl Render for StatsView {
         }
         let chart_tabs = segmented(
             "chart",
-            vec![("Barres".into(), self.chart == Chart::Bars), ("Cumul".into(), self.chart == Chart::Cumul)],
+            vec![(tr("Bars", "Barres").into(), self.chart == Chart::Bars), (tr("Running total", "Cumul").into(), self.chart == Chart::Cumul)],
             t,
             cx,
             |this: &mut StatsView, i, _, _| {
@@ -240,9 +241,9 @@ impl Render for StatsView {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(div().flex().flex_wrap().items_center().justify_between().gap(px(12.)).child(title("Statistiques")).child(chart_tabs))
+            .child(div().flex().flex_wrap().items_center().justify_between().gap(px(12.)).child(title(tr("Statistics", "Statistiques"))).child(chart_tabs))
             .child(self.sentence(cx))
-            .child(div().text_color(t.soft).child(if tot.count == 0 { "Aucune sortie sur cette période.".into() } else { totals_line(&tot) }));
+            .child(div().text_color(t.soft).child(if tot.count == 0 { tr("No outings in this period.", "Aucune sortie sur cette période.").into() } else { totals_line(&tot) }));
 
         // The plots' width: known before their first frame, so labels and cells fit at once.
         let inner = width - 2.0 * pad(width);
@@ -273,18 +274,21 @@ impl StatsView {
         let today = today();
         let period = match self.preset {
             Some(i) => presets(today)[i].0.to_lowercase(),
-            None => format!("du {} au {}", fr_day(q.from, NaiveDate::MIN), fr_day(q.to, NaiveDate::MIN)),
+            None => {
+                let (from, to) = (day_label(q.from, NaiveDate::MIN), day_label(q.to, NaiveDate::MIN));
+                trf(format!("from {from} to {to}"), format!("du {from} au {to}"))
+            }
         };
         let sports = match q.sports.as_slice() {
-            [] => "tous les sports".to_string(),
+            [] => tr("all sports", "tous les sports").to_string(),
             [s] => s.label().to_lowercase(),
-            [a, b] => format!("{} et {}", a.label().to_lowercase(), b.label().to_lowercase()),
+            [a, b] => format!("{} {} {}", a.label().to_lowercase(), tr("and", "et"), b.label().to_lowercase()),
             more => format!("{} sports", more.len()),
         };
         let compare = match self.compare {
-            Compare::None => "sans comparaison",
-            Compare::Previous => "comparé à la période d'avant",
-            Compare::Year => "comparé à un an avant",
+            Compare::None => tr("no comparison", "sans comparaison"),
+            Compare::Previous => tr("compared to the period before", "comparé à la période d'avant"),
+            Compare::Year => tr("compared to a year before", "comparé à un an avant"),
         };
         let dot = || div().text_color(t.dim).child("·");
         let step = |id: &'static str, name: IconName, back: bool, cx: &mut Context<Self>| {
@@ -308,7 +312,7 @@ impl StatsView {
             .gap(px(6.))
             .text_size(px(16.))
             .child(self.word("tok-measure", Menu::Measure, q.measure.label().into(), cx))
-            .child(self.word("tok-group", Menu::Group, format!("par {}", q.group.label().to_lowercase()), cx))
+            .child(self.word("tok-group", Menu::Group, format!("{} {}", tr("by", "par"), q.group.label().to_lowercase()), cx))
             .child(dot())
             .child(step("prev-range", IconName::ChevronLeft, true, cx))
             .child(if self.custom {
@@ -369,7 +373,7 @@ impl StatsView {
             }
             Menu::Group => {
                 for g in Group::ALL {
-                    rows.push((format!("par {}", g.label().to_lowercase()), g == q.group, Box::new(move |h, _, _| {
+                    rows.push((format!("{} {}", tr("by", "par"), g.label().to_lowercase()), g == q.group, Box::new(move |h, _, _| {
                         h.query.group = g;
                         h.pick = None;
                     })));
@@ -382,11 +386,11 @@ impl StatsView {
                         h.set_range(from, to, Some(i), w, cx);
                     })));
                 }
-                rows.push(("Choisir les dates…".into(), self.custom, Box::new(|h, _, _| h.custom = true)));
+                rows.push((tr("Pick dates…", "Choisir les dates…").into(), self.custom, Box::new(|h, _, _| h.custom = true)));
             }
             Menu::Sports => {
                 keep = true;
-                rows.push(("Tous les sports".into(), q.sports.is_empty(), Box::new(|h, _, _| h.query.sports.clear())));
+                rows.push((tr("All sports", "Tous les sports").into(), q.sports.is_empty(), Box::new(|h, _, _| h.query.sports.clear())));
                 for s in sports_present(&self.snap.acts) {
                     rows.push((s.label().into(), q.sports.contains(&s), Box::new(move |h, _, _| {
                         let list = &mut h.query.sports;
@@ -401,7 +405,11 @@ impl StatsView {
                 }
             }
             Menu::Compare => {
-                for (label, c) in [("Sans comparaison", Compare::None), ("Avec la période d'avant", Compare::Previous), ("Avec la même période un an avant", Compare::Year)] {
+                for (label, c) in [
+                    (tr("No comparison", "Sans comparaison"), Compare::None),
+                    (tr("With the period before", "Avec la période d'avant"), Compare::Previous),
+                    (tr("With the same period a year before", "Avec la même période un an avant"), Compare::Year),
+                ] {
                     rows.push((label.into(), self.compare == c, Box::new(move |h, _, _| h.compare = c)));
                 }
             }
@@ -492,14 +500,13 @@ impl StatsView {
         let today = today();
         let readout = shown.and_then(|i| cur.get(i)).map_or(String::new(), |p| {
             let mut s = format!(
-                "{} · {} · {} sortie{}",
-                if p.from == p.to { fr_day(p.from, today) } else { format!("{} → {}", fr_day(p.from, today), fr_day(p.to, today)) },
+                "{} · {} · {}",
+                if p.from == p.to { day_label(p.from, today) } else { format!("{} → {}", day_label(p.from, today), day_label(p.to, today)) },
                 p.value.map(|v| q.measure.fmt(v, bike)).unwrap_or("—".into()),
-                p.count,
-                if p.count > 1 { "s" } else { "" }
+                outings(p.count),
             );
             if let Some(Some(v)) = shown.and_then(|i| pv.get(i)) {
-                s += &format!(" · avant : {}", q.measure.fmt(*v, bike));
+                s += &format!(" · {}{}{}", tr("before", "avant"), colon(), q.measure.fmt(*v, bike));
             }
             s
         });
@@ -605,7 +612,7 @@ impl StatsView {
                     .flex_wrap()
                     .justify_between()
                     .gap(px(10.))
-                    .child(heading(format!("{} par {}", q.measure.label(), q.group.label().to_lowercase())))
+                    .child(heading(format!("{} {} {}", q.measure.label(), tr("per", "par"), q.group.label().to_lowercase())))
                     .child(num(readout).text_size(px(12.)).text_color(t.soft)),
             )
             .child(self.plot_frame(floor, max, q.measure, area.into_any_element()))
@@ -646,11 +653,11 @@ impl StatsView {
         let now = cur.get(at).copied().flatten();
         let then = prev.get(at).copied().flatten();
         let readout = {
-            let mut s = format!("au {} : {}", fr_day(date, today), now.map(|v| q.measure.fmt(v, bike)).unwrap_or("—".into()));
+            let mut s = format!("{} {}{}{}", tr("as of", "au"), day_label(date, today), colon(), now.map(|v| q.measure.fmt(v, bike)).unwrap_or("—".into()));
             if let (Some(v), Some(c)) = (then, self.compared()) {
-                s += &format!(" · {} : {}", period_label(c.from, c.to), q.measure.fmt(v, bike));
+                s += &format!(" · {}{}{}", period_label(c.from, c.to), colon(), q.measure.fmt(v, bike));
                 if let Some(c) = now.filter(|_| v > 0.0 && q.measure.sums()) {
-                    s += &format!(" ({:+.0} %)", (c / v - 1.0) * 100.0);
+                    s += &format!(" ({:+.0}{})", (c / v - 1.0) * 100.0, pct());
                 }
             }
             s
@@ -753,7 +760,7 @@ impl StatsView {
         let every = ((n as f32 * 80.0 / pw.max(1.0)).ceil() as usize).max(1);
         let xlabels = (0..n).filter(|i| i % every == 0 && pw * *i as f32 / (n.max(2) - 1) as f32 + 52.0 <= pw).map(|i| {
             let d = q.from + Days::new(i as u64);
-            num(format!("{} {}", d.day(), month_short(d.month0())))
+            num(day_month_short(d.day(), d.month0()))
                 .absolute()
                 .left(px(pw * i as f32 / (n.max(2) - 1) as f32))
                 .text_size(px(11.))
@@ -799,15 +806,15 @@ impl StatsView {
         let sub = Query { from, to, ..q.clone() };
         let list: Vec<Activity> = self.snap.acts.iter().filter(|a| sub.keeps(a)).cloned().collect();
         let today = today();
-        let title_text = if from == to { fr_day(from, today) } else { format!("{} → {}", fr_day(from, today), fr_day(to, today)) };
+        let title_text = if from == to { day_label(from, today) } else { format!("{} → {}", day_label(from, today), day_label(to, today)) };
         div()
             .flex()
             .flex_col()
             .child(heading(title_text).mb(px(2.)))
             .child(div().text_size(px(12.)).text_color(t.soft).mb(px(8.)).child(if list.is_empty() {
-                "Aucune sortie.".to_string()
+                tr("No outings.", "Aucune sortie.").to_string()
             } else {
-                format!("{} sortie{} · un clic sur le graphique change la sélection", list.len(), if list.len() > 1 { "s" } else { "" })
+                format!("{} · {}", outings(list.len()), tr("a click on the chart changes the selection", "un clic sur le graphique change la sélection"))
             }))
             .children(list.iter().take(40).enumerate().map(|(i, a)| {
                 let id = a.activity_id;
@@ -823,12 +830,12 @@ impl StatsView {
                     .cursor_pointer()
                     .hover(|d| d.bg(t.panel))
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
-                    .child(num(a.date().map(fr_short).unwrap_or_default()).w(px(96.)).flex_none().text_size(px(12.)).text_color(t.soft))
+                    .child(num(a.date().map(short_date).unwrap_or_default()).w(px(96.)).flex_none().text_size(px(12.)).text_color(t.soft))
                     .child(icon(sport_icon(a.sport()), t.soft, 14.))
                     .child(div().flex_1().min_w_0().truncate().child(short_name(a)))
                     .child(quantity(&own_value(q.measure, a, bike), t).font_weight(FontWeight::BOLD))
             }))
-            .when(list.len() > 40, |d| d.child(div().pt(px(6.)).text_size(px(12.)).text_color(t.soft).child(format!("… et {} autres", list.len() - 40))))
+            .when(list.len() > 40, |d| d.child(div().pt(px(6.)).text_size(px(12.)).text_color(t.soft).child(format!("… {} {} {}", tr("and", "et"), list.len() - 40, tr("more", "autres")))))
     }
 
     /// The range sport by sport, with the change against the compared period.
@@ -851,7 +858,7 @@ impl StatsView {
         div()
             .flex()
             .flex_col()
-            .child(heading("Par sport").mb(px(10.)))
+            .child(heading(tr("By sport", "Par sport")).mb(px(10.)))
             .child(
                 div()
                     .flex()
@@ -861,10 +868,10 @@ impl StatsView {
                     .text_color(t.dim)
                     .child(div().w(px(110.)).child("Sport"))
                     .child(div().flex_1().child(q.measure.label()))
-                    .child(cell(div().child("Sorties"), 64.))
-                    .when(cmp.is_some(), |d| d.child(cell(div().child("Évolution"), 80.))),
+                    .child(cell(div().child(tr("Outings", "Sorties")), 64.))
+                    .when(cmp.is_some(), |d| d.child(cell(div().child(tr("Change", "Évolution")), 80.))),
             )
-            .when(rows.is_empty(), |d| d.child(div().text_color(t.soft).child("Rien sur cette période.")))
+            .when(rows.is_empty(), |d| d.child(div().text_color(t.soft).child(tr("Nothing in this period.", "Rien sur cette période."))))
             .children(rows.into_iter().map(|(s, p, b)| {
                 let bike = s == Sport::Bike;
                 let share = if q.measure.sums() { p.value.map_or(0.0, |v| v / top) } else { 1.0 };
@@ -873,7 +880,7 @@ impl StatsView {
                         let d = (now / then - 1.0) * 100.0;
                         // A faster pace is a smaller number: say it as progress.
                         let d = if q.measure == Measure::Pace { -d } else { d };
-                        format!("{d:+.0} %")
+                        format!("{d:+.0}{}", pct())
                     }
                     _ => "—".into(),
                 };
@@ -922,9 +929,17 @@ impl StatsView {
         }
         let hover = self.cal_hover;
         let summary = match hover.and_then(|i| days.get(i)) {
-            Some(p) if p.count > 0 => format!("{} · {}", fr_day(p.from, today), q.measure.fmt(p.value.unwrap_or(0.0), self.bike_only())),
-            Some(p) => format!("{} · repos", fr_day(p.from, today)),
-            None => format!("{} jours actifs · plus longue série : {} semaine{}", sorted.len(), longest, if longest > 1 { "s" } else { "" }),
+            Some(p) if p.count > 0 => format!("{} · {}", day_label(p.from, today), q.measure.fmt(p.value.unwrap_or(0.0), self.bike_only())),
+            Some(p) => format!("{} · {}", day_label(p.from, today), tr("rest", "repos")),
+            None => format!(
+                "{} {} · {}{}{} {}",
+                sorted.len(),
+                plural(sorted.len(), tr("active day", "jour actif"), tr("active days", "jours actifs")),
+                tr("longest streak", "plus longue série"),
+                colon(),
+                longest,
+                plural(longest, tr("week", "semaine"), tr("weeks", "semaines"))
+            ),
         };
         let shade = move |v: f64, accent: Hsla, bg: Hsla, rest: Hsla| if v > 0.0 { blend(accent, bg, (0.3 + 0.7 * (v / p90).min(1.0)) as f32) } else { rest };
         let (rest, accent, bg, ink) = (t.border, t.accent, t.bg, t.text);
@@ -945,16 +960,16 @@ impl StatsView {
         )
         .w(px(weeks as f32 * (cell + gap) - gap))
         .h(px(7.0 * cell + 6.0 * gap));
-        let weekdays = div().w(px(label_w)).flex_none().relative().children([(0usize, "lun"), (2, "mer"), (4, "ven")].map(|(row, l)| {
+        let weekdays = div().w(px(label_w)).flex_none().relative().children([0usize, 2, 4].map(|row| (row, weekday_short(row).trim_end_matches('.'))).map(|(row, l)| {
             div().absolute().top(px(row as f32 * (cell + gap) + cell / 2.0 - 7.0)).text_size(px(11.)).text_color(t.dim).child(l)
         }));
         let months = (0..weeks).filter_map(|col| {
             let d = first + Days::new(col as u64 * 7);
             (d.day() <= 7 && col as f32 * (cell + gap) + 34.0 <= w - label_w).then(|| num(month_short(d.month0())).absolute().left(px(label_w + col as f32 * (cell + gap))).text_size(px(11.)).text_color(t.dim))
         });
-        let legend = div().flex().items_center().gap(px(3.)).text_size(px(11.)).text_color(t.dim).child("moins").children(
+        let legend = div().flex().items_center().gap(px(3.)).text_size(px(11.)).text_color(t.dim).child(tr("less", "moins")).children(
             [0.0, 0.3, 0.6, 1.0].map(|l| div().size(px(10.)).rounded(px(2.)).bg(shade(l * p90, accent, bg, rest))),
-        ).child("plus");
+        ).child(tr("more", "plus"));
         let hit = bounds.clone();
         div()
             .flex()
@@ -967,7 +982,7 @@ impl StatsView {
                     .items_end()
                     .justify_between()
                     .gap(px(10.))
-                    .child(div().flex().flex_col().gap(px(3.)).child(heading(format!("Régularité · {} semaines", weeks))).child(num(summary).text_size(px(12.)).text_color(t.soft)))
+                    .child(div().flex().flex_col().gap(px(3.)).child(heading(format!("{} · {} {}", tr("Consistency", "Régularité"), weeks, tr("weeks", "semaines")))).child(num(summary).text_size(px(12.)).text_color(t.soft)))
                     .child(legend),
             )
             .child(div().relative().h(px(14.)).children(months))
@@ -1026,5 +1041,19 @@ mod tests {
         assert_eq!(period_label(day(2025, 1, 1), day(2025, 12, 31)), "2025");
         assert_eq!(period_label(day(2026, 1, 1), day(2026, 10, 24)), "2026");
         assert_eq!(period_label(day(2025, 3, 10), day(2025, 12, 31)), "10 mars 2025 → 31 décembre 2025");
+    }
+
+    #[test]
+    fn axis_labels_in_english() {
+        let _english = crate::lang::force(false);
+        let d = NaiveDate::from_ymd_opt(2026, 10, 5).unwrap();
+        assert_eq!(group_label(Group::Day, d), "Oct 5");
+        assert_eq!(group_label(Group::Week, d), "Oct 5");
+        assert_eq!(group_label(Group::Month, d), "Oct 2026");
+        assert_eq!(group_label(Group::Year, d), "2026");
+        let day = |y, m, dd| NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        assert_eq!(period_label(day(2025, 1, 1), day(2025, 12, 31)), "2025");
+        assert_eq!(period_label(day(2025, 3, 10), day(2025, 12, 31)), "March 10, 2025 → December 31, 2025");
+        assert_eq!(period_label(day(2026, 1, 1), day(2026, 10, 24)), "2026");
     }
 }

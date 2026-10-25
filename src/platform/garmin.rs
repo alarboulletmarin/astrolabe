@@ -37,7 +37,7 @@ fn page(token: &str, start: usize) -> Result<Vec<Activity>, String> {
         .map_err(http_error)?
         .body_mut()
         .read_json()
-        .map_err(|e| format!("Réponse inattendue de Garmin : {e}"))
+        .map_err(|e| format!("{} : {e}", crate::lang::tr("Unexpected answer from Garmin", "Réponse inattendue de Garmin")))
 }
 
 /// Fetches activities newer than the ones already known (newest first) and returns the merged list.

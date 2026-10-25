@@ -9,7 +9,8 @@ use crate::logic::calendar as cal;
 use crate::logic::dashboard as dash;
 use crate::logic::journal::{name, sports_present};
 use crate::logic::records::{self, Broken};
-use crate::ui::format::{fr_day, fr_short, fr_weekday, month_short, split_unit};
+use crate::lang::{colon, plural, tr, trf};
+use crate::ui::format::{day_label, month_short, short_date, split_unit, weekday_label, weekday_short};
 use crate::ui::theme::{Theme, blend};
 use crate::ui::{heading, icon, num, page, segmented, sport_icon, title};
 use crate::views::{Page, Width, today};
@@ -50,7 +51,7 @@ impl DashboardView {
         let since = dash::mondays(today, HEAT_WEEKS)[0];
         let lately: Vec<act::Activity> = self.snap.acts.iter().filter(|a| a.date().is_some_and(|d| d >= since) || Some(a.sport()) == self.sport).cloned().collect();
         let present = sports_present(&lately);
-        let mut items = vec![("Tout".into(), self.sport.is_none())];
+        let mut items = vec![(tr("All", "Tout").into(), self.sport.is_none())];
         items.extend(present.iter().map(|s| (s.label().into(), self.sport == Some(*s))));
         segmented("dash-sport", items, self.snap.theme, cx, move |this: &mut DashboardView, i, _, _| {
             this.sport = if i == 0 { None } else { Some(present[i - 1]) };
@@ -89,15 +90,15 @@ fn stat(label: String, value: String, notes: [String; 2], t: Theme) -> Div {
 fn tick_label(metric: Metric, v: f64) -> String {
     match metric {
         Metric::Distance if v.fract() == 0.0 => format!("{}\u{a0}km", group(v as i64)),
-        Metric::Distance => format!("{:.1}\u{a0}km", v).replace('.', ","),
+        Metric::Distance => crate::lang::decimal(format!("{:.1}\u{a0}km", v)),
         Metric::Time if v.fract() == 0.0 => format!("{}h", group(v as i64)),
         Metric::Time => fmt_duration(v * 3600.0),
     }
 }
 
-/// "1 sortie", "3 sorties".
-fn count(n: usize, one: &str, many: &str) -> String {
-    format!("{}\u{a0}{}", group(n as i64), if n > 1 { many } else { one })
+/// "1 sortie", "3 sorties" (the words are said already in the language).
+fn count(n: usize, one: &'static str, many: &'static str) -> String {
+    format!("{}\u{a0}{}", group(n as i64), plural(n, one, many))
 }
 
 /// A list row: the outing's day, its sport and name, then two figures. Lined up with the heading
@@ -132,13 +133,16 @@ impl Render for DashboardView {
             .items_end()
             .justify_between()
             .gap(px(14.))
-            .child(div().flex().flex_col().gap(px(4.)).child(title("Aujourd'hui")).child(div().text_color(t.soft).child(fr_weekday(today))))
+            .child(div().flex().flex_col().gap(px(4.)).child(title(tr("Today", "Aujourd'hui"))).child(div().text_color(t.soft).child(weekday_label(today))))
             .when(!self.snap.acts.is_empty(), |d| d.child(self.sport_filter(today, cx)));
         if self.snap.acts.is_empty() {
             return page("dashboard", width)
                 .track_scroll(self.width.scroll())
                 .child(head)
-                .child(div().text_color(t.soft).child("Aucune sortie pour l'instant : la synchronisation (en bas du rail) les rapporte depuis Garmin."))
+                .child(div().text_color(t.soft).child(tr(
+                    "No outings yet: the synchronisation (at the bottom of the rail) brings them from Garmin.",
+                    "Aucune sortie pour l'instant : la synchronisation (en bas du rail) les rapporte depuis Garmin.",
+                )))
                 .into_any_element();
         }
 
@@ -169,23 +173,30 @@ impl Render for DashboardView {
             .gap_x(px(56.))
             .gap_y(px(20.))
             .child(stat(
-                "Cette semaine".into(),
+                tr("This week", "Cette semaine").into(),
                 metric.fmt(totals[WEEKS - 1]),
                 [
-                    format!("{} · {}", count(outings, "sortie", "sorties"), if left == 0 { "dernier jour".into() } else { format!("encore {}", count(left, "jour", "jours")) }),
-                    median.map(|m| format!("semaine médiane : {}", metric.fmt(m))).unwrap_or_default(),
+                    format!(
+                        "{} · {}",
+                        count(outings, tr("outing", "sortie"), tr("outings", "sorties")),
+                        match left {
+                            0 => tr("last day", "dernier jour").into(),
+                            _ => trf(format!("{} left", count(left, "day", "days")), format!("encore {}", count(left, "jour", "jours"))),
+                        }
+                    ),
+                    median.map(|m| format!("{}{}{}", tr("median week", "semaine médiane"), colon(), metric.fmt(m))).unwrap_or_default(),
                 ],
                 t,
             ))
             .child(stat(
-                "Série".into(),
-                count(streak.weeks as usize, "semaine", "semaines"),
+                tr("Streak", "Série").into(),
+                count(streak.weeks as usize, tr("week", "semaine"), tr("weeks", "semaines")),
                 [
-                    "au moins une sortie chaque semaine".into(),
+                    tr("at least one outing every week", "au moins une sortie chaque semaine").into(),
                     if streak.longest_weeks > streak.weeks {
-                        format!("record : {}", count(streak.longest_weeks as usize, "semaine", "semaines"))
+                        format!("record{}{}", colon(), count(streak.longest_weeks as usize, tr("week", "semaine"), tr("weeks", "semaines")))
                     } else if streak.weeks > 1 {
-                        "la plus longue à ce jour".into()
+                        tr("the longest so far", "la plus longue à ce jour").into()
                     } else {
                         String::new()
                     },
@@ -193,10 +204,14 @@ impl Render for DashboardView {
                 t,
             ))
             .child(stat(
-                format!("En {}", today.year()),
+                format!("{} {}", tr("In", "En"), today.year()),
                 metric.fmt(ytd),
                 [
-                    if ytd_before > 0.0 { format!("{} à la même date : {}", today.year() - 1, metric.fmt(ytd_before)) } else { format!("rien en {} à la même date", today.year() - 1) },
+                    if ytd_before > 0.0 {
+                        format!("{} {}{}{}", today.year() - 1, tr("on the same date", "à la même date"), colon(), metric.fmt(ytd_before))
+                    } else {
+                        trf(format!("nothing in {} on the same date", today.year() - 1), format!("rien en {} à la même date", today.year() - 1))
+                    },
                     String::new(),
                 ],
                 t,
@@ -208,7 +223,7 @@ impl Render for DashboardView {
             let scale = top * 1.06;
             let y = move |v: f64| (v / scale) as f32 * BARS;
             let body = if top <= 0.0 {
-                div().h(px(BARS)).text_color(t.soft).child(format!("Rien sur ces {WEEKS} semaines.")).into_any_element()
+                div().h(px(BARS)).text_color(t.soft).child(trf(format!("Nothing in these {WEEKS} weeks."), format!("Rien sur ces {WEEKS} semaines."))).into_any_element()
             } else {
                 let grid = dash::ticks(top / unit);
                 let bars = weeks.iter().enumerate().map(|(i, parts)| {
@@ -216,10 +231,11 @@ impl Render for DashboardView {
                     let current = i == WEEKS - 1;
                     let lines: Vec<(String, String)> = sports.iter().zip(parts).filter(|(_, v)| **v > 0.0).map(|(s, v)| (s.label().to_string(), metric.fmt(*v))).collect();
                     let head = format!(
-                        "{} {} : {}",
-                        if current { "Cette semaine, du" } else { "Semaine du" },
-                        fr_day(mondays[i], today),
-                        if total > 0.0 { metric.fmt(total) } else { "rien".into() }
+                        "{} {}{}{}",
+                        if current { tr("This week, from", "Cette semaine, du") } else { tr("Week of", "Semaine du") },
+                        day_label(mondays[i], today),
+                        colon(),
+                        if total > 0.0 { metric.fmt(total) } else { tr("nothing", "rien").into() }
                     );
                     let slot = div().id(("dash-week", i)).flex_1().min_w_0().h_full().flex().flex_col().justify_end().tooltip_show_delay(crate::ui::TIP_DELAY).tooltip(move |window, cx| {
                         let (head, lines) = (head.clone(), lines.clone());
@@ -288,13 +304,13 @@ impl Render for DashboardView {
                 .text_size(px(12.))
                 .text_color(t.soft)
                 .when(sports.len() > 1, |d| d.children(sports.iter().enumerate().map(|(i, s)| key(div().size(px(8.)).rounded(px(2.)).bg(shade(i)), s.label().into()))))
-                .when(top > 0.0, |d| d.child(key(div().size(px(8.)).rounded(px(2.)).border_1().border_dashed().border_color(t.accent), "semaine en cours".into())))
-                .when_some(median, |d, m| d.child(key(dashes(t.text).w(px(14.)), format!("médiane : {}", metric.fmt(m)))));
+                .when(top > 0.0, |d| d.child(key(div().size(px(8.)).rounded(px(2.)).border_1().border_dashed().border_color(t.accent), tr("current week", "semaine en cours").into())))
+                .when_some(median, |d, m| d.child(key(dashes(t.text).w(px(14.)), format!("{}{}{}", tr("median", "médiane"), colon(), metric.fmt(m)))));
             div()
                 .flex()
                 .flex_col()
                 .gap(px(12.))
-                .child(div().flex().flex_wrap().items_baseline().gap_x(px(10.)).child(heading(format!("{} par semaine", metric.label()))).child(div().text_size(px(12.)).text_color(t.dim).child(format!("{WEEKS} semaines"))))
+                .child(div().flex().flex_wrap().items_baseline().gap_x(px(10.)).child(heading(format!("{} {}", metric.label(), tr("per week", "par semaine")))).child(div().text_size(px(12.)).text_color(t.dim).child(format!("{WEEKS} {}", tr("weeks", "semaines")))))
                 .child(body)
                 .child(legend)
         };
@@ -325,7 +341,11 @@ impl Render for DashboardView {
                     }
                     let list = days.get(&day).cloned().unwrap_or_default();
                     let secs = seconds(&day);
-                    let tip = if list.is_empty() { format!("{} : repos", fr_short(day)) } else { format!("{} : {} · {}", fr_short(day), count(list.len(), "sortie", "sorties"), fmt_duration(secs)) };
+                    let tip = if list.is_empty() {
+                        format!("{}{}{}", short_date(day), colon(), tr("rest", "repos"))
+                    } else {
+                        format!("{}{}{} · {}", short_date(day), colon(), count(list.len(), tr("outing", "sortie"), tr("outings", "sorties")), fmt_duration(secs))
+                    };
                     let first = list.first().map(|i| acts[*i].activity_id);
                     slot.id(("dash-day", w * 7 + k as usize))
                         .rounded(px(2.))
@@ -340,7 +360,8 @@ impl Render for DashboardView {
                 let first = (0..7).map(|k| *m + Days::new(k)).find(|d| d.day() == 1);
                 div().w(px(cell_w)).flex_none().whitespace_nowrap().children(first.map(|d| month_short(d.month0())))
             });
-            let names = ["lun", "", "mer", "", "ven", "", ""];
+            let names = [0, 2, 4].map(|i| weekday_short(i).trim_end_matches('.'));
+            let names = [names[0], "", names[1], "", names[2], "", ""];
             div()
                 .flex()
                 .flex_col()
@@ -351,8 +372,11 @@ impl Render for DashboardView {
                         .flex_wrap()
                         .items_baseline()
                         .gap_x(px(10.))
-                        .child(heading("Régularité"))
-                        .child(div().text_size(px(12.)).text_color(t.dim).child(format!("{} sur les {n} dernières semaines", count(active, "jour actif", "jours actifs")))),
+                        .child(heading(tr("Consistency", "Régularité")))
+                        .child(div().text_size(px(12.)).text_color(t.dim).child(trf(
+                            format!("{} over the last {n} weeks", count(active, "active day", "active days")),
+                            format!("{} sur les {n} dernières semaines", count(active, "jour actif", "jours actifs")),
+                        ))),
                 )
                 .child(
                     div()
@@ -369,7 +393,7 @@ impl Render for DashboardView {
                                 .child(div().w(px(names_w - gap)).flex_none().flex().flex_col().gap(px(gap)).children(names.map(|n| div().h(px(cell)).flex().items_center().child(n))))
                                 .children(columns),
                         )
-                        .child(div().flex().items_center().gap(px(4.)).pl(px(names_w)).pt(px(4.)).child("repos").children((0..=4u8).map(|l| div().size(px(10.)).rounded(px(2.)).bg(fill(l)))).child("plus de temps")),
+                        .child(div().flex().items_center().gap(px(4.)).pl(px(names_w)).pt(px(4.)).child(tr("rest", "repos")).children((0..=4u8).map(|l| div().size(px(10.)).rounded(px(2.)).bg(fill(l)))).child(tr("more time", "plus de temps"))),
                 )
         };
 
@@ -380,7 +404,7 @@ impl Render for DashboardView {
             .flex_col()
             .gap(px(2.))
             .child(
-                div().flex().items_baseline().justify_between().pb(px(6.)).child(heading("Dernières sorties")).child(
+                div().flex().items_baseline().justify_between().pb(px(6.)).child(heading(tr("Latest outings", "Dernières sorties"))).child(
                     div()
                         .id("dash-journal")
                         .text_size(px(12.))
@@ -388,7 +412,7 @@ impl Render for DashboardView {
                         .cursor_pointer()
                         .hover(|d| d.text_color(t.accent))
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(Page::Journal)))
-                        .child("tout le journal"),
+                        .child(tr("whole journal", "tout le journal")),
                 ),
             )
             .children(dash::recent(acts, sport, RECENT).into_iter().map(|i| {
@@ -396,7 +420,7 @@ impl Render for DashboardView {
                 let id = a.activity_id;
                 let distance = a.distance.filter(|d| *d > 0.0 && a.sport().has_distance()).map(fmt_km).unwrap_or_default();
                 let time = a.duration.filter(|d| *d > 0.0).map(fmt_duration).unwrap_or_default();
-                outing_row(("dash-recent", i), a.date().map(fr_short).filter(|_| !narrow), a.sport(), name(a), [distance, time], t).on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
+                outing_row(("dash-recent", i), a.date().map(short_date).filter(|_| !narrow), a.sport(), name(a), [distance, time], t).on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
             }));
         let since = today - Days::new(FRESH - 1);
         let fresh: Vec<Broken> = records::broken(acts, &self.snap.derived, sport, 5).into_iter().filter(|b| b.entry.date >= since).collect();
@@ -404,13 +428,13 @@ impl Render for DashboardView {
             .flex()
             .flex_col()
             .gap(px(2.))
-            .child(div().pb(px(6.)).child(heading("Records de ces deux semaines")))
-            .when(fresh.is_empty(), |d| d.child(div().text_color(t.soft).child("Aucun record battu ces deux dernières semaines.")))
+            .child(div().pb(px(6.)).child(heading(tr("Records of the last two weeks", "Records de ces deux semaines"))))
+            .when(fresh.is_empty(), |d| d.child(div().text_color(t.soft).child(tr("No record broken in the last two weeks.", "Aucun record battu ces deux dernières semaines."))))
             .children(fresh.into_iter().enumerate().map(|(k, b)| {
                 let id = b.entry.id;
                 let (now, _) = records::show(b.kind, b.sport, b.entry.value);
                 let (was, _) = records::show(b.kind, b.sport, b.previous);
-                outing_row(("dash-record", k), Some(fr_short(b.entry.date)).filter(|_| !narrow), b.sport, format!("{} · {}", b.row, b.board), [now, format!("avant {was}")], t)
+                outing_row(("dash-record", k), Some(short_date(b.entry.date)).filter(|_| !narrow), b.sport, format!("{} · {}", b.row, b.board), [now, format!("{} {was}", tr("was", "avant"))], t)
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
             }));
         let bottom = div().flex().when(inner < 860.0, |d| d.flex_col()).gap(px(40.)).child(recent.flex_1().min_w_0()).child(records.flex_1().min_w_0());
@@ -430,6 +454,7 @@ impl Render for DashboardView {
 #[cfg(test)]
 mod tests {
     use super::{Metric, count, tick_label};
+    use crate::lang::force;
 
     #[test]
     fn counts_and_grid_labels() {
@@ -439,6 +464,20 @@ mod tests {
         assert_eq!(tick_label(Metric::Distance, 10.0), "10\u{a0}km");
         assert_eq!(tick_label(Metric::Distance, 2.5), "2,5\u{a0}km");
         assert_eq!(tick_label(Metric::Distance, 1000.0), "1\u{a0}000\u{a0}km");
+        assert_eq!(tick_label(Metric::Time, 5.0), "5h");
+        assert_eq!(tick_label(Metric::Time, 0.5), "30min");
+    }
+
+    #[test]
+    fn counts_and_grid_labels_in_english() {
+        let _english = force(false);
+        assert_eq!(count(0, "week", "weeks"), "0\u{a0}weeks");
+        assert_eq!(count(1, "active day", "active days"), "1\u{a0}active day");
+        assert_eq!(count(2, "active day", "active days"), "2\u{a0}active days");
+        assert_eq!(count(1_200, "active day", "active days"), "1,200\u{a0}active days");
+        assert_eq!(tick_label(Metric::Distance, 10.0), "10\u{a0}km");
+        assert_eq!(tick_label(Metric::Distance, 2.5), "2.5\u{a0}km");
+        assert_eq!(tick_label(Metric::Distance, 1000.0), "1,000\u{a0}km");
         assert_eq!(tick_label(Metric::Time, 5.0), "5h");
         assert_eq!(tick_label(Metric::Time, 0.5), "30min");
     }

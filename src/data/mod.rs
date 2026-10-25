@@ -2,6 +2,7 @@
 //! keyring, the synchronisation with Garmin, the activity files, the map tiles. Views observe it;
 //! it never decides what the window shows, it says so with a `DataEvent`.
 
+use crate::lang::{tr, trf};
 use crate::logic::activity::Activity;
 use crate::logic::fit::{self, Derived, Split, Track};
 use crate::logic::map;
@@ -28,6 +29,8 @@ const RESULT_SHOWN: Duration = Duration::from_secs(6);
 pub enum Status {
     Idle,
     Busy(String),
+    /// The first step of a synchronisation: the list of activities, and where it stands.
+    Listing(String),
     Failed(String),
 }
 
@@ -132,7 +135,7 @@ impl Data {
             key_store: secrets::Store::System,
             key_error: None,
             token: None,
-            status: Status::Busy("Ouverture…".into()),
+            status: Status::Busy(tr("Opening…", "Ouverture…").into()),
             note: None,
             sync_added: None,
             finished: None,
@@ -188,7 +191,7 @@ impl Data {
     }
 
     pub fn busy(&self) -> bool {
-        matches!(self.status, Status::Busy(_))
+        matches!(self.status, Status::Busy(_) | Status::Listing(_))
     }
 
     /// Clears an error once it was seen.
@@ -205,7 +208,7 @@ impl Data {
         if let Some((t, _)) = cached.filter(|(_, at)| at.elapsed() < Duration::from_secs(12 * 3600)) {
             return Ok(t);
         }
-        let key = key.ok_or("Aucune clé API : ajoute-la dans les réglages.")?;
+        let key = key.ok_or(tr("No API key: add it in the settings.", "Aucune clé API : ajoute-la dans les réglages."))?;
         let t = cx.background_executor().spawn(async move { garmin::token(&key) }).await?;
         this.update(cx, |d, _| d.token = Some((t.clone(), Instant::now()))).ok();
         Ok(t)
@@ -219,7 +222,7 @@ impl Data {
         if self.busy() {
             return;
         }
-        self.status = Status::Busy("Synchronisation : connexion à Garmin…".into());
+        self.status = Status::Listing(tr("connecting to Garmin…", "connexion à Garmin…").into());
         self.finished = None;
         cx.notify();
         let known = self.acts.clone();
@@ -232,11 +235,12 @@ impl Data {
                 let n = counter.load(Ordering::Relaxed);
                 let going = this
                     .update(cx, |d, cx| {
-                        if !matches!(&d.status, Status::Busy(s) if s.starts_with("Synchronisation")) {
+                        if !matches!(d.status, Status::Listing(_)) {
                             return false;
                         }
                         if n > 0 {
-                            d.status = Status::Busy(format!("Synchronisation : {} activités reçues…", crate::logic::activity::group(n as i64)));
+                            let received = crate::logic::activity::group(n as i64);
+                            d.status = Status::Listing(trf(format!("{received} activities received…"), format!("{received} activités reçues…")));
                             cx.notify();
                         }
                         true
@@ -268,9 +272,9 @@ impl Data {
                         this.acts = Arc::new(all);
                         let at = Local::now().format("%H:%M");
                         this.note = Some(match added {
-                            0 => format!("à jour à {at}"),
-                            1 => format!("1 nouvelle à {at}"),
-                            n => format!("{n} nouvelles à {at}"),
+                            0 => format!("{} {at}", tr("up to date at", "à jour à")),
+                            1 => format!("{} {at}", tr("1 new at", "1 nouvelle à")),
+                            n => format!("{n} {} {at}", tr("new at", "nouvelles à")),
                         });
                         this.sync_added = Some(added);
                         this.fetch_tracks(cx);
@@ -318,7 +322,7 @@ impl Data {
                     })
                     .unwrap_or(false);
                 if !go {
-                    this.update(cx, |d, _| d.fetch.stopped = Some("Arrêté à ta demande.".into())).ok();
+                    this.update(cx, |d, _| d.fetch.stopped = Some(tr("Stopped at your request.", "Arrêté à ta demande.").into())).ok();
                     break;
                 }
                 let token = match Self::token(&this, cx).await {
@@ -351,15 +355,15 @@ impl Data {
                                 false
                             }
                             Err(Fail::TooMany) => {
-                                d.fetch.stopped = Some("Garmin demande de ralentir : la suite viendra à la prochaine synchronisation.".into());
+                                d.fetch.stopped = Some(tr("Garmin asks to slow down: the rest will come at the next synchronisation.", "Garmin demande de ralentir : la suite viendra à la prochaine synchronisation.").into());
                                 true
                             }
                             Err(Fail::Other(e)) => {
                                 d.fetch.failed += 1;
                                 in_a_row += 1;
-                                d.fetch.error = Some(format!("« {label} » : {e}"));
+                                d.fetch.error = Some(trf(format!("“{label}”: {e}"), format!("« {label} » : {e}")));
                                 if in_a_row >= 5 {
-                                    d.fetch.stopped = Some(format!("Arrêté après 5 échecs de suite. Dernier : {e}"));
+                                    d.fetch.stopped = Some(trf(format!("Stopped after 5 failures in a row. Last: {e}"), format!("Arrêté après 5 échecs de suite. Dernier : {e}")));
                                 }
                                 in_a_row >= 5
                             }
@@ -396,7 +400,7 @@ impl Data {
         let added = self.sync_added.take();
         if added.is_some() || files + failed > 0 {
             let at = Local::now().format("%H:%M");
-            self.note = Some(format!("synchronisé à {at} · {}", crate::logic::sync::summary(added.unwrap_or(0), files, failed)));
+            self.note = Some(format!("{} {at} · {}", tr("synchronised at", "synchronisé à"), crate::logic::sync::summary(added.unwrap_or(0), files, failed)));
         }
         self.finished = Some((Instant::now(), failed == 0 && self.fetch.stopped.is_none()));
         cx.spawn(async move |this, cx| {
@@ -474,12 +478,12 @@ impl Data {
                 None => {
                     let t = Self::token(&this, cx).await?;
                     cx.background_executor().spawn(async move { garmin::download_fit(&t, id) }).await.map_err(|e| match e {
-                        Fail::TooMany => "Garmin demande de ralentir : réessaie dans un moment.".to_string(),
+                        Fail::TooMany => tr("Garmin asks to slow down: try again in a moment.", "Garmin demande de ralentir : réessaie dans un moment.").to_string(),
                         Fail::Other(e) => e,
                     })?
                 }
             };
-            let zip = zip.ok_or("Garmin n'a pas de fichier pour cette activité (saisie à la main ?).")?;
+            let zip = zip.ok_or(tr("Garmin has no file for this activity (entered by hand?).", "Garmin n'a pas de fichier pour cette activité (saisie à la main ?)."))?;
             let (track, splits, derived) = cx
                 .background_executor()
                 .spawn(async move {
@@ -553,7 +557,7 @@ impl Data {
         };
         self.key_error = None;
         let key_store = self.key_store.clone();
-        self.status = Status::Busy("Vérification de la clé…".into());
+        self.status = Status::Busy(tr("Checking the key…", "Vérification de la clé…").into());
         cx.notify();
         cx.spawn(async move |this, cx| {
             let res = cx
@@ -597,7 +601,7 @@ impl Data {
                     Ok(()) => {
                         this.key = None;
                         this.token = None;
-                        this.note = Some("clé retirée".into());
+                        this.note = Some(tr("key removed", "clé retirée").into());
                     }
                     Err(e) => this.key_error = Some(e),
                 }
@@ -620,7 +624,7 @@ impl Data {
     pub fn save_tiles(&mut self, value: &str, cx: &mut Context<Self>) -> bool {
         let value = value.trim().to_string();
         if !value.is_empty() && !(value.starts_with("https://") && value.contains("{z}") && value.contains("{x}") && value.contains("{y}")) {
-            self.note = Some("Adresse de tuiles refusée : https://…/{z}/{x}/{y}…".into());
+            self.note = Some(tr("Tile address refused: https://…/{z}/{x}/{y}…", "Adresse de tuiles refusée : https://…/{z}/{x}/{y}…").into());
             cx.notify();
             return false;
         }
@@ -628,7 +632,7 @@ impl Data {
         self.tiles.clear();
         let s = self.settings.clone();
         cx.background_executor().spawn(async move { store::save_settings(&s) }).detach();
-        self.note = Some("serveur de tuiles enregistré".into());
+        self.note = Some(tr("tile server saved", "serveur de tuiles enregistré").into());
         cx.notify();
         true
     }
@@ -640,15 +644,15 @@ impl Data {
 
     /// The first step of a synchronisation runs: the list of activities.
     pub fn listing(&self) -> bool {
-        matches!(&self.status, Status::Busy(s) if s.starts_with("Synchronisation"))
+        matches!(self.status, Status::Listing(_))
     }
 
     /// Where the synchronisation stands, in words; `None` when nothing runs.
     pub fn sync_line(&self) -> Option<String> {
         let g = |n: usize| crate::logic::activity::group(n as i64);
         match &self.status {
-            Status::Busy(s) if s.starts_with("Synchronisation") => Some(format!("1/2 · {}", s.trim_start_matches("Synchronisation : "))),
-            _ if self.fetch.running => Some(format!("2/2 · fichiers des activités : {} / {}", g(self.fetch.done), g(self.fetch.total))),
+            Status::Listing(s) => Some(format!("1/2 · {s}")),
+            _ if self.fetch.running => Some(format!("2/2 · {} : {} / {}", tr("activity files", "fichiers des activités"), g(self.fetch.done), g(self.fetch.total))),
             _ => None,
         }
     }

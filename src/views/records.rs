@@ -4,8 +4,9 @@
 use crate::data::{Data, Snapshot};
 use crate::logic::journal::short_name;
 use crate::logic::activity::Sport;
-use crate::logic::records::{BOARDS, Board, Kind, podium, show};
-use crate::ui::format::{fr_day, split_unit};
+use crate::lang::{ordinal, tr};
+use crate::logic::records::{BOARDS, Board, Kind, podium, row_label, show};
+use crate::ui::format::{day_label, split_unit};
 use crate::ui::{heading, icon, pad, quantity, segmented, title};
 use crate::views::{Page, Width, today, tracks_progress};
 use chrono::Datelike;
@@ -18,7 +19,7 @@ pub struct RecordsView {
     width: Width,
     /// `None`: all years.
     year: Option<i32>,
-    /// The row showing its ten best: (board title, row).
+    /// The row showing its ten best: (board id, row).
     open: Option<(&'static str, usize)>,
     /// The sport of the board of every sport together; `None`: all of them.
     sport: Option<Sport>,
@@ -46,7 +47,7 @@ impl Render for RecordsView {
         years.sort_unstable_by(|a, b| b.cmp(a));
         years.dedup();
         let year = self.year;
-        let mut items = vec![("Toutes les années".into(), year.is_none())];
+        let mut items = vec![(tr("All years", "Toutes les années").into(), year.is_none())];
         items.extend(years.iter().map(|y| (y.to_string().into(), year == Some(*y))));
         let ys = years.clone();
         let filter = segmented("record-year", items, t, cx, move |this: &mut RecordsView, i, _, _| {
@@ -76,7 +77,7 @@ impl Render for RecordsView {
                             .flex_col()
                             .gap(px(4.))
                             .child(title("Records"))
-                            .child(div().text_color(t.soft).child("Meilleurs temps n'importe où dans une sortie, comme un chrono pris en route.")),
+                            .child(div().text_color(t.soft).child(tr("Best times anywhere inside an outing, like a stopwatch started on the way.", "Meilleurs temps n'importe où dans une sortie, comme un chrono pris en route."))),
                     )
                     .child(filter),
             )
@@ -88,11 +89,14 @@ impl Render for RecordsView {
                         .flex()
                         .flex_col()
                         .gap(px(6.))
-                        .child(div().text_color(t.soft).child("Les temps sur distance se calculent à partir des traces : la page se complète au fil du téléchargement."))
+                        .child(div().text_color(t.soft).child(tr(
+                            "Times over a distance are worked out from the tracks: the page fills in as they download.",
+                            "Les temps sur distance se calculent à partir des traces : la page se complète au fil du téléchargement.",
+                        )))
                         .child(tracks_progress(&self.data, cx)),
                 )
             })
-            .when(boards.is_empty(), |d| d.child(div().text_color(t.soft).child("Pas encore de sortie.")))
+            .when(boards.is_empty(), |d| d.child(div().text_color(t.soft).child(tr("No outings yet.", "Pas encore de sortie."))))
             .child(grid)
     }
 
@@ -104,7 +108,7 @@ const LABEL_W: f32 = 190.;
 impl RecordsView {
     /// When a record was set: a day, or the week for a week's record.
     fn when(kind: Kind, date: chrono::NaiveDate) -> String {
-        if kind.is_week() { format!("semaine du {}", fr_day(date, today())) } else { fr_day(date, today()) }
+        if kind.is_week() { format!("{} {}", tr("week of", "semaine du"), day_label(date, today())) } else { day_label(date, today()) }
     }
 
     /// Which outing and when; a week's record is no outing's, so only the week.
@@ -128,7 +132,7 @@ impl RecordsView {
     /// "Tous les sports" and the sports there are outings of.
     fn sport_filter(&self, cx: &mut Context<Self>) -> Div {
         let present: Vec<Sport> = Sport::ALL.into_iter().filter(|s| self.snap.acts.iter().any(|a| a.sport() == *s)).collect();
-        let mut items = vec![("Tous les sports".into(), self.sport.is_none())];
+        let mut items = vec![(tr("All sports", "Tous les sports").into(), self.sport.is_none())];
         items.extend(present.iter().map(|s| (s.label().into(), self.sport == Some(*s))));
         segmented("record-sport", items, self.snap.theme, cx, move |this: &mut RecordsView, i, _, _| {
             this.sport = if i == 0 { None } else { Some(present[i - 1]) };
@@ -138,7 +142,7 @@ impl RecordsView {
 
     fn board(&self, board: &'static Board, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
-        let title = board.title;
+        let (bid, title) = (board.id, board.title());
         let any_sport = board.sport.is_none();
         // Every sport together: each outing says its own.
         let mixed = any_sport && self.sport.is_none();
@@ -149,13 +153,13 @@ impl RecordsView {
             div().flex().flex_wrap().items_center().justify_between().gap(px(10.)).mb(px(8.)).child(heading(title)).when(any_sport, |d| d.child(self.sport_filter(cx))),
         );
         for (i, (label, kind)) in board.rows.iter().enumerate() {
-            let open = self.open == Some((title, i));
+            let open = self.open == Some((bid, i));
             let top = podium(&self.snap.acts, &self.snap.derived, board, *kind, self.year, if open { 10 } else { 3 });
             let first = top.first().copied();
             let (value, pace) = first.map_or((String::new(), String::new()), |e| show(*kind, pace_sport, e.value));
             let row = div()
-                .id(SharedString::from(format!("rec-{}-{i}", title)))
-                .debug_selector(move || format!("rec-{}-{i}", title))
+                .id(SharedString::from(format!("rec-{bid}-{i}")))
+                .debug_selector(move || format!("rec-{bid}-{i}"))
                 .flex()
                 .flex_col()
                 .gap(px(3.))
@@ -168,7 +172,7 @@ impl RecordsView {
                 .child(div().absolute().bottom_0().left(px(10.)).right(px(10.)).h(px(1.)).bg(t.border))
                 .when(first.is_some(), |d| {
                     d.cursor_pointer().hover(|d| d.bg(t.panel)).on_click(cx.listener(move |this, _, _, cx| {
-                        this.open = if this.open == Some((title, i)) { None } else { Some((title, i)) };
+                        this.open = if this.open == Some((bid, i)) { None } else { Some((bid, i)) };
                         cx.notify();
                     }))
                 })
@@ -186,9 +190,9 @@ impl RecordsView {
                                 .gap(px(6.))
                                 .text_color(t.soft)
                                 .child(div().w(px(12.)).flex_none().when(first.is_some(), |d| d.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, t.dim, 12.))))
-                                .child(div().min_w_0().truncate().child(*label)),
+                                .child(div().min_w_0().truncate().child(row_label(label))),
                         )
-                        .when(first.is_none(), |d| d.child(div().text_size(px(13.)).text_color(t.dim).child("pas encore")))
+                        .when(first.is_none(), |d| d.child(div().text_size(px(13.)).text_color(t.dim).child(tr("not yet", "pas encore"))))
                         .child(quantity(&value, t).text_size(px(18.)).font_weight(FontWeight::BOLD))
                         // Over 1 km the pace is the time itself: said once.
                         .when(split_unit(&pace).0 != value, |d| d.child(quantity(&pace, t).text_size(px(12.)).text_color(t.soft)))
@@ -209,14 +213,14 @@ impl RecordsView {
                         |(k, e)| {
                             let id = e.id;
                             div()
-                                .id(SharedString::from(format!("pod-{}-{i}-{k}", title)))
+                                .id(SharedString::from(format!("pod-{bid}-{i}-{k}")))
                                 .cursor_pointer()
                                 .hover(|d| d.text_color(t.text))
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.stop_propagation();
                                     cx.emit(Page::Activity(id))
                                 }))
-                                .child(format!("{}e {}{} · {}", k + 2, show(*kind, pace_sport, e.value).0, if kind.is_week() { String::new() } else { self.sport_of(e.id, mixed) }, Self::when(*kind, e.date)))
+                                .child(format!("{} {}{} · {}", ordinal(k + 2), show(*kind, pace_sport, e.value).0, if kind.is_week() { String::new() } else { self.sport_of(e.id, mixed) }, Self::when(*kind, e.date)))
                         },
                     )))
                 })
@@ -231,7 +235,7 @@ impl RecordsView {
     fn ranking(&self, board: &Board, row: usize, kind: Kind, top: &[crate::logic::records::Entry], mixed: bool, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
         let pace_sport = board.sport.unwrap_or(Sport::Other);
-        let title = board.title;
+        let board_id = board.id;
         let best = top.first().map_or(0.0, |e| e.value);
         div().flex().flex_col().mt(px(6.)).children(top.iter().enumerate().map(|(k, e)| {
             let id = e.id;
@@ -240,8 +244,8 @@ impl RecordsView {
             let pace = if split_unit(&pace).0 != value { pace } else { String::new() };
             let gap = if kind.is_time_over_distance() && k > 0 { format!("+{}", crate::logic::activity::fmt_clock(e.value - best)) } else { String::new() };
             div()
-                .id(SharedString::from(format!("rank-{}-{row}-{k}", title)))
-                .debug_selector(move || format!("rank-{}-{row}-{k}", title))
+                .id(SharedString::from(format!("rank-{board_id}-{row}-{k}")))
+                .debug_selector(move || format!("rank-{board_id}-{row}-{k}"))
                 .flex()
                 .items_baseline()
                 .gap(px(10.))

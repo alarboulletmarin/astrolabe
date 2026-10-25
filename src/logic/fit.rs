@@ -39,7 +39,7 @@ pub fn unzip(bytes: &[u8]) -> Result<Vec<u8>, String> {
     if bytes.get(8..12) == Some(b".FIT") {
         return Ok(bytes.to_vec());
     }
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("ZIP illisible : {e}"))?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("{} : {e}", crate::lang::tr("Unreadable ZIP", "ZIP illisible")))?;
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).map_err(|e| e.to_string())?;
         if f.name().is_ok_and(|n| n.to_ascii_lowercase().ends_with(".fit")) {
@@ -48,7 +48,7 @@ pub fn unzip(bytes: &[u8]) -> Result<Vec<u8>, String> {
             return Ok(out);
         }
     }
-    Err("Aucun fichier FIT dans l'archive.".into())
+    Err(crate::lang::tr("No FIT file in the archive.", "Aucun fichier FIT dans l'archive.").into())
 }
 
 fn num(v: &Value) -> Option<f64> {
@@ -82,9 +82,9 @@ const SEMICIRCLE: f64 = 180.0 / 2_147_483_648.0;
 
 pub fn parse(fit: &[u8]) -> Result<Track, String> {
     if fit.len() < 12 {
-        return Err("Fichier FIT vide.".into());
+        return Err(crate::lang::tr("Empty FIT file.", "Fichier FIT vide.").into());
     }
-    let records = fitparser::from_bytes(fit).map_err(|e| format!("FIT illisible : {e}"))?;
+    let records = fitparser::from_bytes(fit).map_err(|e| format!("{} : {e}", crate::lang::tr("Unreadable FIT", "FIT illisible")))?;
     let mut track = Track::default();
     let mut t0 = None;
     for r in &records {

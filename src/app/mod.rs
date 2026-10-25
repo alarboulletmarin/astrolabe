@@ -2,6 +2,7 @@
 //! views of their own (`crate::views`); the window only says which one shows, and passes the keys.
 
 use crate::data::{Data, DataEvent, Status};
+use crate::lang::tr;
 use crate::logic::history::History;
 use crate::ui::icon;
 use crate::ui::theme::{MONO, SANS, Theme};
@@ -185,10 +186,10 @@ impl Shell {
         };
         let tip: SharedString = match (d.sync_line(), outcome, &d.status) {
             (Some(line), ..) => line,
-            (_, Some(false), Status::Failed(e)) => format!("{e} · cliquer pour réessayer"),
-            (_, Some(false), _) => "Synchronisation incomplète · cliquer pour reprendre".into(),
-            (_, Some(true), _) => d.note.clone().unwrap_or_else(|| "Synchronisation terminée".into()),
-            _ => "Synchroniser avec Garmin".into(),
+            (_, Some(false), Status::Failed(e)) => format!("{e} · {}", tr("click to retry", "cliquer pour réessayer")),
+            (_, Some(false), _) => tr("Synchronisation incomplete · click to resume", "Synchronisation incomplète · cliquer pour reprendre").into(),
+            (_, Some(true), _) => d.note.clone().unwrap_or_else(|| tr("Synchronisation complete", "Synchronisation terminée").into()),
+            _ => tr("Synchronise with Garmin", "Synchroniser avec Garmin").into(),
         }
         .into();
         let percent = d.sync_share().map(|f| format!("{:.0}%", f * 100.0));
@@ -206,12 +207,12 @@ impl Shell {
             .gap(px(6.))
             .child(crate::ui::drag_window(div().id("rail-logo").w_full().flex().justify_center().pb(px(10.)).font_family(MONO).font_weight(FontWeight::BOLD).text_size(px(15.)).text_color(t.accent).child("m.")))
             .child(self.travel_buttons(cx))
-            .child(item("rail-dashboard", Page::Dashboard, IconName::LayoutDashboard, "Aujourd'hui", cx))
+            .child(item("rail-dashboard", Page::Dashboard, IconName::LayoutDashboard, tr("Today", "Aujourd'hui"), cx))
             .child(item("rail-journal", Page::Journal, IconName::NotebookText, "Journal", cx))
-            .child(item("rail-calendar", Page::Calendar, IconName::Calendar, "Calendrier", cx))
-            .child(item("rail-stats", Page::Stats, IconName::ChartColumn, "Statistiques", cx))
+            .child(item("rail-calendar", Page::Calendar, IconName::Calendar, tr("Calendar", "Calendrier"), cx))
+            .child(item("rail-stats", Page::Stats, IconName::ChartColumn, tr("Statistics", "Statistiques"), cx))
             .child(item("rail-records", Page::Records, IconName::Trophy, "Records", cx))
-            .child(item("rail-map", Page::Heatmap, IconName::Map, "Carte de chaleur", cx))
+            .child(item("rail-map", Page::Heatmap, IconName::Map, tr("Heatmap", "Carte de chaleur"), cx))
             // The empty part of the rail moves the window, as in Bref.
             .child(crate::ui::drag_window(div().id("rail-drag").flex_1().w_full()))
             .child(
@@ -238,7 +239,7 @@ impl Shell {
                     .child(spin)
                     .when_some(percent, |d, p| d.child(div().font_family(MONO).text_size(px(9.)).text_color(t.accent).child(p))),
             )
-            .child(item("rail-settings", Page::Settings, IconName::Settings, "Réglages", cx))
+            .child(item("rail-settings", Page::Settings, IconName::Settings, tr("Settings", "Réglages"), cx))
     }
 
     /// Back and forward, one above the other; dimmed when there is nowhere to go.
@@ -262,8 +263,8 @@ impl Shell {
             .flex_col()
             .items_center()
             .pb(px(6.))
-            .child(button("rail-back", IconName::ChevronLeft, "Précédent", back, false, cx))
-            .child(button("rail-forward", IconName::ChevronRight, "Suivant", forward, true, cx))
+            .child(button("rail-back", IconName::ChevronLeft, tr("Back", "Précédent"), back, false, cx))
+            .child(button("rail-forward", IconName::ChevronRight, tr("Forward", "Suivant"), forward, true, cx))
     }
 
     /// Bottom-right, like Bref's word count: what the app is doing, errors in red. A click shows
@@ -271,18 +272,17 @@ impl Shell {
     fn status_line(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let d = self.data.read(cx);
         let t = d.theme;
-        let n = crate::logic::activity::group(d.acts.len() as i64);
-        let s = if d.acts.len() > 1 { "s" } else { "" };
+        let outings = crate::logic::activity::outings(d.acts.len());
         let (text, color) = if let Status::Failed(e) = &d.status {
             (e.clone(), t.bad())
         } else if let Some(line) = d.sync_line() {
-            (format!("Synchronisation {line}"), t.soft)
+            (format!("{} {line}", "Synchronisation"), t.soft)
         } else if let Status::Busy(s) = &d.status {
             (s.clone(), t.soft)
         } else if let Some(why) = &d.fetch.stopped {
-            (format!("{n} sortie{s} · synchronisation interrompue : {why}"), t.bad())
+            (format!("{outings} · {} : {why}", tr("synchronisation interrupted", "synchronisation interrompue")), t.bad())
         } else {
-            (format!("{n} sortie{s}{}", d.note.as_ref().map(|x| format!(" · {x}")).unwrap_or_default()), t.dim)
+            (format!("{outings}{}", d.note.as_ref().map(|x| format!(" · {x}")).unwrap_or_default()), t.dim)
         };
         let share = d.sync_share();
         div()

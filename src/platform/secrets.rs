@@ -3,6 +3,7 @@
 //! Where it has none, it is encrypted in a file (`vault`) with a random key kept in another one.
 //! Never written in the clear, never logged by the app.
 
+use crate::lang::tr;
 use crate::platform::{store, vault};
 use std::fs;
 use std::path::PathBuf;
@@ -30,7 +31,7 @@ fn entry() -> Result<keyring::Entry, String> {
 }
 
 fn keyring_error(e: &keyring::Error) -> String {
-    format!("Trousseau du système indisponible ({e}).")
+    format!("{} ({e}).", crate::lang::tr("The system key store is unavailable", "Trousseau du système indisponible"))
 }
 
 fn read_master() -> Option<[u8; 32]> {
@@ -42,7 +43,7 @@ fn load_sealed() -> Result<Option<String>, String> {
     read_master()
         .and_then(|master| vault::open(&master, &file))
         .map(Some)
-        .ok_or_else(|| "La clé enregistrée dans l'app est illisible : retire-la et ajoute-la de nouveau.".into())
+        .ok_or_else(|| tr("The key saved in the app is unreadable: remove it and add it again.", "La clé enregistrée dans l'app est illisible : retire-la et ajoute-la de nouveau.").into())
 }
 
 /// Looks for the key where it can be, and says which store this machine has.
@@ -62,7 +63,7 @@ pub fn store_key(key: &str, store: &Store) -> Result<(), String> {
         Store::Vault(_) => {
             let master = read_master().unwrap_or_else(vault::new_master);
             let sealed = vault::seal(&master, key)?;
-            let io = |e: std::io::Error| format!("Impossible d'enregistrer la clé : {e}");
+            let io = |e: std::io::Error| format!("{} : {e}", tr("Could not save the key", "Impossible d'enregistrer la clé"));
             // The key that opens first, so a cut between the two never leaves a key nothing opens.
             store::write_atomic(&master_path(), &master, true).map_err(io)?;
             store::write_atomic(&sealed_path(), &sealed, true).map_err(io)
@@ -76,7 +77,7 @@ fn delete_sealed() -> Result<(), String> {
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("Impossible de retirer la clé : {e}")),
+            Err(e) => return Err(format!("{} : {e}", tr("Could not remove the key", "Impossible de retirer la clé"))),
         }
     }
     Ok(())
@@ -96,10 +97,10 @@ pub fn delete_key() -> Result<(), String> {
 pub fn clean_key(raw: &str) -> Result<String, &'static str> {
     let key = raw.trim();
     if key.is_empty() {
-        return Err("Colle ta clé API d'abord.");
+        return Err(tr("Paste your API key first.", "Colle ta clé API d'abord."));
     }
     if key.len() > 1024 || key.chars().any(|c| c.is_whitespace() || c.is_control() || !c.is_ascii()) {
-        return Err("Ce texte ne ressemble pas à une clé API Garmin.");
+        return Err(tr("This text does not look like a Garmin API key.", "Ce texte ne ressemble pas à une clé API Garmin."));
     }
     Ok(key.to_string())
 }

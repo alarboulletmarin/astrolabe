@@ -2,12 +2,13 @@
 //! one pointer, its kilometre splits and laps, and where it stands among the previous ones.
 
 use crate::data::{Data, Snapshot};
+use crate::lang::{decimal, ordinal, tr};
 use crate::logic::activity::{self as act, Activity, Metric, Sport, fmt_clock, fmt_km, fmt_m};
 use crate::logic::fit::{Split, Track};
 use crate::logic::journal::name;
 use crate::logic::profiles::{Profiles, profiles};
 use crate::ui::chart::{Series, line_chart, nearest, range};
-use crate::ui::format::{fr_long, fr_short};
+use crate::ui::format::{long_date_time, short_date};
 use crate::ui::theme::blend;
 use crate::ui::{Plots, button, figure, heading, icon, num, page, quantity, sport_tag, title};
 use crate::views::map::{MapState, line_bbox, map_widget};
@@ -18,7 +19,7 @@ use std::sync::Arc;
 
 fn speed_fmt(v: f32, sport: Sport) -> String {
     match sport {
-        Sport::Bike => format!("{v:.1} km/h").replace('.', ","),
+        Sport::Bike => decimal(format!("{v:.1} km/h")),
         Sport::Swim => format!("{} /100m", fmt_clock(v as f64)),
         _ => format!("{} /km", fmt_clock(v as f64)),
     }
@@ -149,7 +150,7 @@ impl Render for ActivityView {
         let id = self.id;
         let t = self.snap.theme;
         let Some(a) = self.snap.activity(id).cloned() else {
-            return page("activity", width).track_scroll(self.width.scroll()).child(div().text_color(t.soft).child("Cette activité n'existe plus.")).into_any_element();
+            return page("activity", width).track_scroll(self.width.scroll()).child(div().text_color(t.soft).child(tr("This activity no longer exists.", "Cette activité n'existe plus."))).into_any_element();
         };
         let s = a.sport();
         let wide = width >= 1180.0;
@@ -178,16 +179,16 @@ impl Render for ActivityView {
                 div()
                     .flex()
                     .gap(px(6.))
-                    .when(older, |d| d.child(button("older", "‹ Plus ancienne", false, t).on_click(cx.listener(|this, _, _, cx| this.step(true, cx)))))
-                    .when(newer, |d| d.child(button("newer", "Plus récente ›", false, t).on_click(cx.listener(|this, _, _, cx| this.step(false, cx))))),
+                    .when(older, |d| d.child(button("older", tr("‹ Older", "‹ Plus ancienne"), false, t).on_click(cx.listener(|this, _, _, cx| this.step(true, cx)))))
+                    .when(newer, |d| d.child(button("newer", tr("Newer ›", "Plus récente ›"), false, t).on_click(cx.listener(|this, _, _, cx| this.step(false, cx))))),
             );
 
         let (rank, of) = act::rank(&self.snap.acts, &a);
         let rank_text = match (rank, of) {
-            (_, 1) => "Ta première dans ce sport.".to_string(),
-            (1, n) => format!("Ta plus longue, sur {n}."),
-            (r, n) if r == n => format!("Ta plus courte, sur {n}."),
-            (r, n) => format!("{r}e plus longue sur {n}."),
+            (_, 1) => tr("Your first in this sport.", "Ta première dans ce sport.").to_string(),
+            (1, n) => format!("{} {n}.", tr("Your longest, out of", "Ta plus longue, sur")),
+            (r, n) if r == n => format!("{} {n}.", tr("Your shortest, out of", "Ta plus courte, sur")),
+            (r, n) => format!("{} {} {n}.", ordinal(r), tr("longest of", "plus longue sur")),
         };
         let head = div()
             .flex()
@@ -202,7 +203,7 @@ impl Render for ActivityView {
                     .gap(px(10.))
                     .child(sport_tag(s, t))
                     .child(div().text_color(t.dim).child("·"))
-                    .child(div().text_size(px(13.)).text_color(t.soft).child(a.start().map(fr_long).unwrap_or_default()))
+                    .child(div().text_size(px(13.)).text_color(t.soft).child(a.start().map(long_date_time).unwrap_or_default()))
                     .child(div().text_color(t.dim).child("·"))
                     .child(div().text_size(px(13.)).text_color(t.soft).child(rank_text)),
             );
@@ -212,16 +213,16 @@ impl Render for ActivityView {
             figures = figures.child(figure("Distance", fmt_km(d), t));
         }
         if let Some(d) = a.duration {
-            figures = figures.child(figure("Temps", fmt_clock(d), t));
+            figures = figures.child(figure(tr("Time", "Temps"), fmt_clock(d), t));
         }
         if let Some(v) = a.speed_label() {
-            figures = figures.child(figure(if s == Sport::Bike { "Vitesse" } else { "Allure" }, v, t));
+            figures = figures.child(figure(if s == Sport::Bike { tr("Speed", "Vitesse") } else { tr("Pace", "Allure") }, v, t));
         }
         if let Some(e) = a.elevation_gain.filter(|e| *e >= 1.0) {
-            figures = figures.child(figure("Dénivelé", fmt_m(e), t));
+            figures = figures.child(figure(tr("Elevation", "Dénivelé"), fmt_m(e), t));
         }
         if let Some(hr) = a.average_hr {
-            figures = figures.child(figure("FC moyenne", format!("{hr:.0} bpm"), t));
+            figures = figures.child(figure(tr("Average HR", "FC moyenne"), format!("{hr:.0} bpm"), t));
         }
         if let Some(c) = a.calories.filter(|c| *c > 0.0) {
             figures = figures.child(figure("Calories", format!("{} kcal", act::group(c.round() as i64)), t));
@@ -270,7 +271,7 @@ impl ActivityView {
                 .text_color(t.soft)
                 .child(text)
                 .when(retry, |d| {
-                    d.child(button("retry", "Réessayer", false, t).on_click(cx.listener(move |this, _, _, cx| {
+                    d.child(button("retry", tr("Retry", "Réessayer"), false, t).on_click(cx.listener(move |this, _, _, cx| {
                         this.track_state = TrackState::None;
                         this.load_track(id, cx);
                         cx.notify();
@@ -280,11 +281,11 @@ impl ActivityView {
         let Some((track, points)) = track else {
             return match &self.track_state {
                 TrackState::Failed(x, e) if *x == id => placeholder(e.clone(), true, cx),
-                _ => placeholder("Lecture de la trace…".into(), false, cx),
+                _ => placeholder(tr("Reading the track…", "Lecture de la trace…").into(), false, cx),
             };
         };
         if points.len() < 2 {
-            return placeholder("Pas de position GPS : activité en salle, ou sans GPS.".into(), false, cx);
+            return placeholder(tr("No GPS position: an indoor activity, or one without GPS.", "Pas de position GPS : activité en salle, ou sans GPS.").into(), false, cx);
         }
         let bbox = line_bbox(&points);
         self.map.fit(id as u64, bbox, false);
@@ -332,7 +333,7 @@ impl ActivityView {
         let hover = self.hover;
         let at = |ys: &Arc<Vec<Option<f32>>>| hover.and_then(|i| ys.get(i).copied().flatten());
         let x_label = match hover.and_then(|i| p.xs.get(i)) {
-            Some(x) if p.by_distance => format!("km {:.2}", x).replace('.', ","),
+            Some(x) if p.by_distance => decimal(format!("km {:.2}", x)),
             Some(x) => format!("{:.0} min", x),
             None => String::new(),
         };
@@ -341,14 +342,14 @@ impl ActivityView {
         let red = t.hue(0.0).1;
         let rows: Vec<(&'static str, Arc<Vec<Option<f32>>>, Option<(f32, f32)>, Hsla, bool, Box<dyn Fn(f32) -> String>)> = vec![
             (
-                if sport == Sport::Bike { "Vitesse" } else { "Allure" },
+                if sport == Sport::Bike { tr("Speed", "Vitesse") } else { tr("Pace", "Allure") },
                 p.speed.clone(),
                 drawn.scales[0],
                 t.accent,
                 sport != Sport::Bike,
                 Box::new(move |v| speed_fmt(v, sport)),
             ),
-            ("Fréquence cardiaque", p.hr.clone(), drawn.scales[1], red, false, Box::new(|v| format!("{v:.0} bpm"))),
+            (tr("Heart rate", "Fréquence cardiaque"), p.hr.clone(), drawn.scales[1], red, false, Box::new(|v| format!("{v:.0} bpm"))),
             ("Altitude", p.alt.clone(), drawn.scales[2], t.soft, false, Box::new(|v| format!("{v:.0} m"))),
         ];
         let charts: Vec<Div> = rows
@@ -383,7 +384,7 @@ impl ActivityView {
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(div().flex().justify_between().child(heading("Profil")).child(num(x_label).text_size(px(12.)).text_color(t.soft)))
+            .child(div().flex().justify_between().child(heading(tr("Profile", "Profil"))).child(num(x_label).text_size(px(12.)).text_color(t.soft)))
             .child(
                 div()
                     .id("profile-area")
@@ -420,7 +421,7 @@ impl ActivityView {
         let mut table = div()
             .flex()
             .flex_col()
-            .child(heading(if swim { "Par 100 m" } else { "Par kilomètre" }).mb(px(10.)))
+            .child(heading(if swim { tr("Per 100 m", "Par 100 m") } else { tr("Per kilometre", "Par kilomètre") }).mb(px(10.)))
             .child(
                 div()
                     .flex()
@@ -429,13 +430,13 @@ impl ActivityView {
                     .text_size(px(12.))
                     .text_color(t.dim)
                     .child(div().w(px(34.)).child("Km"))
-                    .child(div().flex_1().child(if sport == Sport::Bike { "Vitesse" } else { "Allure" }))
-                    .child(cell(div().child("FC"), 56.))
-                    .child(cell(div().child("D+"), 48.)),
+                    .child(div().flex_1().child(if sport == Sport::Bike { tr("Speed", "Vitesse") } else { tr("Pace", "Allure") }))
+                    .child(cell(div().child(tr("HR", "FC")), 56.))
+                    .child(cell(div().child(tr("Gain", "D+")), 48.)),
             );
         let splits_shown: Vec<Split> = if swim { track.splits(100.0) } else { splits.to_vec() };
         if splits_shown.is_empty() {
-            return table.child(div().text_color(t.soft).child("Pas de distance enregistrée."));
+            return table.child(div().text_color(t.soft).child(tr("No distance recorded.", "Pas de distance enregistrée.")));
         }
         for (i, sp) in splits_shown.iter().enumerate() {
             let per = sp.seconds / sp.metres.max(1.0);
@@ -443,7 +444,7 @@ impl ActivityView {
             // Bar length: the faster, the longer; the fastest full km in the accent.
             let share = if slowest > fastest { 0.35 + 0.65 * (slowest - per) / (slowest - fastest) } else { 1.0 };
             let best = (per - fastest).abs() < 1e-6 && sp.metres >= 500.0;
-            let km = if sp.metres < (if swim { 99.0 } else { 990.0 }) { format!("{:.2}", sp.metres / 1000.0).replace('.', ",") } else { (i + 1).to_string() };
+            let km = if sp.metres < (if swim { 99.0 } else { 990.0 }) { decimal(format!("{:.2}", sp.metres / 1000.0)) } else { (i + 1).to_string() };
             table = table.child(
                 div()
                     .flex()
@@ -467,7 +468,7 @@ impl ActivityView {
             );
         }
         if track.laps.len() > 1 {
-            table = table.child(heading("Tours").mt(px(24.)).mb(px(8.))).children(track.laps.iter().enumerate().map(|(i, l)| {
+            table = table.child(heading(tr("Laps", "Tours")).mt(px(24.)).mb(px(8.))).children(track.laps.iter().enumerate().map(|(i, l)| {
                 let per = l.time / l.dist.max(1.0);
                 div()
                     .flex()
@@ -495,14 +496,14 @@ impl ActivityView {
         past.reverse();
         let top = past.iter().map(|x| metric.of(x)).fold(1.0, f64::max);
         let readout = match self.act_hover_history(&past) {
-            Some(x) => format!("{} · {}", x.date().map(fr_short).unwrap_or_default(), metric.fmt(metric.of(x))),
+            Some(x) => format!("{} · {}", x.date().map(short_date).unwrap_or_default(), metric.fmt(metric.of(x))),
             None => format!("{} · {}", past.len(), metric.label().to_lowercase()),
         };
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(div().flex().justify_between().child(heading("Avant celle-ci")).child(num(readout).text_size(px(12.)).text_color(t.soft)))
+            .child(div().flex().justify_between().child(heading(tr("Before this one", "Avant celle-ci"))).child(num(readout).text_size(px(12.)).text_color(t.soft)))
             .child(div().h(px(80.)).flex().items_end().gap(px(3.)).children(past.iter().enumerate().map(|(i, x)| {
                 let id = x.activity_id;
                 let this_one = id == a.activity_id;

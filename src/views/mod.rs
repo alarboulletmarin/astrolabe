@@ -12,6 +12,7 @@ pub mod settings;
 pub mod stats;
 
 use crate::data::Data;
+use crate::lang::{plural, tr, trf};
 use chrono::{Local, NaiveDate};
 use gpui_kit::{prelude::FluentBuilder, *};
 use std::{cell::Cell, rc::Rc};
@@ -69,34 +70,32 @@ pub fn tracks_progress(data: &Entity<Data>, cx: &App) -> Div {
             div()
                 .flex()
                 .justify_between()
-                .child(div().font_weight(FontWeight::BOLD).child(format!("{} / {} traces lues", g(read), g(total))))
-                .child(crate::ui::num(format!("{:.0} %", share * 100.0)).text_color(t.soft)),
+                .child(div().font_weight(FontWeight::BOLD).child(format!("{} / {} {}", g(read), g(total), tr("tracks read", "traces lues"))))
+                .child(crate::ui::num(format!("{:.0}{}", share * 100.0, crate::lang::pct())).text_color(t.soft)),
         )
         .child(div().h(px(6.)).w_full().rounded(px(3.)).bg(t.border).child(div().h_full().rounded(px(3.)).bg(t.accent).w(relative(share))))
         .when_some(f.current.as_ref().filter(|_| f.running), |d, name| {
-            d.child(div().text_size(px(12.)).text_color(t.soft).child(format!(
-                "Téléchargement {} / {} de cette série : « {name} »",
-                g((f.done + 1).min(f.total)),
-                g(f.total)
-            )))
+            let (n, of) = (g((f.done + 1).min(f.total)), g(f.total));
+            let line = trf(format!("Downloading {n} / {of} of this batch: “{name}”"), format!("Téléchargement {n} / {of} de cette série : « {name} »"));
+            d.child(div().text_size(px(12.)).text_color(t.soft).child(line))
         })
         .when(!f.running && read < total && f.stopped.is_none() && has_key, |d| {
-            d.child(div().text_size(px(12.)).text_color(t.soft).child(format!("{} encore à télécharger.", g(total - read))))
+            d.child(div().text_size(px(12.)).text_color(t.soft).child(format!("{} {}", g(total - read), tr("still to download.", "encore à télécharger."))))
         })
         .when(!has_key && read < total, |d| {
-            d.child(div().text_size(px(12.)).text_color(t.soft).child("Ajoute ta clé API pour télécharger les traces."))
+            d.child(div().text_size(px(12.)).text_color(t.soft).child(tr("Add your API key to download the tracks.", "Ajoute ta clé API pour télécharger les traces.")))
         })
-        .when(f.failed > 0, |d| d.child(div().text_size(px(12.)).text_color(t.soft).child(format!("{} échec{} dans cette série", f.failed, if f.failed > 1 { "s" } else { "" }))))
+        .when(f.failed > 0, |d| d.child(div().text_size(px(12.)).text_color(t.soft).child(format!("{} {} {}", f.failed, plural(f.failed, tr("failure", "échec"), tr("failures", "échecs")), tr("in this batch", "dans cette série")))))
         .when_some(f.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(t.bad()).child(e)))
         .when_some(f.stopped.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(t.bad()).child(e)))
         .child(div().flex().gap(px(8.)).when(f.running, |d| {
             d.child(
-                crate::ui::button("fetch-stop", if f.cancel { "Arrêt après ce fichier…" } else { "Arrêter" }, false, t)
+                crate::ui::button("fetch-stop", if f.cancel { tr("Stopping after this file…", "Arrêt après ce fichier…") } else { tr("Stop", "Arrêter") }, false, t)
                     .on_click(move |_, _, cx| stop.update(cx, |d, cx| d.stop_fetch(cx))),
             )
         }).when(!f.running && read < total && has_key, |d| {
             d.child(
-                crate::ui::button("fetch-go", "Reprendre le téléchargement", true, t)
+                crate::ui::button("fetch-go", tr("Resume the download", "Reprendre le téléchargement"), true, t)
                     .on_click(move |_, _, cx| resume.update(cx, |d, cx| d.fetch_tracks(cx))),
             )
         }))

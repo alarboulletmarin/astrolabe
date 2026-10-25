@@ -47,7 +47,7 @@ pub fn load_cache() -> Vec<Activity> {
 
 pub fn save_cache(acts: &[Activity]) -> Result<(), String> {
     let bytes = serde_json::to_vec(acts).map_err(|e| e.to_string())?;
-    write_atomic(&data_dir().join("activities.json"), &bytes, true).map_err(|e| format!("Cache non enregistré : {e}"))
+    write_atomic(&data_dir().join("activities.json"), &bytes, true).map_err(|e| format!("{} : {e}", crate::lang::tr("Cache not saved", "Cache non enregistré")))
 }
 
 fn fit_path(id: i64) -> PathBuf {
@@ -59,7 +59,7 @@ pub fn load_fit(id: i64) -> Option<Vec<u8>> {
 }
 
 pub fn save_fit(id: i64, bytes: &[u8]) -> Result<(), String> {
-    write_atomic(&fit_path(id), bytes, true).map_err(|e| format!("Trace non enregistrée : {e}"))
+    write_atomic(&fit_path(id), bytes, true).map_err(|e| format!("{} : {e}", crate::lang::tr("Track not saved", "Trace non enregistrée")))
 }
 
 /// Per activity: the simplified line and the best efforts. An entry means the file was handled
@@ -70,7 +70,7 @@ pub fn load_derived() -> HashMap<i64, Derived> {
 
 pub fn save_derived(d: &HashMap<i64, Derived>) -> Result<(), String> {
     let bytes = serde_json::to_vec(d).map_err(|e| e.to_string())?;
-    write_atomic(&data_dir().join("derived.json"), &bytes, true).map_err(|e| format!("Traces non enregistrées : {e}"))
+    write_atomic(&data_dir().join("derived.json"), &bytes, true).map_err(|e| format!("{} : {e}", crate::lang::tr("Tracks not saved", "Traces non enregistrées")))
 }
 
 /// Settings that aren't secrets (the tile server), one `key=value` per line.

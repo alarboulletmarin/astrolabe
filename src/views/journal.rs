@@ -3,10 +3,11 @@
 //! a click opens the activity.
 
 use crate::data::{Data, Snapshot};
-use crate::logic::activity::{self as act, Sport, fmt_duration, fmt_km, fmt_m, group};
+use crate::lang::{colon, tr, trf};
+use crate::logic::activity::{self as act, Sport, fmt_duration, fmt_km, fmt_m, outings};
 use crate::logic::columns::{self, Column, DATE_W, GAP, NAME_MIN};
 use crate::logic::journal::{Row, fold, rows, short_name, sports_present};
-use crate::ui::format::{fr_day, fr_short, totals_line};
+use crate::ui::format::{day_label, short_date, totals_line};
 use crate::ui::theme::blend;
 use crate::ui::{button, heading, icon, num, pad, quantity, segmented, sport_icon, title};
 use crate::views::{Page, Width, today};
@@ -52,7 +53,7 @@ impl EventEmitter<Page> for JournalView {}
 
 impl JournalView {
     pub fn new(data: Entity<Data>, width: Width, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Chercher une sortie"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr("Search an outing", "Chercher une sortie")));
         let subs = vec![
             cx.observe(&data, |this, data, cx| {
                 this.snap = data.read(cx).snapshot();
@@ -115,7 +116,7 @@ impl JournalView {
 
     fn sport_filter(&self, id: &'static str, cx: &mut Context<Self>) -> Div {
         let present = sports_present(&self.snap.acts);
-        let mut items = vec![("Tout".into(), self.sport.is_none())];
+        let mut items = vec![(tr("All", "Tout").into(), self.sport.is_none())];
         items.extend(present.iter().map(|s| (s.label().into(), self.sport == Some(*s))));
         segmented(id, items, self.snap.theme, cx, move |this: &mut JournalView, i, _, cx| {
             this.set_sport(if i == 0 { None } else { Some(present[i - 1]) }, cx);
@@ -159,9 +160,11 @@ impl JournalView {
                 }
                 let shade = |k: usize| blend(t.accent, t.bg, [0.15, 0.3, 0.5, 0.72, 0.95][k]);
                 let tip = format!(
-                    "Zones de FC (max observée : {} bpm) : {}",
-                    max,
-                    z.iter().enumerate().map(|(k, s)| format!("Z{} {:.0} %", k + 1, s / total * 100.0)).collect::<Vec<_>>().join(" · ")
+                    "{} ({} {max} bpm){}{}",
+                    tr("HR zones", "Zones de FC"),
+                    tr("observed max:", "max observée :"),
+                    colon(),
+                    z.iter().enumerate().map(|(k, s)| format!("Z{} {:.0}{}", k + 1, s / total * 100.0, crate::lang::pct())).collect::<Vec<_>>().join(" · ")
                 );
                 div().child(
                     div()
@@ -232,7 +235,7 @@ impl JournalView {
                     .border_b_1()
                     .border_color(t.border)
                     .text_size(px(12.))
-                    .child(div().font_weight(FontWeight::BOLD).whitespace_nowrap().child(format!("Semaine du {}", fr_day(monday, today()))))
+                    .child(div().font_weight(FontWeight::BOLD).whitespace_nowrap().child(format!("{} {}", tr("Week of", "Semaine du"), day_label(monday, today()))))
                     .child(div().text_color(t.soft).truncate().child(week_totals(&self.snap.acts, monday, self.sport)))
                     .into_any_element()
             }
@@ -257,7 +260,7 @@ impl JournalView {
                     .when(!on, |d| d.hover(|d| d.bg(t.panel)))
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
                     .child(self.line(
-                        num(format!("{}{time}", a.date().map(fr_short).unwrap_or_default())).text_size(px(12.)).text_color(t.soft),
+                        num(format!("{}{time}", a.date().map(short_date).unwrap_or_default())).text_size(px(12.)).text_color(t.soft),
                         div().flex().items_center().gap(px(8.)).child(icon(sport_icon(a.sport()), t.soft, 14.)).child(div().min_w_0().truncate().child(short_name(a))),
                         cells,
                     ))
@@ -294,20 +297,21 @@ impl Render for JournalView {
                     .gap(px(4.))
                     .child(title("Journal"))
                     .child(div().text_color(t.soft).child(if week.count == 0 {
-                        "Rien encore cette semaine.".to_string()
+                        tr("Nothing yet this week.", "Rien encore cette semaine.").to_string()
                     } else {
-                        format!("Cette semaine : {}", totals_line(&week))
+                        format!("{}{}{}", tr("This week", "Cette semaine"), colon(), totals_line(&week))
                     }))
                     .when(streak.weeks > 0, |d| {
-                        let weeks = |n: u32| format!("{n} semaine{}", if n > 1 { "s" } else { "" });
+                        let weeks = |n: u32| format!("{n} {}", crate::lang::plural(n as usize, tr("week", "semaine"), tr("weeks", "semaines")));
                         let record = if streak.longest_weeks > streak.weeks {
-                            format!(" · record : {}", weeks(streak.longest_weeks))
+                            format!(" · record{}{}", colon(), weeks(streak.longest_weeks))
                         } else if streak.weeks > 1 {
-                            ", la plus longue à ce jour".into()
+                            tr(", the longest so far", ", la plus longue à ce jour").into()
                         } else {
                             String::new()
                         };
-                        d.child(div().text_color(t.soft).child(format!("Série : {} d'affilée{record}", weeks(streak.weeks))))
+                        let line = trf(format!("Streak: {} in a row{record}", weeks(streak.weeks)), format!("Série : {} d'affilée{record}", weeks(streak.weeks)));
+                        d.child(div().text_color(t.soft).child(line))
                     }),
             )
             .when(!self.snap.acts.is_empty(), |d| {
@@ -326,7 +330,7 @@ impl Render for JournalView {
         let body = if self.snap.acts.is_empty() {
             self.journal_empty(p, cx).into_any_element()
         } else if self.rows.is_empty() {
-            div().px(px(p + 10.)).py(px(20.)).text_color(t.soft).child("Aucune sortie ne correspond.").into_any_element()
+            div().px(px(p + 10.)).py(px(20.)).text_color(t.soft).child(tr("No outing matches.", "Aucune sortie ne correspond.")).into_any_element()
         } else {
             let count = self.rows.len();
             div()
@@ -343,7 +347,7 @@ impl Render for JournalView {
                         .text_color(t.dim)
                         .child(self.line(
                             div().child("Date"),
-                            div().child("Sortie"),
+                            div().child(tr("Outing", "Sortie")),
                             columns::visible(&self.columns, inner).into_iter().map(|c| (c, div().child(c.label()))).collect(),
                         )),
                 )
@@ -414,7 +418,7 @@ impl JournalView {
                         this.menu = !this.menu && !just_closed;
                         cx.notify();
                     }))
-                    .child("Colonnes")
+                    .child(tr("Columns", "Colonnes"))
                     .child(icon(IconName::ChevronDown, t.soft, 13.)),
             )
             .when(open, |d| {
@@ -442,11 +446,15 @@ impl JournalView {
                             }))
                             .children(rows)
                             .children(self.hr_max.map(|m| {
-                                div().px(px(8.)).pt(px(6.)).text_size(px(12.)).text_color(t.dim).child(format!(
-                                    "Zones : 50, 60, 70, 80 et 90 % de ta FC max observée, {m} bpm (la plus haute tenue une minute dans tes fichiers)."
+                                div().px(px(8.)).pt(px(6.)).text_size(px(12.)).text_color(t.dim).child(trf(
+                                    format!("Zones: 50, 60, 70, 80 and 90 % of your observed max HR, {m} bpm (the highest held for a minute in your files)."),
+                                    format!("Zones : 50, 60, 70, 80 et 90 % de ta FC max observée, {m} bpm (la plus haute tenue une minute dans tes fichiers)."),
                                 ))
                             }))
-                            .child(div().px(px(8.)).py(px(6.)).text_size(px(12.)).text_color(t.dim).child("Une colonne qui ne tient pas dans la fenêtre se replie : les moins utiles d'abord. Agrandis la fenêtre pour les revoir.")),
+                            .child(div().px(px(8.)).py(px(6.)).text_size(px(12.)).text_color(t.dim).child(tr(
+                                "A column that does not fit in the window folds away: the least useful first. Enlarge the window to see them again.",
+                                "Une colonne qui ne tient pas dans la fenêtre se replie : les moins utiles d'abord. Agrandis la fenêtre pour les revoir.",
+                            ))),
                     )
                     .with_priority(1),
                 )
@@ -463,16 +471,22 @@ impl JournalView {
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(heading("Rien ici pour l'instant."))
+            .child(heading(tr("Nothing here yet.", "Rien ici pour l'instant.")))
             .child(div().text_color(t.soft).child(if no_key {
-                "Tes activités arrivent de Garmin Connect. Ajoute ta clé API personnelle dans les réglages : la première synchronisation récupère tout ton historique."
+                tr(
+                    "Your activities come from Garmin Connect. Add your personal API key in the settings: the first synchronisation fetches your whole history.",
+                    "Tes activités arrivent de Garmin Connect. Ajoute ta clé API personnelle dans les réglages : la première synchronisation récupère tout ton historique.",
+                )
             } else {
-                "La synchronisation n'a encore rien trouvé. Une activité enregistrée sur ta montre apparaîtra ici après la prochaine."
+                tr(
+                    "The synchronisation has found nothing yet. An activity recorded on your watch will appear here after the next one.",
+                    "La synchronisation n'a encore rien trouvé. Une activité enregistrée sur ta montre apparaîtra ici après la prochaine.",
+                )
             }))
             .when(no_key, |d| {
                 d.child(
                     div().flex().child(
-                        button("empty-settings", "Ajouter ma clé", true, t)
+                        button("empty-settings", tr("Add my key", "Ajouter ma clé"), true, t)
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(Page::Settings))),
                     ),
                 )
@@ -488,7 +502,7 @@ fn week_totals(acts: &[act::Activity], monday: NaiveDate, sport: Option<Sport>) 
     if sport.is_some() {
         return totals_line(&all);
     }
-    let mut parts = vec![format!("{} sortie{}", group(all.count as i64), if all.count > 1 { "s" } else { "" })];
+    let mut parts = vec![outings(all.count)];
     if all.duration > 0.0 {
         parts.push(fmt_duration(all.duration));
     }
@@ -499,7 +513,7 @@ fn week_totals(acts: &[act::Activity], monday: NaiveDate, sport: Option<Sport>) 
         }
     }
     if all.elevation >= 1.0 {
-        parts.push(format!("{} D+", fmt_m(all.elevation)));
+        parts.push(format!("{} {}", fmt_m(all.elevation), tr("gain", "D+")));
     }
     parts.join(" · ")
 }

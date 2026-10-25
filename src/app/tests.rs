@@ -113,15 +113,38 @@ fn a_record_row_unfolds_its_ranking(cx: &mut TestAppContext) {
     // Tall enough for the row to be laid out (what is below the window is not drawn).
     cx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(1600.)));
     click(cx, "rail-records");
-    assert!(cx.debug_bounds("rank-Course sur route-5-0").is_none(), "closed at first");
-    click(cx, "rec-Course sur route-5");
-    let ranks = (0..12).filter(|k| cx.debug_bounds(Box::leak(format!("rank-Course sur route-5-{k}").into_boxed_str())).is_some()).count();
+    assert!(cx.debug_bounds("rank-road-5-0").is_none(), "closed at first");
+    click(cx, "rec-road-5");
+    let ranks = (0..12).filter(|k| cx.debug_bounds(Box::leak(format!("rank-road-5-{k}").into_boxed_str())).is_some()).count();
     assert_eq!(ranks, 10, "ten best, though there are fifteen runs");
     // The row's own line closes it again.
-    click_top(cx, "rec-Course sur route-5");
-    assert!(cx.debug_bounds("rank-Course sur route-5-0").is_none());
+    click_top(cx, "rec-road-5");
+    assert!(cx.debug_bounds("rank-road-5-0").is_none());
     // A click on a ranked outing opens it (and does not close nor open anything else).
-    click_top(cx, "rec-Course sur route-5");
-    click(cx, "rank-Course sur route-5-3");
+    click_top(cx, "rec-road-5");
+    click(cx, "rank-road-5-3");
+    assert!(matches!(page(&shell, cx), Page::Activity(_)));
+}
+
+/// The same pages in English: none outing, one, and a great many; the record rows keep their ids
+/// whatever the language.
+#[gpui::test]
+fn every_page_draws_in_english(cx: &mut TestAppContext) {
+    let _english = crate::lang::force(false);
+    for n in [0, 1, 1500] {
+        let (shell, cx) = start(cx, n);
+        cx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(1600.)));
+        for rail in ["rail-journal", "rail-calendar", "rail-stats", "rail-records", "rail-map", "rail-settings", "rail-dashboard"] {
+            click(cx, rail);
+        }
+        assert_eq!(page(&shell, cx), Page::Dashboard, "{n} outings");
+    }
+    let (shell, cx) = start(cx, 30);
+    cx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(1600.)));
+    click(cx, "rail-records");
+    click(cx, "rec-road-5");
+    let ranks = (0..12).filter(|k| cx.debug_bounds(Box::leak(format!("rank-road-5-{k}").into_boxed_str())).is_some()).count();
+    assert_eq!(ranks, 10);
+    click(cx, "rank-road-5-3");
     assert!(matches!(page(&shell, cx), Page::Activity(_)));
 }

@@ -1,3 +1,4 @@
+use crate::lang::{decimal, plural, tr};
 use chrono::{Datelike, Days, NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -82,15 +83,15 @@ impl Sport {
 
     pub fn label(self) -> &'static str {
         match self {
-            Sport::Run => "Course",
+            Sport::Run => tr("Run", "Course"),
             Sport::Trail => "Trail",
-            Sport::Bike => "Vélo",
-            Sport::Swim => "Natation",
-            Sport::Walk => "Marche",
-            Sport::Hike => "Randonnée",
-            Sport::Multisport => "Triathlon",
-            Sport::Strength => "Renfo",
-            Sport::Other => "Autre",
+            Sport::Bike => tr("Bike", "Vélo"),
+            Sport::Swim => tr("Swim", "Natation"),
+            Sport::Walk => tr("Walk", "Marche"),
+            Sport::Hike => tr("Hike", "Randonnée"),
+            Sport::Multisport => tr("Multisport", "Triathlon"),
+            Sport::Strength => tr("Strength", "Renfo"),
+            Sport::Other => tr("Other", "Autre"),
         }
     }
 }
@@ -120,7 +121,7 @@ pub fn speed(sport: Sport, distance: f64, duration: f64) -> Option<String> {
         return None;
     }
     Some(match sport {
-        Sport::Bike => format!("{:.1}\u{a0}km/h", distance / duration * 3.6).replace('.', ","),
+        Sport::Bike => decimal(format!("{:.1}\u{a0}km/h", distance / duration * 3.6)),
         Sport::Swim => format!("{} /100m", fmt_clock(duration / distance * 100.0)),
         _ => format!("{} /km", fmt_clock(duration / distance * 1000.0)),
     })
@@ -145,17 +146,12 @@ pub fn fmt_clock(seconds: f64) -> String {
     }
 }
 
-/// 1941 -> "1 941" (no-break space, French grouping).
-pub fn group(n: i64) -> String {
-    let digits = n.unsigned_abs().to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push('\u{a0}');
-        }
-        out.push(c);
-    }
-    if n < 0 { format!("-{out}") } else { out }
+/// 1941 -> "1 941" (no-break space) in French, "1,941" in English.
+pub use crate::lang::group;
+
+/// "1 sortie", "3 sorties" / "1 outing", "3 outings".
+pub fn outings(n: usize) -> String {
+    format!("{} {}", group(n as i64), plural(n, tr("outing", "sortie"), tr("outings", "sorties")))
 }
 
 /// 3725 s -> "1h02", 1500 s -> "25min", 1 000 000 s -> "278h": totals stay short.
@@ -176,7 +172,7 @@ pub fn fmt_km(meters: f64) -> String {
     if km >= 99.95 {
         format!("{}\u{a0}km", group(km.round() as i64))
     } else {
-        format!("{:.1}\u{a0}km", km).replace('.', ",")
+        decimal(format!("{:.1}\u{a0}km", km))
     }
 }
 
@@ -194,7 +190,7 @@ pub enum Metric {
 impl Metric {
     pub fn label(self) -> &'static str {
         match self {
-            Metric::Time => "Temps",
+            Metric::Time => tr("Time", "Temps"),
             Metric::Distance => "Distance",
         }
     }
@@ -334,12 +330,12 @@ impl Measure {
 
     pub fn label(self) -> &'static str {
         match self {
-            Measure::Time => "Temps",
+            Measure::Time => tr("Time", "Temps"),
             Measure::Distance => "Distance",
-            Measure::Elevation => "Dénivelé",
-            Measure::Count => "Sorties",
-            Measure::Pace => "Allure",
-            Measure::Hr => "FC moyenne",
+            Measure::Elevation => tr("Elevation", "Dénivelé"),
+            Measure::Count => tr("Outings", "Sorties"),
+            Measure::Pace => tr("Pace", "Allure"),
+            Measure::Hr => tr("Average HR", "FC moyenne"),
         }
     }
 
@@ -355,7 +351,7 @@ impl Measure {
             Measure::Distance => fmt_km(v),
             Measure::Elevation => fmt_m(v),
             Measure::Count => group(v.round() as i64),
-            Measure::Pace if bike => format!("{:.1}\u{a0}km/h", 3600.0 / v).replace('.', ","),
+            Measure::Pace if bike => decimal(format!("{:.1}\u{a0}km/h", 3600.0 / v)),
             Measure::Pace => format!("{} /km", fmt_clock(v)),
             Measure::Hr => format!("{v:.0}\u{a0}bpm"),
         }
@@ -375,10 +371,10 @@ impl Group {
 
     pub fn label(self) -> &'static str {
         match self {
-            Group::Day => "Jour",
-            Group::Week => "Semaine",
-            Group::Month => "Mois",
-            Group::Year => "Année",
+            Group::Day => tr("Day", "Jour"),
+            Group::Week => tr("Week", "Semaine"),
+            Group::Month => tr("Month", "Mois"),
+            Group::Year => tr("Year", "Année"),
         }
     }
 
@@ -622,6 +618,38 @@ mod tests {
         assert_eq!(swim.speed_label().as_deref(), Some("2:00 /100m"));
         let zero = act(1, "2026-10-20 07:00:00", "running", 0.0, 600.0);
         assert_eq!(zero.speed_label(), None);
+    }
+
+    #[test]
+    fn reads_in_english() {
+        let _english = crate::lang::force(false);
+        let labels: Vec<_> = Sport::ALL.iter().map(|s| s.label()).collect();
+        assert_eq!(labels, ["Run", "Trail", "Bike", "Swim", "Walk", "Hike", "Multisport", "Strength", "Other"]);
+        assert_eq!(fmt_km(0.0), "0.0\u{a0}km");
+        assert_eq!(fmt_km(99_949.0), "99.9\u{a0}km");
+        assert_eq!(fmt_km(99_950.0), "100\u{a0}km");
+        assert_eq!(fmt_km(1_941_400.0), "1,941\u{a0}km");
+        assert_eq!(fmt_m(58_384.4), "58,384\u{a0}m");
+        assert_eq!(fmt_m(999.0), "999\u{a0}m");
+        assert_eq!(fmt_m(1000.0), "1,000\u{a0}m");
+        assert_eq!(fmt_duration(36_000_000.0), "10,000h");
+        assert_eq!(fmt_duration(3725.0), "1h02");
+        for (n, s) in [(0, "0"), (999, "999"), (1000, "1,000"), (100_000, "100,000"), (-1234, "-1,234")] {
+            assert_eq!(group(n), s);
+        }
+        let bike = act(1, "2026-10-20 07:00:00", "road_biking", 30_000.0, 3600.0);
+        assert_eq!(bike.speed_label().as_deref(), Some("30.0\u{a0}km/h"));
+        assert_eq!(Measure::Pace.fmt(120.0, true), "30.0\u{a0}km/h");
+        assert_eq!(Measure::Count.fmt(1234.0, false), "1,234");
+        assert_eq!(Measure::ALL.map(|m| m.label()), ["Time", "Distance", "Elevation", "Outings", "Pace", "Average HR"]);
+        assert_eq!(Group::ALL.map(|g| g.label()), ["Day", "Week", "Month", "Year"]);
+        // Zero, one, two: only one is singular.
+        assert_eq!([0, 1, 2, 1000].map(outings), ["0 outings", "1 outing", "2 outings", "1,000 outings"]);
+    }
+
+    #[test]
+    fn counts_outings_in_french() {
+        assert_eq!([0, 1, 2, 1000].map(outings), ["0 sortie", "1 sortie", "2 sorties", "1\u{a0}000 sorties"]);
     }
 
     #[test]

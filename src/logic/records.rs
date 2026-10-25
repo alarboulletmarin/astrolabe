@@ -1,5 +1,6 @@
 //! Records: the boards (which sport, which rows) and their podiums.
 
+use crate::lang::{decimal, tr};
 use crate::logic::activity::{Activity, Sport, fmt_clock, fmt_km, fmt_m};
 use crate::logic::fit::Derived;
 use chrono::{Datelike, NaiveDate, Weekday};
@@ -33,78 +34,116 @@ impl Kind {
 
 #[derive(Clone, Copy)]
 pub struct Board {
-    pub title: &'static str,
+    /// What the board is called in the code (the same whatever the language): keys, element ids.
+    pub id: &'static str,
     /// `None`: every sport together.
     pub sport: Option<Sport>,
     /// Leaves out treadmill, indoor and virtual runs, whose distances are estimates.
     pub outdoor: bool,
+    /// Each row's id (see `row_label`) and what it measures.
     pub rows: &'static [(&'static str, Kind)],
+}
+
+impl Board {
+    /// The board's name, as the interface says it.
+    pub fn title(&self) -> &'static str {
+        match self.id {
+            "road" => tr("Road running", "Course sur route"),
+            "trail" => "Trail",
+            "bike" => tr("Cycling", "Vélo"),
+            "swim" => tr("Swimming", "Natation"),
+            _ => tr("Of every kind", "En tout genre"),
+        }
+    }
+}
+
+/// A row's name, as the interface says it. The distances ("5 km") are their own id.
+pub fn row_label(id: &'static str) -> &'static str {
+    match id {
+        "half" => tr("Half marathon", "Semi-marathon"),
+        "marathon" => "Marathon",
+        "1000 m" => tr("1,000 m", "1 000 m"),
+        "1500 m" => tr("1,500 m", "1 500 m"),
+        "longest-run" => tr("Longest run", "Plus longue course"),
+        "longest-distance" => tr("Longest distance", "Plus longue distance"),
+        "most-climb" => tr("Biggest climb", "Plus gros dénivelé"),
+        "longest-effort" => tr("Longest effort", "Plus long effort"),
+        "longest-ride" => tr("Longest ride", "Plus longue sortie"),
+        "longest-swim" => tr("Longest swim", "Plus longue nage"),
+        "longest-outing" => tr("Longest outing", "Plus longue sortie"),
+        "longest-time" => tr("Longest duration", "Plus longue durée"),
+        "max-hr" => tr("Max heart rate", "FC maximale"),
+        "week-longest" => tr("Longest week", "Semaine la plus longue"),
+        "week-busiest" => tr("Busiest week", "Semaine la plus chargée"),
+        "week-highest" => tr("Highest-climbing week", "Semaine la plus haute"),
+        other => other,
+    }
 }
 
 pub const BOARDS: [Board; 5] = [
     Board {
-        title: "Course sur route",
+        id: "road",
         sport: Some(Sport::Run),
         outdoor: true,
         rows: &[
             ("1 km", Kind::Effort(1000.0)),
             ("5 km", Kind::Effort(5000.0)),
             ("10 km", Kind::Effort(10_000.0)),
-            ("Semi-marathon", Kind::Effort(21_097.5)),
-            ("Marathon", Kind::Effort(42_195.0)),
-            ("Plus longue course", Kind::Longest),
+            ("half", Kind::Effort(21_097.5)),
+            ("marathon", Kind::Effort(42_195.0)),
+            ("longest-run", Kind::Longest),
         ],
     },
     Board {
-        title: "Trail",
+        id: "trail",
         sport: Some(Sport::Trail),
         outdoor: false,
         rows: &[
-            ("Plus longue distance", Kind::Longest),
-            ("Plus gros dénivelé", Kind::MostClimb),
-            ("Plus long effort", Kind::LongestTime),
+            ("longest-distance", Kind::Longest),
+            ("most-climb", Kind::MostClimb),
+            ("longest-effort", Kind::LongestTime),
             ("10 km", Kind::Effort(10_000.0)),
-            ("Semi-marathon", Kind::Effort(21_097.5)),
-            ("Marathon", Kind::Effort(42_195.0)),
+            ("half", Kind::Effort(21_097.5)),
+            ("marathon", Kind::Effort(42_195.0)),
             ("50 km", Kind::Effort(50_000.0)),
             ("100 km", Kind::Effort(100_000.0)),
         ],
     },
     Board {
-        title: "Vélo",
+        id: "bike",
         sport: Some(Sport::Bike),
         outdoor: false,
         rows: &[
             ("20 km", Kind::Effort(20_000.0)),
             ("40 km", Kind::Effort(40_000.0)),
             ("100 km", Kind::Effort(100_000.0)),
-            ("Plus longue sortie", Kind::Longest),
-            ("Plus gros dénivelé", Kind::MostClimb),
+            ("longest-ride", Kind::Longest),
+            ("most-climb", Kind::MostClimb),
         ],
     },
     Board {
-        title: "Natation",
+        id: "swim",
         sport: Some(Sport::Swim),
         outdoor: false,
         rows: &[
             ("400 m", Kind::Effort(400.0)),
-            ("1 000 m", Kind::Effort(1000.0)),
-            ("1 500 m", Kind::Effort(1500.0)),
-            ("Plus longue nage", Kind::Longest),
+            ("1000 m", Kind::Effort(1000.0)),
+            ("1500 m", Kind::Effort(1500.0)),
+            ("longest-swim", Kind::Longest),
         ],
     },
     Board {
-        title: "En tout genre",
+        id: "all",
         sport: None,
         outdoor: false,
         rows: &[
-            ("Plus longue sortie", Kind::Longest),
-            ("Plus longue durée", Kind::LongestTime),
-            ("Plus gros dénivelé", Kind::MostClimb),
-            ("FC maximale", Kind::MaxHr),
-            ("Semaine la plus longue", Kind::WeekDistance),
-            ("Semaine la plus chargée", Kind::WeekTime),
-            ("Semaine la plus haute", Kind::WeekClimb),
+            ("longest-outing", Kind::Longest),
+            ("longest-time", Kind::LongestTime),
+            ("most-climb", Kind::MostClimb),
+            ("max-hr", Kind::MaxHr),
+            ("week-longest", Kind::WeekDistance),
+            ("week-busiest", Kind::WeekTime),
+            ("week-highest", Kind::WeekClimb),
         ],
     },
 ];
@@ -177,6 +216,7 @@ fn weeks<'a>(acts: impl Iterator<Item = (&'a Activity, NaiveDate)>, kind: Kind) 
 /// A record that beat the one before it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Broken {
+    /// Both as the interface says them (they are not keys).
     pub board: &'static str,
     pub row: &'static str,
     pub sport: Sport,
@@ -201,7 +241,7 @@ pub fn broken(acts: &[Activity], derived: &HashMap<i64, Derived>, sport: Option<
                 let better = |prev: f64| if kind.is_time_over_distance() { entry.value < prev } else { entry.value > prev };
                 match best {
                     Some(prev) if better(prev) => {
-                        out.push(Broken { board: board.title, row, sport: board_sport, kind: *kind, entry, previous: prev });
+                        out.push(Broken { board: board.title(), row: row_label(row), sport: board_sport, kind: *kind, entry, previous: prev });
                         best = Some(entry.value);
                     }
                     None => best = Some(entry.value),
@@ -220,7 +260,7 @@ pub fn show(kind: Kind, sport: Sport, v: f64) -> (String, String) {
     match kind {
         Kind::Effort(m) => {
             let pace = match sport {
-                Sport::Bike => format!("{:.1} km/h", m / v * 3.6).replace('.', ","),
+                Sport::Bike => decimal(format!("{:.1} km/h", m / v * 3.6)),
                 Sport::Swim => format!("{} /100m", fmt_clock(v / m * 100.0)),
                 _ => format!("{} /km", fmt_clock(v / m * 1000.0)),
             };
@@ -237,7 +277,7 @@ pub fn show(kind: Kind, sport: Sport, v: f64) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BOARDS, Kind, outdoor, podium, show};
+    use super::{BOARDS, Kind, outdoor, podium, row_label, show};
     use crate::logic::activity::{Activity, Sport};
     use crate::logic::fit::{Derived, Effort};
     use std::collections::HashMap;
@@ -303,6 +343,32 @@ mod tests {
         assert_eq!(show(Kind::Effort(5000.0), Sport::Run, 1250.0), ("20:50".into(), "4:10 /km".into()));
         assert_eq!(show(Kind::Effort(40_000.0), Sport::Bike, 3600.0).1, "40,0 km/h");
         assert_eq!(show(Kind::Effort(400.0), Sport::Swim, 400.0).1, "1:40 /100m");
+    }
+
+    #[test]
+    fn boards_and_rows_are_named_in_both_languages() {
+        let ids: std::collections::HashSet<_> = BOARDS.iter().map(|b| b.id).collect();
+        assert_eq!(ids.len(), BOARDS.len(), "an id is a key: one per board");
+        for french in [true, false] {
+            let _lang = crate::lang::force(french);
+            let titles: std::collections::HashSet<_> = BOARDS.iter().map(|b| b.title()).collect();
+            assert_eq!(titles.len(), BOARDS.len());
+            for board in &BOARDS {
+                assert!(board.rows.iter().all(|(id, _)| !row_label(id).is_empty()));
+                // The same name twice in a board would be two rows nobody tells apart.
+                let rows: std::collections::HashSet<_> = board.rows.iter().map(|(id, _)| row_label(id)).collect();
+                assert_eq!(rows.len(), board.rows.len(), "{}", board.id);
+            }
+        }
+        let _english = crate::lang::force(false);
+        assert_eq!(BOARDS[0].title(), "Road running");
+        assert_eq!(BOARDS[4].title(), "Of every kind");
+        assert_eq!(row_label("half"), "Half marathon");
+        assert_eq!(row_label("1500 m"), "1,500 m");
+        assert_eq!(row_label("5 km"), "5 km");
+        assert_eq!(show(Kind::Effort(40_000.0), Sport::Bike, 3600.0).1, "40.0 km/h");
+        assert_eq!(show(Kind::Effort(5000.0), Sport::Run, 1250.0), ("20:50".into(), "4:10 /km".into()));
+        assert_eq!(show(Kind::MaxHr, Sport::Run, 188.4).0, "188 bpm");
     }
 
     #[test]

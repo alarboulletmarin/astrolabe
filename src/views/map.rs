@@ -2,6 +2,7 @@
 //! drag to move, wheel to zoom around the pointer, +/− and refit buttons, attribution.
 
 use crate::data::Data;
+use crate::lang::tr;
 use crate::logic::map::{self, View};
 use crate::ui::icon;
 use gpui_kit::assets::IconName;
@@ -222,7 +223,7 @@ pub fn map_widget<V: 'static>(
                     .right_0()
                     .flex()
                     .justify_center()
-                    .child(div().px(px(10.)).py(px(4.)).rounded(px(6.)).bg(t.text.opacity(0.75)).text_color(t.bg).text_size(px(12.)).child("Ctrl + molette pour zoomer")),
+                    .child(div().px(px(10.)).py(px(4.)).rounded(px(6.)).bg(t.text.opacity(0.75)).text_color(t.bg).text_size(px(12.)).child(tr("Ctrl + wheel to zoom", "Ctrl + molette pour zoomer"))),
             )
         })
         .child(
@@ -238,7 +239,7 @@ pub fn map_widget<V: 'static>(
                 .text_color(t.soft)
                 .cursor_pointer()
                 .on_click(|_, _, cx| cx.open_url("https://www.openstreetmap.org/copyright"))
-                .child("© les contributeurs d'OpenStreetMap"),
+                .child(tr("© OpenStreetMap contributors", "© les contributeurs d'OpenStreetMap")),
         )
 }
 

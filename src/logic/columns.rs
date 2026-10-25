@@ -2,6 +2,7 @@
 //! computed ones say (pure). The choice is kept as a word per column, so a setting from another
 //! version only loses what it no longer knows.
 
+use crate::lang::{decimal, ordinal, tr};
 use crate::logic::activity::{Activity, Sport, fmt_clock, fmt_m, group};
 use crate::logic::fit::BAND;
 use chrono::Duration;
@@ -63,33 +64,39 @@ impl Column {
     pub fn label(self) -> &'static str {
         match self {
             Column::Distance => "Distance",
-            Column::Time => "Temps",
-            Column::Pace => "Allure",
-            Column::Gap => "Écart",
-            Column::Elevation => "D+",
-            Column::Climb => "D+ / km",
-            Column::Hr => "FC",
-            Column::Calories => "Calories",
-            Column::Rank => "Rang",
-            Column::Zones => "Zones FC",
-            Column::Profile => "Profil",
+            Column::Time => tr("Time", "Temps"),
+            Column::Pace => tr("Pace", "Allure"),
+            Column::Gap => tr("Gap", "Écart"),
+            Column::Elevation => tr("Gain", "D+"),
+            Column::Climb => tr("Gain / km", "D+ / km"),
+            Column::Hr => tr("HR", "FC"),
+            Column::Calories => tr("Calories", "Calories"),
+            Column::Rank => tr("Rank", "Rang"),
+            Column::Zones => tr("HR zones", "Zones FC"),
+            Column::Profile => tr("Profile", "Profil"),
         }
     }
 
     /// One line in the menu: what the column says.
     pub fn hint(self) -> &'static str {
         match self {
-            Column::Distance => "la distance",
-            Column::Time => "la durée",
-            Column::Pace => "allure, vitesse ou temps aux 100 m selon le sport",
-            Column::Gap => "l'allure face à ta médiane sur les sorties du même sport et de distance proche, l'année d'avant",
-            Column::Elevation => "le dénivelé positif",
-            Column::Climb => "mètres de dénivelé par kilomètre : à quel point la sortie grimpe",
-            Column::Hr => "la fréquence cardiaque moyenne",
-            Column::Calories => "les calories dépensées",
-            Column::Rank => "la place parmi les sorties du même sport, par distance",
-            Column::Zones => "le temps passé dans chacune des 5 zones de fréquence cardiaque (une fois le fichier lu)",
-            Column::Profile => "l'altitude le long de la sortie (une fois le fichier lu)",
+            Column::Distance => tr("the distance", "la distance"),
+            Column::Time => tr("the duration", "la durée"),
+            Column::Pace => tr("pace, speed or time per 100 m, depending on the sport", "allure, vitesse ou temps aux 100 m selon le sport"),
+            Column::Gap => tr(
+                "the pace against your median over outings of the same sport and a similar distance, over the year before",
+                "l'allure face à ta médiane sur les sorties du même sport et de distance proche, l'année d'avant",
+            ),
+            Column::Elevation => tr("the elevation gained", "le dénivelé positif"),
+            Column::Climb => tr("metres of climb per kilometre: how steep the outing is", "mètres de dénivelé par kilomètre : à quel point la sortie grimpe"),
+            Column::Hr => tr("the average heart rate", "la fréquence cardiaque moyenne"),
+            Column::Calories => tr("the calories burned", "les calories dépensées"),
+            Column::Rank => tr("the place among outings of the same sport, by distance", "la place parmi les sorties du même sport, par distance"),
+            Column::Zones => tr(
+                "the time spent in each of the 5 heart rate zones (once the file is read)",
+                "le temps passé dans chacune des 5 zones de fréquence cardiaque (une fois le fichier lu)",
+            ),
+            Column::Profile => tr("the altitude along the outing (once the file is read)", "l'altitude le long de la sortie (une fois le fichier lu)"),
         }
     }
 
@@ -172,11 +179,6 @@ pub fn visible(columns: &[Column], width: f32) -> Vec<Column> {
     ALL.iter().copied().filter(|c| fit.contains(c)).collect()
 }
 
-/// "1er", "2e", "12e".
-fn ordinal(n: usize) -> String {
-    if n == 1 { "1er".into() } else { format!("{n}e") }
-}
-
 /// The cell of a figure column, empty when the activity has nothing to say. `rank` is the place
 /// and the number of outings of the sport, asked for only by the column that needs it. The
 /// computed columns (the gap, the charts) are not told here.
@@ -192,7 +194,7 @@ pub fn text(column: Column, a: &Activity, rank: Option<(usize, usize)>) -> Strin
             (Some(e), Some(d)) if e >= 1.0 && d >= 1000.0 => format!("{:.0} m/km", e / (d / 1000.0)),
             _ => String::new(),
         },
-        Column::Rank => rank.map(|(r, n)| format!("{} sur {}", ordinal(r), group(n as i64))).unwrap_or_default(),
+        Column::Rank => rank.map(|(r, n)| format!("{} {} {}", ordinal(r), tr("of", "sur"), group(n as i64))).unwrap_or_default(),
         Column::Gap | Column::Zones | Column::Profile => String::new(),
     }
 }
@@ -249,13 +251,13 @@ pub fn gaps(acts: &[Activity]) -> HashMap<i64, f64> {
     out
 }
 
-/// "−12 s/km" (faster), "+1:05 /km", "+1,3 km/h", "−4 s/100m"; "≈ habitude" within a hair.
+/// "−12 s/km" (faster), "+1:05 /km", "+1,3 km/h", "−4 s/100m"; "≈ habitude" ("≈ usual") within a hair.
 pub fn gap_label(sport: Sport, gap: f64) -> String {
     let sign = |v: f64| if v < 0.0 { "\u{2212}" } else { "+" };
     match sport {
-        Sport::Bike if gap.abs() < 0.15 => "≈ habitude".into(),
-        Sport::Bike => format!("{}{:.1}\u{a0}km/h", sign(gap), gap.abs()).replace('.', ","),
-        _ if gap.abs() < 1.5 => "≈ habitude".into(),
+        Sport::Bike if gap.abs() < 0.15 => tr("≈ usual", "≈ habitude").into(),
+        Sport::Bike => decimal(format!("{}{:.1}\u{a0}km/h", sign(gap), gap.abs())),
+        _ if gap.abs() < 1.5 => tr("≈ usual", "≈ habitude").into(),
         _ => {
             let per = if sport == Sport::Swim { "/100m" } else { "/km" };
             let s = gap.abs().round() as i64;
@@ -446,6 +448,32 @@ mod tests {
         assert!(gaps(&blank).is_empty());
         let strength: Vec<Activity> = (0..5).map(|i| outing(i, i, "strength_training", 1.0, 30.0)).collect();
         assert!(gaps(&strength).is_empty());
+    }
+
+    #[test]
+    fn cells_read_in_english() {
+        let _english = crate::lang::force(false);
+        let run = act("running", Some(10.0), Some(60.0), Some(250.0), Some(152.4), Some(1945.0));
+        assert_eq!(text(Column::Distance, &run, None), "10.0\u{a0}km");
+        assert_eq!(text(Column::Calories, &run, None), "1,945 kcal");
+        assert_eq!(text(Column::Elevation, &run, None), "250\u{a0}m");
+        assert_eq!(text(Column::Rank, &run, Some((1, 186))), "1st of 186");
+        assert_eq!(text(Column::Rank, &run, Some((2, 12))), "2nd of 12");
+        assert_eq!(text(Column::Rank, &run, Some((3, 12))), "3rd of 12");
+        assert_eq!(text(Column::Rank, &run, Some((11, 1941))), "11th of 1,941");
+        assert_eq!(text(Column::Rank, &run, Some((22, 1941))), "22nd of 1,941");
+        assert_eq!(gap_label(Sport::Bike, 1.26), "+1.3\u{a0}km/h");
+        assert_eq!(gap_label(Sport::Run, 1.0), "≈ usual");
+        assert_eq!(gap_label(Sport::Run, 65.0), "+1:05 /km");
+        // Every column has a label and a hint of its own, in both languages, and they are short enough for their width.
+        for french in [true, false] {
+            let _lang = crate::lang::force(french);
+            let labels: std::collections::HashSet<_> = ALL.iter().map(|c| c.label()).collect();
+            assert_eq!(labels.len(), ALL.len());
+            assert!(ALL.iter().all(|c| !c.hint().is_empty()));
+            // About 7 px a letter at 12 px, less the cell's padding.
+            assert!(ALL.iter().all(|c| c.label().chars().count() as f32 * 7.0 <= c.width() + 8.0), "{french}: a label is wider than its column");
+        }
     }
 
     #[test]

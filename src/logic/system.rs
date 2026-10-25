@@ -1,7 +1,9 @@
 //! What the settings say about the system the app runs on, by `std::env::consts::OS`.
 
+use crate::lang::tr;
+
 pub struct KeyStore {
-    /// After "confiée": where the key goes.
+    /// After "confiée" ("entrusted"): where the key goes.
     pub to: &'static str,
     /// The label next to the key's title.
     pub pill: &'static str,
@@ -11,10 +13,26 @@ pub struct KeyStore {
 
 pub fn key_store(os: &str) -> KeyStore {
     match os {
-        "linux" => KeyStore { to: "au trousseau du système (GNOME Keyring ou KWallet)", pill: "dans le trousseau", missing: "Faute de trousseau système" },
-        "macos" => KeyStore { to: "au Trousseau d'accès de macOS", pill: "dans le trousseau", missing: "Faute de Trousseau d'accès" },
-        "windows" => KeyStore { to: "au Gestionnaire d'identifiants de Windows", pill: "dans le gestionnaire", missing: "Faute de Gestionnaire d'identifiants" },
-        _ => KeyStore { to: "au trousseau du système", pill: "dans le trousseau", missing: "Faute de trousseau système" },
+        "linux" => KeyStore {
+            to: tr("to the system key store (GNOME Keyring or KWallet)", "au trousseau du système (GNOME Keyring ou KWallet)"),
+            pill: tr("in the key store", "dans le trousseau"),
+            missing: tr("Without a system key store", "Faute de trousseau système"),
+        },
+        "macos" => KeyStore {
+            to: tr("to the macOS Keychain", "au Trousseau d'accès de macOS"),
+            pill: tr("in the Keychain", "dans le trousseau"),
+            missing: tr("Without a Keychain", "Faute de Trousseau d'accès"),
+        },
+        "windows" => KeyStore {
+            to: tr("to the Windows Credential Manager", "au Gestionnaire d'identifiants de Windows"),
+            pill: tr("in the credential manager", "dans le gestionnaire"),
+            missing: tr("Without a Credential Manager", "Faute de Gestionnaire d'identifiants"),
+        },
+        _ => KeyStore {
+            to: tr("to the system key store", "au trousseau du système"),
+            pill: tr("in the key store", "dans le trousseau"),
+            missing: tr("Without a system key store", "Faute de trousseau système"),
+        },
     }
 }
 
@@ -39,6 +57,16 @@ mod tests {
         // A system we do not know: no store named, still a sentence.
         assert_eq!(key_store("freebsd").to, "au trousseau du système");
         assert!(key_store("windows").missing.contains("Gestionnaire") && !key_store("windows").missing.contains("trousseau"));
+    }
+
+    #[test]
+    fn each_system_is_named_in_english_too() {
+        let _english = crate::lang::force(false);
+        assert!(key_store("linux").to.contains("KWallet") && key_store("linux").to.starts_with("to "));
+        assert!(key_store("macos").to.contains("macOS") && !key_store("macos").to.contains("GNOME"));
+        assert!(key_store("windows").to.contains("Windows") && key_store("windows").pill.contains("credential"));
+        assert_eq!(key_store("freebsd").to, "to the system key store");
+        assert!(key_store("windows").missing.contains("Credential Manager") && !key_store("windows").missing.contains("key store"));
     }
 
     #[test]

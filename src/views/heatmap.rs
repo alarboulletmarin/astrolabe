@@ -2,10 +2,11 @@
 //! year; a click on the map lists the activities that went through that spot.
 
 use crate::data::{Data, Snapshot};
+use crate::lang::{plural, tr};
 use crate::logic::activity::Sport;
 use crate::logic::journal::{name, sports_present};
 use crate::logic::map;
-use crate::ui::format::fr_short;
+use crate::ui::format::short_date;
 use crate::ui::theme::blend;
 use crate::ui::{heading, icon, num, render_image, segmented, sport_tag};
 use crate::views::Page;
@@ -173,7 +174,7 @@ impl HeatmapView {
         let t = self.snap.theme;
         let present = sports_present(&self.snap.acts);
         let chosen = self.sports.clone();
-        let mut chips: Vec<(SharedString, bool)> = vec![("Tous".into(), chosen.is_empty())];
+        let mut chips: Vec<(SharedString, bool)> = vec![(tr("All", "Tous").into(), chosen.is_empty())];
         chips.extend(present.iter().map(|s| (s.label().into(), chosen.contains(s))));
         let sports = segmented("heat-sports", chips, t, cx, move |this: &mut HeatmapView, i, _, _| {
             let list = &mut this.sports;
@@ -189,7 +190,7 @@ impl HeatmapView {
         let mut years: Vec<i32> = self.snap.acts.iter().filter_map(|a| a.date()).map(|d| d.year()).collect();
         years.sort_unstable_by(|a, b| b.cmp(a));
         years.dedup();
-        let mut ys: Vec<(SharedString, bool)> = vec![("Toujours".into(), self.year.is_none())];
+        let mut ys: Vec<(SharedString, bool)> = vec![(tr("Any time", "Toujours").into(), self.year.is_none())];
         ys.extend(years.iter().map(|y| (y.to_string().into(), self.year == Some(*y))));
         let year_list = years.clone();
         let year = segmented("heat-year", ys, t, cx, move |this: &mut HeatmapView, i, _, _| {
@@ -221,24 +222,29 @@ impl HeatmapView {
             // The panel is not part of the map: no drag or zoom through it.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .child(heading("Carte de chaleur"))
+            .child(heading(tr("Heatmap", "Carte de chaleur")))
             .child(div().text_size(px(12.)).text_color(t.soft).child(if ids.is_empty() {
-                "Aucune trace GPS ici pour l'instant : elles arrivent avec la synchronisation.".to_string()
+                tr("No GPS track here yet: they arrive with the synchronisation.", "Aucune trace GPS ici pour l'instant : elles arrivent avec la synchronisation.").to_string()
             } else {
-                format!("{} sorties tracées · {}", crate::logic::activity::group(ids.len() as i64), crate::logic::activity::fmt_km(km))
+                format!(
+                    "{} {} · {}",
+                    crate::logic::activity::group(ids.len() as i64),
+                    plural(ids.len(), tr("outing with a track", "sortie tracée"), tr("outings with a track", "sorties tracées")),
+                    crate::logic::activity::fmt_km(km)
+                )
             }))
             .child(div().flex().flex_col().gap(px(5.)).child(div().text_size(px(12.)).text_color(t.soft).child("Sports")).child(sports))
-            .child(div().flex().flex_col().gap(px(5.)).child(div().text_size(px(12.)).text_color(t.soft).child("Année")).child(year))
+            .child(div().flex().flex_col().gap(px(5.)).child(div().text_size(px(12.)).text_color(t.soft).child(tr("Year", "Année"))).child(year))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(4.))
                     .child(div().h(px(8.)).rounded(px(4.)).bg(linear_gradient(90., linear_color_stop(ramp_light, 0.), linear_color_stop(ramp_deep, 1.))))
-                    .child(div().flex().justify_between().text_size(px(11.)).text_color(t.soft).child("un passage").child("le plus de passages")),
+                    .child(div().flex().justify_between().text_size(px(11.)).text_color(t.soft).child(tr("one pass", "un passage")).child(tr("most passes", "le plus de passages"))),
             )
             .when(waiting > 0, |d| {
-                d.child(div().text_size(px(12.)).text_color(t.dim).child(format!("{} trace{} encore à télécharger.", waiting, if waiting > 1 { "s" } else { "" })))
+                d.child(div().text_size(px(12.)).text_color(t.dim).child(format!("{} {} {}", waiting, plural(waiting, tr("track", "trace"), tr("tracks", "traces")), tr("still to download.", "encore à télécharger."))))
             })
             .when_some(picks, |d, found| {
                 d.child(
@@ -254,7 +260,11 @@ impl HeatmapView {
                                 .flex()
                                 .justify_between()
                                 .items_center()
-                                .child(heading(if found.is_empty() { "Rien ici".to_string() } else { format!("{} passage{} ici", found.len(), if found.len() > 1 { "s" } else { "" }) }).text_size(px(13.)))
+                                .child(heading(if found.is_empty() {
+                                    tr("Nothing here", "Rien ici").to_string()
+                                } else {
+                                    format!("{} {} {}", found.len(), plural(found.len(), tr("pass", "passage"), tr("passes", "passages")), tr("here", "ici"))
+                                }).text_size(px(13.)))
                                 .child(
                                     div()
                                         .id("pick-close")
@@ -282,7 +292,7 @@ impl HeatmapView {
                                     .cursor_pointer()
                                     .hover(|d| d.bg(t.panel))
                                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
-                                    .child(num(a.date().map(fr_short).unwrap_or_default()).w(px(100.)).flex_none().text_size(px(12.)).text_color(t.soft))
+                                    .child(num(a.date().map(short_date).unwrap_or_default()).w(px(100.)).flex_none().text_size(px(12.)).text_color(t.soft))
                                     .child(sport_tag(a.sport(), t))
                                     .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).child(name(a))),
                             )

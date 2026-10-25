@@ -2,11 +2,12 @@
 //! was done that day, an outing at a time; a year shows how busy each day was.
 
 use crate::data::{Data, Snapshot};
-use crate::logic::activity::{Activity, Sport, fmt_duration, group};
+use crate::lang::tr;
+use crate::logic::activity::{Activity, Sport, fmt_duration, outings};
 use crate::logic::calendar::{self as cal, Mode};
 use crate::logic::columns::{self, Column};
 use crate::logic::journal::{name, sports_present};
-use crate::ui::format::{calendar_title, month_name};
+use crate::ui::format::{calendar_title, month_name, weekday_short};
 use crate::ui::theme::blend;
 use crate::ui::{button, icon, num, page, pad, quantity, segmented, sport_icon, sport_tag, title};
 use crate::views::{Page, Width, today};
@@ -22,7 +23,6 @@ const MONTH_CHROME: f32 = 210.0;
 const CHIPS: usize = 3;
 /// Width of the weekly totals beside a month, where there is room for it.
 const TOTALS_W: f32 = 92.0;
-const DAYS: [&str; 7] = ["lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim."];
 
 pub struct CalendarView {
     snap: Snapshot,
@@ -67,12 +67,12 @@ impl CalendarView {
                 .on_click(cx.listener(move |this, _, _, cx| this.step(n, cx)))
                 .child(icon(name, t.soft, 16.))
         };
-        let modes = [("Semaine", Mode::Week), ("Mois", Mode::Month), ("Année", Mode::Year)];
+        let modes = [(tr("Week", "Semaine"), Mode::Week), (tr("Month", "Mois"), Mode::Month), (tr("Year", "Année"), Mode::Year)];
         let mode_filter = segmented("cal-mode", modes.iter().map(|(l, m)| ((*l).into(), self.mode == *m)).collect(), t, cx, move |this: &mut CalendarView, i, _, _| {
             this.mode = modes[i].1;
         });
         let present = sports_present(&self.snap.acts);
-        let mut items = vec![("Tout".into(), self.sport.is_none())];
+        let mut items = vec![(tr("All", "Tout").into(), self.sport.is_none())];
         items.extend(present.iter().map(|s| (s.label().into(), self.sport == Some(*s))));
         let sports = segmented("cal-sport", items, t, cx, move |this: &mut CalendarView, i, _, _| {
             this.sport = if i == 0 { None } else { Some(present[i - 1]) };
@@ -90,7 +90,7 @@ impl CalendarView {
                     .gap(px(6.))
                     .child(title(calendar_title(self.mode, self.anchor)))
                     .child(div().flex().items_center().ml(px(8.)).child(arrow("cal-prev", IconName::ChevronLeft, -1, cx)).child(arrow("cal-next", IconName::ChevronRight, 1, cx)))
-                    .child(button("cal-today", "Aujourd'hui", false, t).on_click(cx.listener(|this, _, _, cx| this.go_today(cx)))),
+                    .child(button("cal-today", tr("Today", "Aujourd'hui"), false, t).on_click(cx.listener(|this, _, _, cx| this.go_today(cx)))),
             )
             .child(div().flex().flex_wrap().items_center().gap(px(10.)).child(mode_filter).child(sports))
     }
@@ -112,8 +112,8 @@ impl CalendarView {
         let cell_h = ((height - MONTH_CHROME) / weeks.len() as f32).max(CELL_H);
         let head = div()
             .flex()
-            .children(DAYS.map(|d| div().flex_1().min_w_0().px(px(5.)).text_size(px(11.)).text_color(t.dim).child(d)))
-            .when(totals, |d| d.child(div().w(px(TOTALS_W)).flex_none().text_size(px(11.)).text_color(t.dim).pl(px(8.)).child("Semaine")));
+            .children((0..7).map(weekday_short).map(|d| div().flex_1().min_w_0().px(px(5.)).text_size(px(11.)).text_color(t.dim).child(d)))
+            .when(totals, |d| d.child(div().w(px(TOTALS_W)).flex_none().text_size(px(11.)).text_color(t.dim).pl(px(8.)).child(tr("Week", "Semaine"))));
         let rows = weeks.into_iter().map(|week| {
             let (mut count, mut secs) = (0usize, 0.0);
             let cells = week.map(|day| {
@@ -155,7 +155,7 @@ impl CalendarView {
                 .when(totals, |d| {
                     d.child(
                         div().w(px(TOTALS_W)).flex_none().h(px(cell_h)).border_t_1().border_color(t.border).pl(px(8.)).pt(px(7.)).text_size(px(12.)).text_color(t.soft).when(count > 0, |d| {
-                            d.child(quantity(&fmt_duration(secs), t).text_color(t.text)).child(div().text_color(t.dim).child(format!("{} sortie{}", group(count as i64), if count > 1 { "s" } else { "" })))
+                            d.child(quantity(&fmt_duration(secs), t).text_color(t.text)).child(div().text_color(t.dim).child(outings(count)))
                         }),
                     )
                 })
@@ -237,7 +237,7 @@ impl CalendarView {
                         .pb(px(6.))
                         .border_b_1()
                         .border_color(t.border)
-                        .child(div().text_size(px(12.)).text_color(t.dim).child(DAYS[day.weekday().num_days_from_monday() as usize]))
+                        .child(div().text_size(px(12.)).text_color(t.dim).child(weekday_short(day.weekday().num_days_from_monday() as usize)))
                         .child(
                             div()
                                 .px(px(6.))
@@ -248,7 +248,7 @@ impl CalendarView {
                         ),
                 )
                 .children(cards)
-                .when(list.is_empty() && stacked, |d| d.child(div().text_size(px(12.)).text_color(t.dim).child("rien")))
+                .when(list.is_empty() && stacked, |d| d.child(div().text_size(px(12.)).text_color(t.dim).child(tr("nothing", "rien"))))
         });
         div().flex().gap(px(14.)).when(stacked, |d| d.flex_col()).children(columns)
     }
@@ -318,9 +318,9 @@ impl CalendarView {
             .flex_col()
             .gap(px(20.))
             .child(div().text_color(t.soft).child(if count == 0 {
-                "Rien cette année-là.".to_string()
+                tr("Nothing that year.", "Rien cette année-là.").to_string()
             } else {
-                format!("{} sortie{} · {}", group(count as i64), if count > 1 { "s" } else { "" }, fmt_duration(secs))
+                format!("{} · {}", outings(count), fmt_duration(secs))
             }))
             .child(div().flex().flex_wrap().gap(px(gap)).gap_y(px(28.)).children(months))
     }
