@@ -255,6 +255,19 @@ pub fn broken(acts: &[Activity], derived: &HashMap<i64, Derived>, sport: Option<
     out
 }
 
+/// Which boards go in which of `cols` columns: each one, in order, under the lightest column so
+/// far (`weights`: how tall each is), so a short board does not leave a hole beside a long one.
+pub fn columns(weights: &[usize], cols: usize) -> Vec<Vec<usize>> {
+    let mut out = vec![Vec::new(); cols.max(1)];
+    let mut height = vec![0; out.len()];
+    for (i, w) in weights.iter().enumerate() {
+        let lightest = (0..out.len()).min_by_key(|c| height[*c]).unwrap_or(0);
+        out[lightest].push(i);
+        height[lightest] += w;
+    }
+    out
+}
+
 /// The value as it reads: a time and its pace for an effort.
 pub fn show(kind: Kind, sport: Sport, v: f64) -> (String, String) {
     match kind {
@@ -369,6 +382,19 @@ mod tests {
         assert_eq!(show(Kind::Effort(40_000.0), Sport::Bike, 3600.0).1, "40.0 km/h");
         assert_eq!(show(Kind::Effort(5000.0), Sport::Run, 1250.0), ("20:50".into(), "4:10 /km".into()));
         assert_eq!(show(Kind::MaxHr, Sport::Run, 188.4).0, "188 bpm");
+    }
+
+    #[test]
+    fn boards_fill_the_lightest_column() {
+        use super::columns;
+        // Heights of the five boards (rows + title): 7, 9, 6, 5, 8.
+        assert_eq!(columns(&[7, 9, 6, 5, 8], 2), [vec![0, 2, 4], vec![1, 3]]);
+        assert_eq!(columns(&[7, 9, 6, 5, 8], 3), [vec![0, 4], vec![1], vec![2, 3]]);
+        assert_eq!(columns(&[7, 9], 1), [vec![0, 1]]);
+        // More columns than boards: the empty ones stay empty; none at all; zero columns is one.
+        assert_eq!(columns(&[4], 3), [vec![0], vec![], vec![]]);
+        assert_eq!(columns(&[], 2), [Vec::<usize>::new(), vec![]]);
+        assert_eq!(columns(&[3, 3], 0), [vec![0, 1]]);
     }
 
     #[test]

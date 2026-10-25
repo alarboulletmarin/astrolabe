@@ -195,7 +195,7 @@ impl CalendarView {
         col.children(list[..shown].iter().map(|i| chip(*i, cx))).when(more > 0, |d| d.child(div().text_size(px(11.)).text_color(t.dim).child(format!("+ {more}"))))
     }
 
-    fn week(&self, days: &std::collections::HashMap<NaiveDate, Vec<usize>>, inner: f32, cx: &mut Context<Self>) -> Div {
+    fn week(&self, days: &std::collections::HashMap<NaiveDate, Vec<usize>>, inner: f32, vh: f32, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
         let today = today();
         let stacked = inner < 700.0;
@@ -228,7 +228,9 @@ impl CalendarView {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .when(!stacked, |d| d.min_h(px(260.)))
+                .when(!stacked, |d| d.min_h(px((vh - 230.).max(260.))))
+                // A hairline between the days, down the height of the window.
+                .when(!stacked && day.weekday().num_days_from_monday() > 0, |d| d.border_l_1().border_color(t.border).pl(px(10.)))
                 .child(
                     div()
                         .flex()
@@ -333,7 +335,7 @@ impl Render for CalendarView {
         let days = cal::by_day(&self.snap.acts, self.sport);
         let body = match self.mode {
             Mode::Month => self.month(&days, inner, window.viewport_size().height / px(1.), cx),
-            Mode::Week => self.week(&days, inner, cx),
+            Mode::Week => self.week(&days, inner, window.viewport_size().height / px(1.), cx),
             Mode::Year => self.year(&days, inner, cx),
         };
         page("calendar", width).track_scroll(self.width.scroll()).child(self.controls(cx)).child(body).into_any_element()

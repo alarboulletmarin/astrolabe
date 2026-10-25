@@ -5,7 +5,7 @@ use crate::data::{Data, Snapshot};
 use crate::logic::journal::short_name;
 use crate::logic::activity::Sport;
 use crate::lang::{ordinal, tr};
-use crate::logic::records::{BOARDS, Board, Kind, podium, row_label, show};
+use crate::logic::records::{BOARDS, Board, Kind, columns, podium, row_label, show};
 use crate::ui::format::{day_label, split_unit};
 use crate::ui::{heading, icon, pad, quantity, segmented, title};
 use crate::views::{Page, Width, today, tracks_progress};
@@ -58,10 +58,11 @@ impl Render for RecordsView {
         let cols = if width - 2.0 * p < 900.0 { 1 } else if width - 2.0 * p < 1450.0 { 2 } else { 3 };
         let waiting = self.snap.acts.iter().filter(|a| boards.iter().any(|b| b.sport.is_none_or(|s| s == a.sport())) && !self.snap.derived.contains_key(&a.activity_id)).count();
 
-        let mut grid = div().grid().grid_cols(cols).gap_x(px(48.)).gap_y(px(40.));
-        for board in boards.iter() {
-            grid = grid.child(self.board(board, cx));
-        }
+        // Columns of boards, each under the lightest column: no hole beside a long board.
+        let heights: Vec<usize> = boards.iter().map(|b| b.rows.len() + 1).collect();
+        let grid = div().flex().items_start().gap(px(48.)).children(columns(&heights, cols as usize).into_iter().map(|col| {
+            div().flex_1().min_w_0().flex().flex_col().gap(px(40.)).children(col.into_iter().map(|i| self.board(boards[i], cx)))
+        }));
 
         crate::ui::page("records", width).track_scroll(self.width.scroll())
             .child(
