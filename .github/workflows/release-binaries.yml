@@ -1,0 +1,105 @@
+# Builds the Windows and macOS downloads and attaches them to every published release.
+name: Binaries
+on:
+  release:
+    types: [published]
+  # By hand: build again and re-attach to an existing release (its tag must contain packaging/),
+  # or build any branch without touching a release (`-f tag=<branch> -f attach=false`): the
+  # files are then only in the run artifacts.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (or branch, with attach off) to build
+        required: true
+      attach:
+        description: Attach the files to the release of that tag
+        type: boolean
+        default: true
+permissions:
+  contents: write
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+defaults:
+  run:
+    shell: bash
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo build --release --locked
+      - name: The C runtime is linked in (no Visual C++ redistributable needed)
+        shell: pwsh
+        run: |
+          if (Select-String -Path target\release\astrolabe.exe -Pattern 'VCRUNTIME|MSVCP' -Quiet) {
+            throw 'astrolabe.exe still imports the Visual C++ runtime'
+          }
+      - name: Package
+        run: |
+          ASTROLABE_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          export ASTROLABE_VERSION
+          mkdir dist
+          iscc="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          # Preinstalled on the runner image; install it only if that ever changes.
+          [ -f "$iscc" ] || { choco install innosetup -y --no-progress; }
+          "$iscc" packaging/windows/astrolabe.iss
+          7z a -tzip dist/astrolabe-windows-x86_64.zip ./target/release/astrolabe.exe LICENSE assets/fonts/LICENSE-IBM-Plex.txt
+          ls -l dist
+      - name: The installer installs astrolabe.exe
+        shell: pwsh
+        run: |
+          Start-Process -Wait dist\astrolabe-windows-x86_64-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/DIR=C:\astrolabe-test'
+          if (-not (Test-Path C:\astrolabe-test\astrolabe.exe)) { throw 'the installer did not install astrolabe.exe' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          retention-days: 7
+          overwrite: true
+      - name: Attach to the release
+        if: github.event_name == 'release' || inputs.attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - run: rustup toolchain install stable --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
+      - name: Build one binary for Apple Silicon and Intel
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          lipo -create -output astrolabe-universal \
+            target/aarch64-apple-darwin/release/astrolabe target/x86_64-apple-darwin/release/astrolabe
+          lipo -info astrolabe-universal
+      - name: Package
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          scripts/bundle-macos.sh astrolabe-universal "$ver" dist/astrolabe-macos.dmg
+      - name: The disk image holds a valid Astrolabe.app
+        run: |
+          hdiutil attach dist/astrolabe-macos.dmg -mountpoint /Volumes/Astrolabe -nobrowse -quiet
+          codesign --verify --strict /Volumes/Astrolabe/Astrolabe.app
+          lipo -archs /Volumes/Astrolabe/Astrolabe.app/Contents/MacOS/astrolabe
+          hdiutil detach /Volumes/Astrolabe -quiet
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+          retention-days: 7
+          overwrite: true
+      - name: Attach to the release
+        if: github.event_name == 'release' || inputs.attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber

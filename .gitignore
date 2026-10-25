@@ -6,3 +6,14 @@
 
 # Claude Code local caches
 /.claude/
+
+# Release builds: installers, disk image, bundles
+/dist/
+
+# makepkg: build tree, downloaded sources, packages, logs
+/pkg/
+/src/astrolabe-*
+/*.tar.gz
+/*.pkg.tar.*
+/*.src.tar.*
+/*.log

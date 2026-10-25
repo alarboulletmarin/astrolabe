@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Astrolabe
+GenericName=Activity journal
+GenericName[fr]=Journal d'activités
+Comment=A journal of your sport activities, read from your Garmin account
+Comment[fr]=Journal de tes activités sportives, lu depuis ton compte Garmin
+Exec=astrolabe
+Icon=dev.andrea.Astrolabe
+Terminal=false
+Categories=Science;Sports;
+Keywords=sport;running;garmin;activities;journal;
+Keywords[fr]=sport;course;garmin;activités;journal;
+StartupNotify=true
+StartupWMClass=dev.andrea.Astrolabe
