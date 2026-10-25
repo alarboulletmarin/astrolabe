@@ -1,14 +1,17 @@
-//! Settings: the Garmin key, the map tiles, and where the data goes. A centred column, like a note.
+//! Settings: the Garmin key, the map tiles, the theme and language, and where the data goes. A centred column, like a note.
 
 use crate::data::{Data, Status};
 use crate::lang::{tr, trf};
 use crate::platform::secrets::Store;
 use crate::platform::{store, tiles};
-use crate::ui::{button, heading, icon, pill, title};
+use crate::ui::{button, heading, icon, pill, segmented, title};
 use crate::views::{Width, tracks_progress};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::{prelude::FluentBuilder, *};
+
+/// What the settings file keeps for each theme, in the order they are shown.
+const THEMES: [&str; 3] = ["system", "light", "dark"];
 
 pub struct SettingsView {
     data: Entity<Data>,
@@ -150,6 +153,7 @@ impl Render for SettingsView {
                             div().flex().gap(px(8.)).child(button("save-tiles", tr("Save", "Enregistrer"), false, t).on_click(cx.listener(|this, _, window, cx| this.save_tiles(window, cx)))),
                         ),
                 )
+                .child(self.appearance(cx))
                 .child(
                     section(10.)
                         .child(heading(tr("Where your data goes", "Où vont tes données")))
@@ -194,6 +198,45 @@ impl Render for SettingsView {
 }
 
 impl SettingsView {
+    /// Theme and language: the system's by default, or one picked here.
+    fn appearance(&self, cx: &mut Context<Self>) -> Div {
+        let d = self.data.read(cx);
+        let t = d.theme;
+        let saved = |key: &str| d.settings.get(key).cloned().unwrap_or_default();
+        let items = |values: &[&str], labels: [&'static str; 3], current: &str| -> Vec<(SharedString, bool)> {
+            // Anything unknown in the file is the system's choice, the first.
+            let at = values.iter().position(|v| *v == current).unwrap_or(0);
+            labels.into_iter().enumerate().map(|(i, l)| (l.into(), i == at)).collect()
+        };
+        let row = |label: &'static str, control: Div| div().flex().items_center().gap(px(12.)).child(div().w(px(80.)).text_color(t.soft).child(label)).child(control);
+        let theme = items(&THEMES, [tr("System", "Système"), tr("Light", "Clair"), tr("Dark", "Sombre")], &saved("theme"));
+        let [(en, english), (fr, french)] = crate::lang::LANGUAGES;
+        let codes = ["system", en, fr];
+        let language = items(&codes, [tr("System", "Système"), english, french], &saved("language"));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(heading(tr("Appearance", "Apparence")))
+            .child(row(
+                tr("Theme", "Thème"),
+                segmented("settings-theme", theme, t, cx, |this: &mut SettingsView, i, window, cx| {
+                    this.data.update(cx, |d, cx| {
+                        d.set_setting("theme", THEMES[i].into(), cx);
+                        d.follow_theme(window, cx);
+                    });
+                }),
+            ))
+            .child(row(
+                tr("Language", "Langue"),
+                segmented("settings-language", language, t, cx, move |this: &mut SettingsView, i, _, cx| {
+                    crate::lang::choose(Some(codes[i]));
+                    this.data.update(cx, |d, cx| d.set_setting("language", codes[i].into(), cx));
+                    cx.refresh_windows();
+                }),
+            ))
+    }
+
     /// Both steps of the synchronisation, live, with the button to start one.
     fn sync_steps(&self, cx: &mut Context<Self>) -> Div {
         let d = self.data.read(cx);

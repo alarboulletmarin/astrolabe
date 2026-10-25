@@ -13,6 +13,7 @@ use crate::platform::{
 use crate::ui::render_image;
 use crate::ui::theme::Theme;
 use chrono::Local;
+use gpui_kit::component::{Theme as KitTheme, ThemeMode};
 use gpui_kit::*;
 use std::{
     collections::HashMap,
@@ -115,6 +116,7 @@ impl Snapshot {
 impl Data {
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
         let mut data = Self::blank(theme);
+        crate::lang::choose(data.settings.get("language").map(String::as_str));
         data.start(cx);
         data
     }
@@ -159,6 +161,19 @@ impl Data {
         }
         self.theme = theme;
         cx.notify();
+    }
+
+    /// The theme the settings ask for (`light`, `dark`; anything else follows the system), on
+    /// the app and on the kit's components.
+    pub fn follow_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let appearance = match self.settings.get("theme").map(String::as_str) {
+            Some("light") => WindowAppearance::Light,
+            Some("dark") => WindowAppearance::Dark,
+            _ => window.appearance(),
+        };
+        let theme = Theme::for_appearance(appearance);
+        KitTheme::change(if theme.dark { ThemeMode::Dark } else { ThemeMode::Light }, Some(window), cx);
+        self.set_theme(theme, cx);
     }
 
     /// What the views read on every frame, copied when the data changes (cheap: shared pointers).

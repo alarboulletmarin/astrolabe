@@ -17,7 +17,7 @@ use crate::views::settings::SettingsView;
 use crate::views::stats::StatsView;
 use crate::views::{Page, Width};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{Theme as KitTheme, ThemeMode, tooltip::Tooltip};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder, *};
 use std::time::Duration;
 
@@ -62,9 +62,8 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let theme = Theme::for_appearance(window.appearance());
-        KitTheme::change(if theme.dark { ThemeMode::Dark } else { ThemeMode::Light }, Some(window), cx);
-        let data = cx.new(|cx| Data::new(theme, cx));
+        let data = cx.new(|cx| Data::new(Theme::for_appearance(window.appearance()), cx));
+        data.update(cx, |d, cx| d.follow_theme(window, cx));
         Self::with_data(data, window, cx)
     }
 
@@ -80,11 +79,7 @@ impl Shell {
         let heatmap = cx.new(|cx| HeatmapView::new(data.clone(), cx));
         let settings = cx.new(|cx| SettingsView::new(data.clone(), width.clone(), window, cx));
         let subs = vec![
-            cx.observe_window_appearance(window, |this, window, cx| {
-                let theme = Theme::for_appearance(window.appearance());
-                KitTheme::change(if theme.dark { ThemeMode::Dark } else { ThemeMode::Light }, Some(window), cx);
-                this.data.update(cx, |d, cx| d.set_theme(theme, cx));
-            }),
+            cx.observe_window_appearance(window, |this, window, cx| this.data.update(cx, |d, cx| d.follow_theme(window, cx))),
             cx.observe(&data, |_, _, cx| cx.notify()),
             cx.subscribe_in(&data, window, |this, _, e: &DataEvent, window, cx| match e {
                 DataEvent::NeedKey => this.go(Page::Settings, window, cx),

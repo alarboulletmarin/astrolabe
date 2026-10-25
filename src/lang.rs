@@ -2,8 +2,9 @@
 //! and how numbers are written in each. Used by every layer.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-/// Interface text: French if the system's language is, English otherwise.
+/// Interface text: French if the chosen language is (by default the system's), English otherwise.
 pub fn tr(en: &'static str, fr: &'static str) -> &'static str {
     if is_french() { fr } else { en }
 }
@@ -15,8 +16,35 @@ pub fn is_french() -> bool {
     if let Some(forced) = FORCED.with(|f| f.get()) {
         return forced;
     }
-    static FRENCH: OnceLock<bool> = OnceLock::new();
-    *FRENCH.get_or_init(|| cfg!(test) || system_is_french())
+    match CHOSEN.load(Ordering::Relaxed) {
+        ENGLISH => false,
+        FRENCH => true,
+        _ => {
+            static SYSTEM: OnceLock<bool> = OnceLock::new();
+            *SYSTEM.get_or_init(|| cfg!(test) || system_is_french())
+        }
+    }
+}
+
+const ENGLISH: u8 = 1;
+const FRENCH: u8 = 2;
+static CHOSEN: AtomicU8 = AtomicU8::new(0);
+
+/// The languages to pick from, each named in its own: what the settings file keeps, the name.
+pub const LANGUAGES: [(&str, &str); 2] = [("en", "English"), ("fr", "Français")];
+
+/// The language the settings ask for: `"en"`, `"fr"`, anything else follows the system. Tests
+/// keep it on their own thread, like `force`.
+pub fn choose(setting: Option<&str>) {
+    let french = match setting {
+        Some("en") => Some(false),
+        Some("fr") => Some(true),
+        _ => None,
+    };
+    #[cfg(test)]
+    FORCED.with(|f| f.set(french));
+    #[cfg(not(test))]
+    CHOSEN.store(french.map_or(0, |f| if f { FRENCH } else { ENGLISH }), Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -147,6 +175,21 @@ fn first_language(list: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_chosen_language_wins_and_anything_else_follows_the_system() {
+        let _guard = force(true);
+        choose(Some("en"));
+        assert_eq!(tr("Light", "Clair"), "Light");
+        choose(Some("fr"));
+        assert_eq!(tr("Light", "Clair"), "Clair");
+        // The system, in tests, speaks French.
+        for other in [None, Some(""), Some("system"), Some("de"), Some("EN")] {
+            choose(Some("en"));
+            choose(other);
+            assert!(is_french(), "{other:?}");
+        }
+    }
 
     #[test]
     fn reads_the_first_system_language() {
