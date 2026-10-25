@@ -4,15 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Astrolabe — a journal of your sport activities</title>
-<meta name="description" content="A desktop journal of your sport activities, read from your Garmin account and kept on your machine. Today, journal, calendar, statistics, form, records and heatmap. Linux, macOS, Windows.">
+<meta name="description" content="A desktop journal of your sport activities, read from your Garmin account and kept on your machine. Linux, macOS, Windows.">
 <meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1b1a19" media="(prefers-color-scheme: dark)">
 <link rel="canonical" href="https://alarboulletmarin.github.io/astrolabe/">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://alarboulletmarin.github.io/astrolabe/">
 <meta property="og:title" content="Astrolabe — a journal of your sport activities">
-<meta property="og:description" content="Your Garmin activities, tracks and curves, kept on your machine. Opens instantly, online or not. Rust + GPUI.">
-<meta property="og:image" content="https://alarboulletmarin.github.io/astrolabe/icon-512.png">
-<meta name="twitter:card" content="summary">
+<meta property="og:description" content="Your Garmin activities, kept on your machine. Opens instantly, online or not.">
+<meta property="og:image" content="https://alarboulletmarin.github.io/astrolabe/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="preload" href="fonts/IBMPlexSans-Regular.woff2" as="font" type="font/woff2" crossorigin>
@@ -22,327 +24,137 @@
 @font-face { font-family: "IBM Plex Sans"; font-weight: 700; font-display: swap; src: url(fonts/IBMPlexSans-Bold.woff2) format("woff2"); }
 @font-face { font-family: "IBM Plex Mono"; font-weight: 400; font-display: swap; src: url(fonts/IBMPlexMono-Regular.woff2) format("woff2"); }
 
-/* The app's colours: its light and dark themes (src/ui/theme.rs). One accent, tints at 10 %. */
+/* The app's colours (src/ui/theme.rs). */
 :root {
-  --bg: #fbfaf8; --text: #26231f; --dim: #a8a29a; --accent: #b4532a;
-  --panel: #f1eeea; --border: #e2ddd6; --on-accent: #ffffff;
-  --soft: color-mix(in srgb, var(--text) 66%, var(--bg));
-  --tint: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  --bg: #fbfaf8; --text: #26231f; --accent: #b4532a; --panel: #f1eeea; --border: #e2ddd6; --on-accent: #fff;
+  --soft: color-mix(in srgb, var(--text) 64%, var(--bg));
 }
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1b1a19; --text: #e4e0da; --dim: #77716a; --accent: #e0926b;
-    --panel: #161514; --border: #3a3735; --on-accent: #1b1a19;
-  }
+  :root { --bg: #1b1a19; --text: #e4e0da; --accent: #e0926b; --panel: #232120; --border: #3a3735; --on-accent: #1b1a19; }
 }
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; scroll-padding-top: 72px; -webkit-text-size-adjust: 100%; }
-@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 body {
   margin: 0; background: var(--bg); color: var(--text);
-  font: 16px/1.65 "IBM Plex Sans", "Noto Sans", "Segoe UI", "Helvetica Neue", sans-serif;
+  font: 17px/1.6 "IBM Plex Sans", "Segoe UI", "Helvetica Neue", sans-serif;
   -webkit-font-smoothing: antialiased; overflow-wrap: break-word;
 }
-code, kbd, pre, .mono { font-family: "IBM Plex Mono", Menlo, Consolas, monospace; font-size: .86em; }
-h1, h2, h3 { text-wrap: balance; }
+code, pre { font-family: "IBM Plex Mono", Menlo, Consolas, monospace; font-size: .82em; }
+h1, h2 { text-wrap: balance; letter-spacing: -.03em; line-height: 1.1; }
 p { text-wrap: pretty; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; text-underline-offset: 3px; }
 a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
-.wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
-section { padding-top: 104px; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
 
 /* Language: both texts are in the page; the one of the page's language shows. */
 html[lang="en"] [lang="fr"], html[lang="fr"] [lang="en"] { display: none; }
-.skip { position: absolute; left: -999px; top: 8px; background: var(--bg); padding: 8px 12px; z-index: 20; }
-.skip:focus { left: 8px; }
 
-/* Top bar */
-header.top { position: sticky; top: 0; z-index: 10; background: var(--bg); border-bottom: 1px solid var(--border); }
-header.top .wrap { display: flex; align-items: center; gap: 24px; height: 56px; }
+header { display: flex; align-items: center; gap: 20px; height: 64px; }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; margin-right: auto; }
 .brand:hover { text-decoration: none; }
-.brand img { width: 26px; height: 26px; border-radius: 6px; }
-header.top nav { display: flex; gap: 22px; font-size: .9rem; }
-header.top nav a { color: var(--soft); }
-header.top nav a:hover { color: var(--text); text-decoration: none; }
-#langbtn { font: inherit; font-size: .82rem; font-weight: 700; color: var(--soft); background: none; border: 1px solid var(--border); border-radius: 6px; height: 32px; min-width: 40px; padding: 0 8px; cursor: pointer; }
-#langbtn:hover { color: var(--text); border-color: var(--soft); }
+header a:not(.brand) { color: var(--soft); font-size: .9rem; }
+#langbtn { font: inherit; font-size: .8rem; font-weight: 700; color: var(--soft); background: none; border: 1px solid var(--border); border-radius: 6px; height: 30px; padding: 0 9px; cursor: pointer; }
+#langbtn:hover { color: var(--text); }
 
-/* Buttons */
-.btn {
-  display: inline-flex; align-items: center; height: 44px; padding: 0 20px;
-  border-radius: 6px; font: inherit; font-size: .95rem; font-weight: 700;
-  border: 1px solid var(--border); background: transparent; color: var(--text);
-}
-.btn:hover { text-decoration: none; border-color: var(--soft); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-.btn.primary:hover { filter: brightness(1.07); }
+.hero { padding: 72px 0 0; text-align: center; }
+.hero h1 { margin: 0; font-size: clamp(2.4rem, 6vw, 4rem); }
+.hero p { margin: 20px auto 0; max-width: 30em; font-size: 1.15rem; color: var(--soft); }
+.btn { display: inline-flex; align-items: center; height: 46px; padding: 0 22px; margin-top: 32px; border-radius: 6px; font-weight: 700; background: var(--accent); color: var(--on-accent); }
+.btn:hover { text-decoration: none; filter: brightness(1.07); }
+.hero small { display: block; margin-top: 14px; font-size: .85rem; color: var(--soft); }
 
-/* Hero */
-.hero { padding-top: 72px; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr); gap: 56px; align-items: center; }
-.hero .logo { display: block; margin: 0 0 26px; border-radius: 16px; }
-.hero h1 { margin: 0; font-size: clamp(2.3rem, 5.4vw, 3.7rem); line-height: 1.06; letter-spacing: -.03em; font-weight: 700; }
-.hero .sub { margin: 22px 0 0; font-size: 1.15rem; color: var(--soft); max-width: 34em; }
-.cta { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-top: 30px; }
-.fine { margin: 18px 0 0; font-size: .88rem; color: var(--soft); }
-.art { margin: 0; justify-self: center; width: 100%; max-width: 420px; }
-.art svg { display: block; width: 100%; height: auto; }
+.shot { display: block; width: 100%; height: auto; margin: 56px 0 0; border: 1px solid var(--border); border-radius: 10px; }
 
-/* Section heads */
-.head h2 { margin: 0; font-size: clamp(1.7rem, 3.6vw, 2.3rem); line-height: 1.15; letter-spacing: -.02em; }
-.head h2::before { content: "## "; color: var(--dim); font-family: "IBM Plex Mono", Menlo, Consolas, monospace; font-weight: 400; }
-.head p { margin: 14px 0 0; color: var(--soft); max-width: 42em; }
+.points { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; margin: 72px 0 0; padding: 0; list-style: none; }
+.points b { display: block; margin-bottom: 4px; }
+.points span { color: var(--soft); font-size: .95rem; }
 
-/* Features and principles: hairlines, no boxes */
-.grid { display: grid; margin-top: 44px; border-top: 1px solid var(--border); }
-.grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.cell { padding: 26px 26px 30px 0; border-bottom: 1px solid var(--border); }
-.cell h3 { margin: 0 0 8px; font-size: 1.05rem; letter-spacing: -.01em; }
-.cell p { margin: 0; font-size: .93rem; color: var(--soft); }
-.three .cell:not(:nth-child(3n+1)) { padding-left: 26px; border-left: 1px solid var(--border); }
-.four .cell:not(:nth-child(4n+1)) { padding-left: 24px; border-left: 1px solid var(--border); }
+#download { margin-top: 104px; }
+#download h2 { margin: 0 0 8px; font-size: 2rem; }
+.os { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 4px 24px; padding: 20px 0; border-top: 1px solid var(--border); }
+.os h3 { margin: 0; font-size: 1rem; }
+.os p { margin: 0; color: var(--soft); font-size: .95rem; }
+pre { margin: 10px 0 0; padding: 12px 14px; background: var(--panel); border-radius: 6px; overflow-x: auto; line-height: 1.7; }
 
-/* Install */
-.os { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 6px 28px; padding: 24px 0; border-bottom: 1px solid var(--border); }
-.os:first-of-type { border-top: 1px solid var(--border); }
-.os h3 { margin: 0; font-size: 1.05rem; }
-.os p { margin: 0 0 12px; color: var(--soft); font-size: .93rem; }
-.os p:last-child { margin-bottom: 0; }
-.os b { color: var(--text); }
-.list { margin-top: 44px; }
-pre { margin: 0 0 12px; padding: 14px 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; font-size: .8rem; line-height: 1.7; }
-.note { margin: 28px 0 0; padding: 14px 16px; background: var(--tint); border-radius: 6px; font-size: .92rem; color: var(--text); }
-
-/* Footer */
-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; margin-top: 104px; padding: 28px 0 40px; border-top: 1px solid var(--border); color: var(--soft); font-size: .88rem; }
-footer .brand { font-size: .95rem; margin-right: 0; }
+footer { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 96px; padding: 24px 0 40px; border-top: 1px solid var(--border); color: var(--soft); font-size: .85rem; }
+footer span { margin-right: auto; }
 footer a { color: var(--soft); }
-footer a:hover { color: var(--text); }
-footer .grow { margin-right: auto; }
 
-@media (max-width: 900px) {
-  .hero { grid-template-columns: minmax(0, 1fr); gap: 40px; }
-  .art { max-width: 320px; justify-self: start; }
-  .grid.three, .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .three .cell:not(:nth-child(3n+1)), .four .cell:not(:nth-child(4n+1)) { padding-left: 0; border-left: 0; }
-  .grid .cell:nth-child(2n) { padding-left: 26px; border-left: 1px solid var(--border); }
-}
-@media (max-width: 640px) {
-  section { padding-top: 76px; }
-  header.top nav a:not(.keep) { display: none; }
-  header.top .wrap { gap: 16px; }
+@media (max-width: 720px) {
   .hero { padding-top: 40px; }
-  .grid.three, .grid.four { grid-template-columns: minmax(0, 1fr); }
-  .grid .cell, .grid .cell:nth-child(n) { padding-left: 0; padding-right: 0; border-left: 0; }
+  /* The whole window is unreadable at this width: show its top left corner. */
+  .shot { aspect-ratio: 1; object-fit: cover; object-position: left top; margin-top: 40px; }
+  .points { grid-template-columns: minmax(0, 1fr); gap: 20px; margin-top: 48px; }
   .os { grid-template-columns: minmax(0, 1fr); }
-  .btn { width: 100%; justify-content: center; }
+  #download { margin-top: 72px; }
 }
-@media (max-width: 400px) {
-  header.top nav a:last-child { display: none; }
-  .wrap { padding: 0 16px; }
-}
-@media print {
-  header.top, .art, #langbtn, .skip { display: none; }
-  body { background: #fff; color: #000; font-size: 11pt; }
-  section { padding-top: 28px; break-inside: avoid; }
-  .hero { display: block; padding-top: 0; }
-  a { color: #000; text-decoration: underline; }
-  a[href^="http"]::after { content: " (" attr(href) ")"; font-size: .8em; }
-  .btn { border: 0; padding: 0; height: auto; }
-  footer { margin-top: 28px; }
-}
+@media (max-width: 400px) { .wrap { padding: 0 16px; } }
 </style>
 </head>
 <body>
-<a class="skip" href="#main"><span lang="en">Skip to content</span><span lang="fr">Aller au contenu</span></a>
-
-<header class="top">
-  <div class="wrap">
-    <a class="brand" href="#top"><img src="icon.svg" width="26" height="26" alt="">Astrolabe</a>
-    <nav aria-label="Main">
-      <a href="#features"><span lang="en">Features</span><span lang="fr">Fonctions</span></a>
-      <a href="#principles"><span lang="en">Your data</span><span lang="fr">Tes données</span></a>
-      <a href="#install" class="keep"><span lang="en">Download</span><span lang="fr">Télécharger</span></a>
-      <a href="https://github.com/alarboulletmarin/astrolabe" class="keep">GitHub</a>
-    </nav>
-    <button id="langbtn" type="button" hidden aria-label="Language">FR</button>
-  </div>
+<div class="wrap">
+<header>
+  <a class="brand" href="#"><img src="icon.svg" width="26" height="26" alt="">Astrolabe</a>
+  <a href="https://github.com/alarboulletmarin/astrolabe">GitHub</a>
+  <button id="langbtn" type="button" hidden>FR</button>
 </header>
 
-<main id="main">
-  <div class="wrap hero" id="top">
-    <div>
-      <img class="logo" src="icon.svg" width="72" height="72" alt="Astrolabe">
-      <h1>
-        <span lang="en">Know where you stand.</span>
-        <span lang="fr">Savoir où tu en es.</span>
-      </h1>
-      <p class="sub" lang="en">A desktop journal of your sport activities, read from your Garmin account. Your outings, their tracks and their curves are kept on your machine, and the app opens instantly, online or not.</p>
-      <p class="sub" lang="fr">Un journal de tes activités sportives sur ton ordinateur, lu depuis ton compte Garmin. Tes sorties, leurs tracés et leurs courbes restent chez toi, et l’application s’ouvre aussitôt, en ligne ou non.</p>
-      <div class="cta">
-        <a class="btn primary" href="https://github.com/alarboulletmarin/astrolabe/releases/latest"><span lang="en">Download Astrolabe</span><span lang="fr">Télécharger Astrolabe</span></a>
-        <a class="btn" href="https://github.com/alarboulletmarin/astrolabe"><span lang="en">View on GitHub</span><span lang="fr">Voir sur GitHub</span></a>
-      </div>
-      <p class="fine"><span lang="en">Free and open source · MIT licence · Linux, macOS, Windows</span><span lang="fr">Libre et open source · licence MIT · Linux, macOS, Windows</span></p>
-    </div>
-
-    <!-- A drawing, not data: a made-up elevation profile and heart rate curve. -->
-    <figure class="art" role="img" aria-label="Decorative drawing of an elevation profile with a heart rate curve">
-      <svg viewBox="0 0 420 340" aria-hidden="true" focusable="false">
-        <defs>
-          <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="var(--accent)" stop-opacity=".22"/>
-            <stop offset="1" stop-color="var(--accent)" stop-opacity="0"/>
-          </linearGradient>
-        </defs>
-        <g stroke="var(--border)" stroke-width="1">
-          <path d="M20 40H400M20 110H400M20 180H400M20 250H400M20 320H400"/>
-        </g>
-        <path d="M20 270 C60 262 80 230 120 226 S180 262 220 214 S290 120 330 128 S380 190 400 178 V320 H20 Z" fill="url(#fade)"/>
-        <path d="M20 270 C60 262 80 230 120 226 S180 262 220 214 S290 120 330 128 S380 190 400 178" fill="none" stroke="var(--text)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M20 232 C50 214 70 190 110 196 S170 150 210 132 S280 70 320 62 S380 84 400 100" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="320" cy="62" r="5" fill="var(--accent)"/>
-        <g stroke="var(--dim)" stroke-width="1.4" stroke-linecap="round">
-          <path d="M20 326v-6M115 326v-6M210 326v-6M305 326v-6M400 326v-6"/>
-        </g>
-      </svg>
-    </figure>
+<main>
+  <div class="hero">
+    <h1><span lang="en">Know where you stand.</span><span lang="fr">Savoir où tu en es.</span></h1>
+    <p lang="en">A desktop journal of your Garmin activities. Everything stays on your machine and opens instantly, online or not.</p>
+    <p lang="fr">Le journal de tes activités Garmin, sur ton ordinateur. Tout reste chez toi et s’ouvre aussitôt, en ligne ou non.</p>
+    <a class="btn" href="#download"><span lang="en">Download</span><span lang="fr">Télécharger</span></a>
+    <small><span lang="en">Free and open source · Linux, macOS, Windows</span><span lang="fr">Libre et gratuit · Linux, macOS, Windows</span></small>
   </div>
 
-  <section id="features">
-    <div class="wrap">
-      <div class="head">
-        <h2><span lang="en">Everything about your outings, in one place.</span><span lang="fr">Tout sur tes sorties, au même endroit.</span></h2>
-        <p lang="en">Read what you did, and see where you stand. Astrolabe shows the figures; it does not tell you what to do.</p>
-        <p lang="fr">Relire ce que tu as fait, et voir où tu en es. Astrolabe montre les chiffres ; il ne te dit pas quoi faire.</p>
-      </div>
+  <img class="shot" src="screenshot.png" width="1278" height="838" alt="The Today page: this week, streak, year to date, time per week and consistency" fetchpriority="high">
 
-      <div class="grid three">
-        <div class="cell"><h3><span lang="en">Today</span><span lang="fr">Aujourd’hui</span></h3>
-          <p lang="en">This week against your median week, the run of weeks with an outing, the year so far against the same date a year before.</p>
-          <p lang="fr">La semaine face à ta semaine médiane, la série de semaines avec une sortie, l’année à date face à la même date un an plus tôt.</p></div>
-        <div class="cell"><h3><span lang="en">Journal</span><span lang="fr">Journal</span></h3>
-          <p lang="en">Every activity week by week, with a search, a filter by sport and the columns you choose: pace, the gap to your usual pace, heart rate zones, an altitude profile.</p>
-          <p lang="fr">Chaque activité semaine par semaine, avec une recherche, un filtre par sport et les colonnes de ton choix : allure, écart à l’habitude, zones de FC, profil d’altitude.</p></div>
-        <div class="cell"><h3><span lang="en">Calendar</span><span lang="fr">Calendrier</span></h3>
-          <p lang="en">By week, month and year, with the activities in the day cells.</p>
-          <p lang="fr">Par semaine, mois et année, avec les activités dans les cases des jours.</p></div>
-        <div class="cell"><h3><span lang="en">Activity sheet</span><span lang="fr">Fiche d’activité</span></h3>
-          <p lang="en">The map of the track, the pace, heart rate and elevation curves, the splits and the laps. Pointing at one curve points at the others and on the map.</p>
-          <p lang="fr">La carte du tracé, les courbes d’allure, de fréquence cardiaque et d’altitude, les kilomètres et les tours. Viser un point d’une courbe le montre sur les autres et sur la carte.</p></div>
-        <div class="cell"><h3><span lang="en">Statistics</span><span lang="fr">Statistiques</span></h3>
-          <p lang="en">Pick the measure, the grouping, the period and the sports, and compare the running totals of several years.</p>
-          <p lang="fr">Choisis la mesure, le regroupement, la période et les sports, et compare les cumuls de plusieurs années.</p></div>
-        <div class="cell"><h3><span lang="en">Form</span><span lang="fr">Forme</span></h3>
-          <p lang="en">Training load, fatigue and freshness, as figures and curves.</p>
-          <p lang="fr">Charge d’entraînement, fatigue et fraîcheur, en chiffres et en courbes.</p></div>
-        <div class="cell"><h3><span lang="en">Records</span><span lang="fr">Records</span></h3>
-          <p lang="en">Best efforts on the road, on trails, by bike and in the pool, with the ten best of each one unfolded.</p>
-          <p lang="fr">Meilleurs efforts sur route, en trail, à vélo et en piscine, avec les dix meilleurs de chacun.</p></div>
-        <div class="cell"><h3><span lang="en">Heatmap</span><span lang="fr">Carte de chaleur</span></h3>
-          <p lang="en">All your tracks on one map, darker where you go most. A click shows the activities that pass there.</p>
-          <p lang="fr">Tous tes tracés sur une carte, plus sombre là où tu passes le plus. Un clic montre les activités qui passent là.</p></div>
-        <div class="cell"><h3><span lang="en">Light and dark, English and French</span><span lang="fr">Clair et sombre, français et anglais</span></h3>
-          <p lang="en">It follows your system: theme and language. Back and forward through the pages with Alt + arrows or the mouse buttons.</p>
-          <p lang="fr">Il suit ton système : thème et langue. Retour et avance entre les pages avec Alt + flèches ou les boutons de la souris.</p></div>
+  <ul class="points">
+    <li><b><span lang="en">Everything about your outings</span><span lang="fr">Tout sur tes sorties</span></b>
+      <span lang="en">Journal, calendar, maps and curves, statistics, form, records, heatmap.</span>
+      <span lang="fr">Journal, calendrier, cartes et courbes, statistiques, forme, records, carte de chaleur.</span></li>
+    <li><b><span lang="en">Your data stay with you</span><span lang="fr">Tes données restent chez toi</span></b>
+      <span lang="en">It talks to Garmin and OpenStreetMap, nobody else. Your key goes to the system keyring.</span>
+      <span lang="fr">Il ne parle qu’à Garmin et OpenStreetMap. Ta clé va dans le trousseau du système.</span></li>
+    <li><b><span lang="en">Small and fast</span><span lang="fr">Petit et rapide</span></b>
+      <span lang="en">One binary in Rust, drawn on the GPU. MIT licence.</span>
+      <span lang="fr">Un binaire en Rust, dessiné sur le GPU. Licence MIT.</span></li>
+  </ul>
+
+  <section id="download">
+    <h2><span lang="en">Download</span><span lang="fr">Télécharger</span></h2>
+    <div class="os">
+      <h3>Windows</h3>
+      <p><a href="https://github.com/alarboulletmarin/astrolabe/releases/latest"><span lang="en">Installer or .zip</span><span lang="fr">Installeur ou .zip</span></a> · <span lang="en">Windows 10/11. Not signed: <i>More info</i> → <i>Run anyway</i>.</span><span lang="fr">Windows 10/11. Non signé : <i>Informations complémentaires</i> → <i>Exécuter quand même</i>.</span></p>
+    </div>
+    <div class="os">
+      <h3>macOS</h3>
+      <p><a href="https://github.com/alarboulletmarin/astrolabe/releases/latest"><span lang="en">Disk image</span><span lang="fr">Image disque</span></a> · <span lang="en">macOS 11+, Apple Silicon and Intel. Not notarized: <i>Open Anyway</i> in Privacy &amp; Security.</span><span lang="fr">macOS 11+, Apple Silicon et Intel. Non notarisé : <i>Ouvrir quand même</i> dans Confidentialité et sécurité.</span></p>
+    </div>
+    <div class="os">
+      <h3>Arch Linux</h3>
+      <div><pre><code>curl -LO https://github.com/alarboulletmarin/astrolabe/releases/latest/download/astrolabe-x86_64.pkg.tar.zst
+sudo pacman -U ./astrolabe-x86_64.pkg.tar.zst</code></pre></div>
+    </div>
+    <div class="os">
+      <h3><span lang="en">Other Linux</span><span lang="fr">Autre Linux</span></h3>
+      <div>
+        <p><span lang="en">Build from source with Rust (</span><span lang="fr">À compiler avec Rust (</span><a href="https://github.com/alarboulletmarin/astrolabe#other-linux-distributions"><span lang="en">dependencies</span><span lang="fr">dépendances</span></a>).</p>
+        <pre><code>git clone https://github.com/alarboulletmarin/astrolabe.git
+cd astrolabe &amp;&amp; make &amp;&amp; sudo make install</code></pre>
       </div>
     </div>
   </section>
-
-  <section id="principles">
-    <div class="wrap">
-      <div class="head">
-        <h2><span lang="en">Your data stay with you.</span><span lang="fr">Tes données restent chez toi.</span></h2>
-        <p lang="en">Health data are personal. Astrolabe talks to Garmin and to a map server, and to nobody else.</p>
-        <p lang="fr">Les données de santé sont personnelles. Astrolabe ne parle qu’à Garmin et à un serveur de cartes, et à personne d’autre.</p>
-      </div>
-
-      <div class="grid four">
-        <div class="cell"><h3><span lang="en">Only Garmin</span><span lang="fr">Seulement Garmin</span></h3>
-          <p lang="en">Your activities come from Garmin’s personal API with a key you create yourself. Map tiles come from OpenStreetMap, asked for without anything that identifies you. Nothing else leaves your machine.</p>
-          <p lang="fr">Tes activités viennent de l’API personnelle de Garmin, avec une clé que tu crées toi-même. Les tuiles de carte viennent d’OpenStreetMap, demandées sans rien qui t’identifie. Rien d’autre ne quitte ta machine.</p></div>
-        <div class="cell"><h3><span lang="en">The key is kept safe</span><span lang="fr">La clé est protégée</span></h3>
-          <p lang="en">It goes to your system’s keyring. Where there is none, the app seals it in an encrypted file only you can read. Never in the clear, never in a log.</p>
-          <p lang="fr">Elle va dans le trousseau de ton système. Faute de trousseau, l’application la scelle dans un fichier chiffré que toi seul peux lire. Jamais en clair, jamais dans un journal.</p></div>
-        <div class="cell"><h3><span lang="en">Local files</span><span lang="fr">Fichiers locaux</span></h3>
-          <p lang="en">Activities and their tracks are stored on your disk, readable by you alone, written atomically. The app never deletes them, and works offline.</p>
-          <p lang="fr">Les activités et leurs tracés sont sur ton disque, lisibles par toi seul, écrits de façon atomique. L’application ne les détruit jamais, et fonctionne hors ligne.</p></div>
-        <div class="cell"><h3>Linux, macOS, Windows</h3>
-          <p lang="en">One small binary, written in Rust, drawn on the GPU. Free and open source under the MIT licence: read the code, build it yourself.</p>
-          <p lang="fr">Un petit binaire écrit en Rust, dessiné sur le GPU. Libre et open source sous licence MIT : lis le code, compile-le toi-même.</p></div>
-      </div>
-    </div>
-  </section>
-
-  <section id="install">
-    <div class="wrap">
-      <div class="head">
-        <h2><span lang="en">Download</span><span lang="fr">Télécharger</span></h2>
-        <p lang="en">Every release comes with ready-made downloads for Arch, macOS and Windows. Elsewhere, Astrolabe is built from the source.</p>
-        <p lang="fr">Chaque version est publiée avec des téléchargements prêts à l’emploi pour Arch, macOS et Windows. Ailleurs, Astrolabe se compile depuis les sources.</p>
-      </div>
-
-      <div class="list">
-        <div class="os">
-          <h3>Windows</h3>
-          <div>
-            <p lang="en">Windows 10 or 11, 64-bit. The installer works for your user only, no administrator rights needed; a <code>.zip</code> installs nothing.</p>
-            <p lang="fr">Windows 10 ou 11, 64 bits. L’installeur ne concerne que ton compte, sans droits d’administrateur ; un <code>.zip</code> n’installe rien.</p>
-            <p><a class="btn primary" href="https://github.com/alarboulletmarin/astrolabe/releases/latest"><span lang="en">Get the Windows files</span><span lang="fr">Les fichiers Windows</span></a></p>
-            <p lang="en">The files are not signed. If SmartScreen shows “Windows protected your PC”, click <b>More info</b>, then <b>Run anyway</b>.</p>
-            <p lang="fr">Les fichiers ne sont pas signés. Si SmartScreen affiche « Windows a protégé votre ordinateur », clique sur <b>Informations complémentaires</b>, puis <b>Exécuter quand même</b>.</p>
-          </div>
-        </div>
-        <div class="os">
-          <h3>macOS</h3>
-          <div>
-            <p lang="en">Apple Silicon and Intel, macOS 11 or later. Open the <code>.dmg</code> and drag Astrolabe to Applications.</p>
-            <p lang="fr">Apple Silicon et Intel, macOS 11 ou plus. Ouvre le <code>.dmg</code> et glisse Astrolabe dans Applications.</p>
-            <p><a class="btn primary" href="https://github.com/alarboulletmarin/astrolabe/releases/latest"><span lang="en">Get the macOS disk image</span><span lang="fr">L’image disque macOS</span></a></p>
-            <p lang="en">The app is not notarized, so the first launch needs <b>Open Anyway</b> in System Settings, Privacy &amp; Security.</p>
-            <p lang="fr">L’application n’est pas notarisée : au premier lancement, clique sur <b>Ouvrir quand même</b> dans Réglages Système, Confidentialité et sécurité.</p>
-          </div>
-        </div>
-        <div class="os">
-          <h3>Arch Linux</h3>
-          <div>
-            <p lang="en">A prebuilt package ships with every release, no compiler needed.</p>
-            <p lang="fr">Un paquet précompilé accompagne chaque version, sans compilateur.</p>
-            <pre><code>curl -LO https://github.com/alarboulletmarin/astrolabe/releases/latest/download/astrolabe-x86_64.pkg.tar.zst
-sudo pacman -U ./astrolabe-x86_64.pkg.tar.zst</code></pre>
-          </div>
-        </div>
-        <div class="os">
-          <h3><span lang="en">Other Linux</span><span lang="fr">Autre Linux</span></h3>
-          <div>
-            <p lang="en">Build it from the source, with <a href="https://rustup.rs">Rust</a> and the development files of fontconfig, freetype, Wayland, libxcb and libxkbcommon, plus a Vulkan driver (<a href="https://github.com/alarboulletmarin/astrolabe#other-linux-distributions">package names for each distribution</a>).</p>
-            <p lang="fr">Compile-le depuis les sources, avec <a href="https://rustup.rs">Rust</a> et les fichiers de développement de fontconfig, freetype, Wayland, libxcb et libxkbcommon, plus un pilote Vulkan (<a href="https://github.com/alarboulletmarin/astrolabe#other-linux-distributions">les paquets de chaque distribution</a>).</p>
-            <pre><code>git clone https://github.com/alarboulletmarin/astrolabe.git
-cd astrolabe
-make
-sudo make install</code></pre>
-          </div>
-        </div>
-      </div>
-
-      <p class="note" lang="en">The download buttons lead to the latest release on GitHub. If that page shows no release yet, none has been published: build Astrolabe from the source as above, or follow the <a href="https://github.com/alarboulletmarin/astrolabe">repository</a>.</p>
-      <p class="note" lang="fr">Les boutons mènent à la dernière version publiée sur GitHub. Si cette page n’en montre aucune, aucune n’a encore été publiée : compile Astrolabe depuis les sources comme ci-dessus, ou suis le <a href="https://github.com/alarboulletmarin/astrolabe">dépôt</a>.</p>
-    </div>
-  </section>
-
-  <div class="wrap">
-    <footer>
-      <a class="brand" href="#top"><img src="icon.svg" width="26" height="26" alt="">Astrolabe</a>
-      <span class="grow"><span lang="en">MIT licence · IBM Plex under the SIL Open Font License · map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors</span><span lang="fr">Licence MIT · IBM Plex sous licence SIL Open Font License · données cartographiques © contributeurs <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a></span></span>
-      <a href="https://github.com/alarboulletmarin/astrolabe"><span lang="en">Source</span><span lang="fr">Code source</span></a>
-      <a href="https://github.com/alarboulletmarin/astrolabe/releases">Releases</a>
-      <a href="https://github.com/alarboulletmarin/astrolabe/issues">Issues</a>
-      <a href="fonts/LICENSE-IBM-Plex.txt">Fonts</a>
-    </footer>
-  </div>
 </main>
+
+<footer>
+  <span><span lang="en">MIT licence · map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors</span><span lang="fr">Licence MIT · données cartographiques © contributeurs <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a></span></span>
+  <a href="https://github.com/alarboulletmarin/astrolabe/releases">Releases</a>
+  <a href="https://github.com/alarboulletmarin/astrolabe/issues">Issues</a>
+  <a href="fonts/LICENSE-IBM-Plex.txt">Fonts</a>
+</footer>
+</div>
 
 <script>
 // Language: the system's (French or English), switchable; the choice is remembered when storage allows.
