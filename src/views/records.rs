@@ -86,7 +86,7 @@ impl Render for RecordsView {
                         .child(tracks_progress(&self.data, cx)),
                 )
             })
-            .when(boards.is_empty(), |d| d.child(div().text_color(t.soft).child("Pas encore d'activité.")))
+            .when(boards.is_empty(), |d| d.child(div().text_color(t.soft).child("Pas encore de sortie.")))
             .child(grid)
     }
 

@@ -52,7 +52,7 @@ impl EventEmitter<Page> for JournalView {}
 
 impl JournalView {
     pub fn new(data: Entity<Data>, width: Width, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Chercher une activité"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Chercher une sortie"));
         let subs = vec![
             cx.observe(&data, |this, data, cx| {
                 this.snap = data.read(cx).snapshot();
@@ -325,7 +325,7 @@ impl Render for JournalView {
         let body = if self.snap.acts.is_empty() {
             self.journal_empty(p, cx).into_any_element()
         } else if self.rows.is_empty() {
-            div().px(px(p + 10.)).py(px(20.)).text_color(t.soft).child("Aucune activité ne correspond.").into_any_element()
+            div().px(px(p + 10.)).py(px(20.)).text_color(t.soft).child("Aucune sortie ne correspond.").into_any_element()
         } else {
             let count = self.rows.len();
             div()
@@ -342,7 +342,7 @@ impl Render for JournalView {
                         .text_color(t.dim)
                         .child(self.line(
                             div().child("Date"),
-                            div().child("Activité"),
+                            div().child("Sortie"),
                             columns::visible(&self.columns, inner).into_iter().map(|c| (c, div().child(c.label()))).collect(),
                         )),
                 )
@@ -479,7 +479,7 @@ impl JournalView {
     }
 }
 
-/// "5 activités · 6h25 · Course 41,1 km · Vélo 53,0 km · 482 m D+": across sports the
+/// "5 sorties · 6h25 · Course 41,1 km · Vélo 53,0 km · 482 m D+": across sports the
 /// kilometres are told sport by sport, never added up.
 fn week_totals(acts: &[act::Activity], monday: NaiveDate, sport: Option<Sport>) -> String {
     let sunday = monday + Days::new(6);
@@ -487,7 +487,7 @@ fn week_totals(acts: &[act::Activity], monday: NaiveDate, sport: Option<Sport>) 
     if sport.is_some() {
         return totals_line(&all);
     }
-    let mut parts = vec![format!("{} activité{}", group(all.count as i64), if all.count > 1 { "s" } else { "" })];
+    let mut parts = vec![format!("{} sortie{}", group(all.count as i64), if all.count > 1 { "s" } else { "" })];
     if all.duration > 0.0 {
         parts.push(fmt_duration(all.duration));
     }

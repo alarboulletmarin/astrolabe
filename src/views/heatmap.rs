@@ -225,7 +225,7 @@ impl HeatmapView {
             .child(div().text_size(px(12.)).text_color(t.soft).child(if ids.is_empty() {
                 "Aucune trace GPS ici pour l'instant : elles arrivent avec la synchronisation.".to_string()
             } else {
-                format!("{} activités tracées · {}", crate::logic::activity::group(ids.len() as i64), crate::logic::activity::fmt_km(km))
+                format!("{} sorties tracées · {}", crate::logic::activity::group(ids.len() as i64), crate::logic::activity::fmt_km(km))
             }))
             .child(div().flex().flex_col().gap(px(5.)).child(div().text_size(px(12.)).text_color(t.soft).child("Sports")).child(sports))
             .child(div().flex().flex_col().gap(px(5.)).child(div().text_size(px(12.)).text_color(t.soft).child("Année")).child(year))

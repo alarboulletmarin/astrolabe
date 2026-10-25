@@ -3,10 +3,10 @@
 
 use crate::data::{Data, Snapshot};
 use crate::logic::activity::{self as act, Activity, Group, Measure, Point, Query, Sport, fmt_clock, fmt_duration, fmt_km, fmt_m, week_start};
-use crate::logic::journal::{name, sports_present};
+use crate::logic::journal::{short_name, sports_present};
 use crate::ui::format::{fr_day, fr_short, month_short, totals_line};
 use crate::ui::theme::blend;
-use crate::ui::{Plots, heading, icon, num, pad, page, segmented, sport_tag, title};
+use crate::ui::{Plots, heading, icon, num, pad, page, quantity, segmented, sport_icon, sport_tag, title};
 use crate::views::{Page, Width, today};
 use gpui_kit::assets::IconName;
 use chrono::{Datelike, Days, NaiveDate};
@@ -78,7 +78,7 @@ fn cumul_title(m: Measure) -> String {
         Measure::Time => "Temps cumulé jour après jour".into(),
         Measure::Distance => "Distance cumulée jour après jour".into(),
         Measure::Elevation => "Dénivelé cumulé jour après jour".into(),
-        Measure::Count => "Séances cumulées jour après jour".into(),
+        Measure::Count => "Sorties cumulées jour après jour".into(),
         m => format!("{}, moyenne depuis le début de la période", m.label()),
     }
 }
@@ -242,7 +242,7 @@ impl Render for StatsView {
             .gap(px(10.))
             .child(div().flex().flex_wrap().items_center().justify_between().gap(px(12.)).child(title("Statistiques")).child(chart_tabs))
             .child(self.sentence(cx))
-            .child(div().text_color(t.soft).child(if tot.count == 0 { "Aucune activité sur cette période.".into() } else { totals_line(&tot) }));
+            .child(div().text_color(t.soft).child(if tot.count == 0 { "Aucune sortie sur cette période.".into() } else { totals_line(&tot) }));
 
         // The plots' width: known before their first frame, so labels and cells fit at once.
         let inner = width - 2.0 * pad(width);
@@ -461,7 +461,7 @@ impl StatsView {
             let top = PLOT_H * (1.0 - ((v - floor) / (max - floor)) as f32) - 8.0;
             // Axis steps are round: whole kilometres read better there.
             let text = if measure == Measure::Distance { format!("{}\u{a0}km", act::group((v / 1000.0).round() as i64)) } else { measure.fmt(v, bike) };
-            num(text).absolute().right(px(10.)).top(px(top)).text_size(px(11.)).text_color(t.dim).whitespace_nowrap()
+            div().absolute().right(px(10.)).top(px(top)).text_size(px(11.)).text_color(t.dim).whitespace_nowrap().child(text)
         });
         div()
             .flex()
@@ -492,7 +492,7 @@ impl StatsView {
         let today = today();
         let readout = shown.and_then(|i| cur.get(i)).map_or(String::new(), |p| {
             let mut s = format!(
-                "{} · {} · {} séance{}",
+                "{} · {} · {} sortie{}",
                 if p.from == p.to { fr_day(p.from, today) } else { format!("{} → {}", fr_day(p.from, today), fr_day(p.to, today)) },
                 p.value.map(|v| q.measure.fmt(v, bike)).unwrap_or("—".into()),
                 p.count,
@@ -805,9 +805,9 @@ impl StatsView {
             .flex_col()
             .child(heading(title_text).mb(px(2.)))
             .child(div().text_size(px(12.)).text_color(t.soft).mb(px(8.)).child(if list.is_empty() {
-                "Aucune activité.".to_string()
+                "Aucune sortie.".to_string()
             } else {
-                format!("{} activité{} · un clic sur le graphique change la sélection", list.len(), if list.len() > 1 { "s" } else { "" })
+                format!("{} sortie{} · un clic sur le graphique change la sélection", list.len(), if list.len() > 1 { "s" } else { "" })
             }))
             .children(list.iter().take(40).enumerate().map(|(i, a)| {
                 let id = a.activity_id;
@@ -824,9 +824,9 @@ impl StatsView {
                     .hover(|d| d.bg(t.panel))
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(Page::Activity(id))))
                     .child(num(a.date().map(fr_short).unwrap_or_default()).w(px(96.)).flex_none().text_size(px(12.)).text_color(t.soft))
-                    .child(div().flex().w(px(110.)).flex_none().child(sport_tag(a.sport(), t)))
-                    .child(div().flex_1().min_w_0().truncate().child(name(a)))
-                    .child(num(own_value(q.measure, a, bike)).font_weight(FontWeight::BOLD))
+                    .child(icon(sport_icon(a.sport()), t.soft, 14.))
+                    .child(div().flex_1().min_w_0().truncate().child(short_name(a)))
+                    .child(quantity(&own_value(q.measure, a, bike), t).font_weight(FontWeight::BOLD))
             }))
             .when(list.len() > 40, |d| d.child(div().pt(px(6.)).text_size(px(12.)).text_color(t.soft).child(format!("… et {} autres", list.len() - 40))))
     }
@@ -861,7 +861,7 @@ impl StatsView {
                     .text_color(t.dim)
                     .child(div().w(px(110.)).child("Sport"))
                     .child(div().flex_1().child(q.measure.label()))
-                    .child(cell(div().child("Séances"), 64.))
+                    .child(cell(div().child("Sorties"), 64.))
                     .when(cmp.is_some(), |d| d.child(cell(div().child("Évolution"), 80.))),
             )
             .when(rows.is_empty(), |d| d.child(div().text_color(t.soft).child("Rien sur cette période.")))
@@ -891,7 +891,7 @@ impl StatsView {
                             .flex()
                             .items_center()
                             .child(div().absolute().left_0().top(px(3.)).h(px(16.)).rounded(px(3.)).w(relative((share as f32).clamp(0.02, 1.0))).bg(t.panel))
-                            .child(num(p.value.filter(|_| p.count > 0).map(|v| q.measure.fmt(v, bike)).unwrap_or("—".into())).relative().pl(px(6.)).font_weight(FontWeight::BOLD)),
+                            .child(quantity(&p.value.filter(|_| p.count > 0).map(|v| q.measure.fmt(v, bike)).unwrap_or("—".into()), t).relative().pl(px(6.)).font_weight(FontWeight::BOLD)),
                     )
                     .child(cell(num(p.count.to_string()), 64.).text_color(t.soft))
                     .when(cmp.is_some(), |d| d.child(cell(num(delta), 80.).text_color(t.soft)))
@@ -913,16 +913,18 @@ impl StatsView {
         let mut sorted: Vec<f64> = vals.iter().copied().filter(|v| *v > 0.0).collect();
         sorted.sort_by(f64::total_cmp);
         let p90 = sorted.get(sorted.len() * 9 / 10).copied().unwrap_or(1.0).max(1e-9);
+        // The longest run of weeks with an outing, like the streak everywhere else (the grid starts
+        // on a Monday).
         let (mut longest, mut run) = (0, 0);
-        for v in &vals {
-            run = if *v > 0.0 { run + 1 } else { 0 };
+        for week in vals.chunks(7) {
+            run = if week.iter().any(|v| *v > 0.0) { run + 1 } else { 0 };
             longest = longest.max(run);
         }
         let hover = self.cal_hover;
         let summary = match hover.and_then(|i| days.get(i)) {
             Some(p) if p.count > 0 => format!("{} · {}", fr_day(p.from, today), q.measure.fmt(p.value.unwrap_or(0.0), self.bike_only())),
             Some(p) => format!("{} · repos", fr_day(p.from, today)),
-            None => format!("{} jours actifs · plus longue série : {} jour{}", sorted.len(), longest, if longest > 1 { "s" } else { "" }),
+            None => format!("{} jours actifs · plus longue série : {} semaine{}", sorted.len(), longest, if longest > 1 { "s" } else { "" }),
         };
         let shade = move |v: f64, accent: Hsla, bg: Hsla, rest: Hsla| if v > 0.0 { blend(accent, bg, (0.3 + 0.7 * (v / p90).min(1.0)) as f32) } else { rest };
         let (rest, accent, bg, ink) = (t.border, t.accent, t.bg, t.text);

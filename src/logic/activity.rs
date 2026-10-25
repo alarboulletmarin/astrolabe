@@ -337,7 +337,7 @@ impl Measure {
             Measure::Time => "Temps",
             Measure::Distance => "Distance",
             Measure::Elevation => "Dénivelé",
-            Measure::Count => "Séances",
+            Measure::Count => "Sorties",
             Measure::Pace => "Allure",
             Measure::Hr => "FC moyenne",
         }

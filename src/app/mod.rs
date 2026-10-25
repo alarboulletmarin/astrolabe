@@ -275,9 +275,9 @@ impl Shell {
         } else if let Status::Busy(s) = &d.status {
             (s.clone(), t.soft)
         } else if let Some(why) = &d.fetch.stopped {
-            (format!("{n} activité{s} · synchronisation interrompue : {why}"), t.bad())
+            (format!("{n} sortie{s} · synchronisation interrompue : {why}"), t.bad())
         } else {
-            (format!("{n} activité{s}{}", d.note.as_ref().map(|x| format!(" · {x}")).unwrap_or_default()), t.dim)
+            (format!("{n} sortie{s}{}", d.note.as_ref().map(|x| format!(" · {x}")).unwrap_or_default()), t.dim)
         };
         let share = d.sync_share();
         div()

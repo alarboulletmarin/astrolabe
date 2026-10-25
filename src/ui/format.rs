@@ -67,10 +67,10 @@ pub fn fr_long(dt: chrono::NaiveDateTime) -> String {
 }
 
 
-/// "6 activités · 65,6 km · 10h18 · 1 610 m D+", leaving out what is zero.
+/// "6 sorties · 65,6 km · 10h18 · 1 610 m D+", leaving out what is zero.
 pub fn totals_line(t: &crate::logic::activity::Totals) -> String {
     use crate::logic::activity::{fmt_duration, fmt_km, fmt_m, group};
-    let mut parts = vec![format!("{} activité{}", group(t.count as i64), if t.count > 1 { "s" } else { "" })];
+    let mut parts = vec![format!("{} sortie{}", group(t.count as i64), if t.count > 1 { "s" } else { "" })];
     if t.distance > 0.0 {
         parts.push(fmt_km(t.distance));
     }

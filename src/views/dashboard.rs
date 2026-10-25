@@ -138,7 +138,7 @@ impl Render for DashboardView {
             return page("dashboard", width)
                 .track_scroll(self.width.scroll())
                 .child(head)
-                .child(div().text_color(t.soft).child("Aucune activité pour l'instant : la synchronisation (en bas du rail) les rapporte depuis Garmin."))
+                .child(div().text_color(t.soft).child("Aucune sortie pour l'instant : la synchronisation (en bas du rail) les rapporte depuis Garmin."))
                 .into_any_element();
         }
 
