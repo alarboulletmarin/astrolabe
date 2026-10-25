@@ -380,6 +380,7 @@ impl JournalView {
             let on = self.columns.contains(&c);
             div()
                 .id(("column", c as usize))
+                .debug_selector(move || format!("column-{}", c as usize))
                 .flex()
                 .items_start()
                 .gap(px(8.))
@@ -400,6 +401,7 @@ impl JournalView {
             .child(
                 div()
                     .id("journal-columns")
+                    .debug_selector(|| "journal-columns".into())
                     .flex()
                     .items_center()
                     .gap(px(4.))
@@ -426,6 +428,7 @@ impl JournalView {
                     deferred(
                         div()
                             .id("columns-panel")
+                            .debug_selector(|| "columns-panel".into())
                             .absolute()
                             .top(px(30.))
                             .right_0()
@@ -436,6 +439,8 @@ impl JournalView {
                             .rounded(px(8.))
                             .bg(t.bg)
                             .shadow_lg()
+                            // Drawn above the rows, but a click would reach them too without it.
+                            .occlude()
                             .text_size(px(13.))
                             .flex()
                             .flex_col()

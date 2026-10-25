@@ -94,6 +94,31 @@ fn a_journal_row_opens_the_outing(cx: &mut TestAppContext) {
     assert_eq!(page(&shell, cx), Page::Journal);
 }
 
+/// The columns menu takes its own clicks: the row under it neither opens nor lights up.
+#[gpui::test]
+fn the_columns_menu_keeps_its_clicks_from_the_rows_below(cx: &mut TestAppContext) {
+    let (shell, cx) = start(cx, 40);
+    click(cx, "rail-journal");
+    click(cx, "journal-columns");
+    // Each column the menu shows, on and off again: all of them lie over rows.
+    let panel = cx.debug_bounds("columns-panel").expect("the menu is open");
+    let mut clicked = 0;
+    for c in 0..crate::logic::columns::ALL.len() {
+        let name: &'static str = Box::leak(format!("column-{c}").into_boxed_str());
+        if !cx.debug_bounds(name).is_some_and(|b| panel.contains(&b.center())) {
+            continue;
+        }
+        for _ in 0..2 {
+            click(cx, name);
+            assert_eq!(page(&shell, cx), Page::Journal, "column {c}");
+        }
+        clicked += 1;
+    }
+    assert!(clicked >= 5, "{clicked} columns in sight");
+    assert_eq!(page(&shell, cx), Page::Journal);
+    assert_eq!(shell.read_with(cx, |s, cx| s.journal.read(cx).selected), None);
+}
+
 /// Every page draws with no outing at all and with a great many.
 #[gpui::test]
 fn every_page_draws_empty_and_full(cx: &mut TestAppContext) {
