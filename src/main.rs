@@ -1,3 +1,7 @@
+// Windows: a GUI program, without the console window a release would open behind it. Debug
+// builds keep the console, for the panics and logs.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod data;
 mod lang;

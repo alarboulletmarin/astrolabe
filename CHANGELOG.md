@@ -5,6 +5,7 @@ Notable changes, newest first. Versions follow [Semantic Versioning](https://sem
 ## Unreleased
 
 - **Storage errors are shown**: an activity cache that can't be read is set aside as `activities.damaged-<number>.json` and reported, instead of opening on an empty journal; a write that fails in the background (tracks, settings) shows in the status line.
+- **Windows**: the app no longer opens a console window behind its own.
 - **User guide** (`book/`): install, first steps, the pages, synchronising and working offline, shortcuts, your data and backups, troubleshooting. The README is shorter and shows made-up data.
 
 ## 0.1.0
