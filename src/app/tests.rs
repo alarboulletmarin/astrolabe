@@ -62,18 +62,21 @@ fn the_rail_opens_pages_and_the_keys_walk_through_them(cx: &mut TestAppContext) 
         click(cx, rail);
         assert_eq!(page(&shell, cx), expected, "{rail}");
     }
+    // The keys of `bind_keys`: Cmd + [ and ] on macOS.
+    let (back, forward) = if cfg!(target_os = "macos") { ("cmd-[", "cmd-]") } else { ("alt-left", "alt-right") };
+    let keys = |key: &str, n: usize| vec![key; n].join(" ");
     // A click on the page already shown moves nothing: one step back is still the one before.
     click(cx, "rail-settings");
-    cx.simulate_keystrokes("alt-left");
+    cx.simulate_keystrokes(back);
     assert_eq!(page(&shell, cx), Page::Heatmap);
-    cx.simulate_keystrokes("alt-left alt-left");
+    cx.simulate_keystrokes(&keys(back, 2));
     assert_eq!(page(&shell, cx), Page::Form);
-    cx.simulate_keystrokes("alt-right");
+    cx.simulate_keystrokes(forward);
     assert_eq!(page(&shell, cx), Page::Records);
     // Back past the first page, and forward past the last: nothing breaks, nothing moves.
-    cx.simulate_keystrokes("alt-left alt-left alt-left alt-left alt-left alt-left alt-left");
+    cx.simulate_keystrokes(&keys(back, 7));
     assert_eq!(page(&shell, cx), Page::Dashboard);
-    cx.simulate_keystrokes("alt-right alt-right alt-right alt-right alt-right alt-right alt-right alt-right");
+    cx.simulate_keystrokes(&keys(forward, 8));
     assert_eq!(page(&shell, cx), Page::Settings);
 }
 

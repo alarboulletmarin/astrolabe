@@ -252,7 +252,8 @@ fn a_disk_that_refuses_writes_says_so(cx: &mut TestAppContext) {
 }
 
 /// A store folder that can't be read is reported as such, with nothing set aside, and no sync
-/// writes over it.
+/// writes over it. Unix only: on Windows, reading under a file is "not found", a first launch.
+#[cfg(unix)]
 #[gpui::test]
 fn a_folder_that_cant_be_read_is_reported(cx: &mut TestAppContext) {
     let root = folder("unreadable");

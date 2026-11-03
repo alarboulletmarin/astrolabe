@@ -139,7 +139,8 @@ mod tests {
             if ON_PURPOSE.contains(&name.as_str()) || name.ends_with("tests.rs") {
                 continue;
             }
-            let code = fs::read_to_string(&path).unwrap();
+            // A Windows checkout may turn the line ends into CRLF.
+            let code = fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
             let code = code.split("#[cfg(test)]\nmod tests").next().unwrap();
             for literal in loose_literals(code) {
                 if literal.chars().any(|ch| FRENCH_LETTERS.contains(ch)) {
