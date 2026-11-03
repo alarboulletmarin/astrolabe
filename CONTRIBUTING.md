@@ -22,6 +22,8 @@ The system packages needed on each platform are listed in the README (*Install*)
 
 ## Rules of the code base
 
+[ARCHITECTURE.md](ARCHITECTURE.md) is the map: the layers, how the data moves from Garmin to the disk and the views, the files on disk, and the kinds of tests.
+
 - **Layers**: `logic` ← `platform` ← `ui` ← `data` ← `views` ← `app`, each one only sees those before it. The test `layers_only_depend_downwards` (in `src/main.rs`) enforces it.
 - **gpui-kit is pinned** (0.8) and its API moves: check a signature in the source of that version, not from memory.
 - **No new dependency** without an agreement in the issue. No global `cargo update`; one dependency at a time.
