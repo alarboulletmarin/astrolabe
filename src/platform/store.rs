@@ -77,8 +77,26 @@ pub(super) fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> std::io:
     fs::rename(&tmp, path)
 }
 
-pub fn load_cache() -> Vec<Activity> {
-    fs::read(data_dir().join("activities.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+/// The synced activities. No file is a first launch (empty); a file that can't be read is set
+/// aside under another name, so the next sync can't write over it, and reported.
+pub fn load_cache() -> Result<Vec<Activity>, String> {
+    read_cache(&data_dir().join("activities.json"))
+}
+
+fn read_cache(path: &Path) -> Result<Vec<Activity>, String> {
+    let err = match fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => e.to_string(),
+        Ok(b) => match serde_json::from_slice(&b) {
+            Ok(acts) => return Ok(acts),
+            Err(e) => e.to_string(),
+        },
+    };
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let aside = path.with_extension(format!("damaged-{secs}.json"));
+    let kept = if fs::rename(path, &aside).is_ok() { &aside } else { path };
+    let kept = kept.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    Err(crate::lang::trf(format!("Activity cache unreadable ({err}), kept as {kept}"), format!("Cache des activités illisible ({err}), conservé sous {kept}")))
 }
 
 pub fn save_cache(acts: &[Activity]) -> Result<(), String> {
@@ -122,12 +140,12 @@ pub fn save_settings(s: &HashMap<String, String>) -> Result<(), String> {
     let mut keys: Vec<_> = s.iter().collect();
     keys.sort();
     let text: String = keys.into_iter().map(|(k, v)| format!("{k}={v}\n")).collect();
-    write_atomic(&data_dir().join("settings"), text.as_bytes(), false).map_err(|e| e.to_string())
+    write_atomic(&data_dir().join("settings"), text.as_bytes(), false).map_err(|e| format!("{} : {e}", crate::lang::tr("Settings not saved", "Réglages non enregistrés")))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Dir, dir_in};
+    use super::{Dir, dir_in, read_cache};
     use std::{collections::HashMap, ffi::OsString, path::PathBuf};
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
@@ -159,5 +177,24 @@ mod tests {
         assert_eq!(dir_in(Dir::Config, "windows", env(&[("USERPROFILE", "C:/Users/a")])), p("C:/Users/a/AppData/Roaming/astrolabe"));
         // Nothing at all: a relative folder, as before, rather than a panic.
         assert_eq!(dir_in(Dir::Data, "linux", env(&[])), p(".local/share/astrolabe"));
+    }
+
+    #[test]
+    fn a_missing_cache_is_a_first_launch_and_a_damaged_one_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("astrolabe-cache-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("activities.json");
+        assert_eq!(read_cache(&path).unwrap().len(), 0);
+        std::fs::write(&path, b"[]").unwrap();
+        assert_eq!(read_cache(&path).unwrap().len(), 0);
+        for bad in [&b"{not json"[..], b"", b"\xff\xfe"] {
+            std::fs::write(&path, bad).unwrap();
+            let e = read_cache(&path).unwrap_err();
+            assert!(!path.exists(), "{e}");
+            let aside: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|f| f.file_name().to_string_lossy().contains("damaged")).collect();
+            assert_eq!(std::fs::read(aside[0].path()).unwrap(), bad);
+            std::fs::remove_file(aside[0].path()).unwrap();
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

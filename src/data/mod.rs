@@ -189,7 +189,9 @@ impl Data {
                 .spawn(async { (store::load_cache(), store::load_derived(), secrets::load_key()) })
                 .await;
             this.update(cx, |this, cx| {
-                this.acts = Arc::new(acts);
+                // A damaged cache was set aside: say so, and let the user start the sync that refills it.
+                let damaged = acts.as_ref().err().cloned();
+                this.acts = Arc::new(acts.unwrap_or_default());
                 this.derived = Arc::new(derived);
                 this.upgrade_derived(cx);
                 this.key_loaded = true;
@@ -198,11 +200,16 @@ impl Data {
                 match key {
                     Ok(Some(k)) => {
                         this.key = Some(k);
-                        this.sync(cx);
+                        if damaged.is_none() {
+                            this.sync(cx);
+                        }
                     }
                     Ok(None) if this.acts.is_empty() => cx.emit(DataEvent::NeedKey),
                     Ok(None) => {}
                     Err(e) => this.status = Status::Failed(e),
+                }
+                if let Some(e) = damaged {
+                    this.status = Status::Failed(e);
                 }
                 cx.notify();
             })
@@ -487,7 +494,23 @@ impl Data {
 
     fn save_derived(&self, cx: &mut Context<Self>) {
         let d = self.derived.clone();
-        cx.background_executor().spawn(async move { store::save_derived(&d) }).detach();
+        self.persist(cx, move || store::save_derived(&d));
+    }
+
+    /// Writes off the UI thread; a write that fails shows in the status line instead of vanishing.
+    fn persist(&self, cx: &mut Context<Self>, write: impl FnOnce() -> Result<(), String> + Send + 'static) {
+        let task = cx.background_executor().spawn(async move { write() });
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = task.await {
+                this.update(cx, |d, cx| {
+                    // ponytail: a sync under way owns the status line; the error goes to its note then.
+                    if d.busy() { d.note = Some(e) } else { d.status = Status::Failed(e) }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Reads an activity's file, downloading it first if needed, and keeps what it derives.
@@ -638,7 +661,7 @@ impl Data {
     pub fn set_setting(&mut self, key: &str, value: String, cx: &mut Context<Self>) {
         self.settings.insert(key.into(), value);
         let s = self.settings.clone();
-        cx.background_executor().spawn(async move { store::save_settings(&s) }).detach();
+        self.persist(cx, move || store::save_settings(&s));
         cx.notify();
     }
 
@@ -652,7 +675,7 @@ impl Data {
         self.settings.insert("tiles".into(), value);
         self.tiles.clear();
         let s = self.settings.clone();
-        cx.background_executor().spawn(async move { store::save_settings(&s) }).detach();
+        self.persist(cx, move || store::save_settings(&s));
         self.note = Some(tr("tile server saved", "serveur de tuiles enregistré").into());
         cx.notify();
         true
@@ -687,4 +710,31 @@ impl Data {
 fn rgb(c: Hsla) -> [u8; 3] {
     let r = c.to_rgb();
     [(r.r * 255.0) as u8, (r.g * 255.0) as u8, (r.b * 255.0) as u8]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Data, Status};
+    use crate::ui::theme::Theme;
+    use gpui::AppContext as _;
+
+    /// A write that fails reaches the status line; during a sync, which owns that line, its note.
+    #[gpui::test]
+    fn a_write_that_fails_is_shown(cx: &mut gpui::TestAppContext) {
+        let data = cx.new(|_| Data::with_activities(Theme::for_appearance(gpui::WindowAppearance::Dark), vec![]));
+        data.update(cx, |d, cx| d.persist(cx, || Err("disk full".into())));
+        cx.run_until_parked();
+        data.read_with(cx, |d, _| assert!(matches!(&d.status, Status::Failed(e) if e == "disk full")));
+
+        data.update(cx, |d, cx| {
+            d.status = Status::Listing("…".into());
+            d.persist(cx, || Err("read-only".into()));
+            d.persist(cx, || Ok(()));
+        });
+        cx.run_until_parked();
+        data.read_with(cx, |d, _| {
+            assert!(matches!(d.status, Status::Listing(_)));
+            assert_eq!(d.note.as_deref(), Some("read-only"));
+        });
+    }
 }
