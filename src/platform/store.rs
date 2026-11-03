@@ -41,11 +41,26 @@ fn dir_in(kind: Dir, os: &str, var: impl Fn(&str) -> Option<std::ffi::OsString>)
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Points this test's store at `root` (each test runs on its own thread, and GPUI's test
+/// executor runs the background tasks on it too).
+#[cfg(test)]
+pub fn use_root(root: PathBuf) {
+    ROOT.with(|r| *r.borrow_mut() = Some(root));
+}
+
 /// Tests write in a folder of their own, never in the user's.
 fn dir(kind: Dir) -> PathBuf {
-    if cfg!(test) {
-        return std::env::temp_dir().join(format!("astrolabe-tests-{}", std::process::id())).join(["data", "config", "cache"][kind as usize]);
+    #[cfg(test)]
+    {
+        let root = ROOT.with(|r| r.borrow().clone()).unwrap_or_else(|| std::env::temp_dir().join(format!("astrolabe-tests-{}", std::process::id())));
+        return root.join(["data", "config", "cache"][kind as usize]);
     }
+    #[cfg(not(test))]
     dir_in(kind, std::env::consts::OS, |name| std::env::var_os(name))
 }
 
@@ -84,9 +99,11 @@ pub fn load_cache() -> Result<Vec<Activity>, String> {
 }
 
 fn read_cache(path: &Path) -> Result<Vec<Activity>, String> {
+    let unreadable = crate::lang::tr("Activity cache unreadable", "Cache des activités illisible");
     let err = match fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => e.to_string(),
+        // The folder itself can't be read: nothing to set aside.
+        Err(e) => return Err(format!("{unreadable} : {e}")),
         Ok(b) => match serde_json::from_slice(&b) {
             Ok(acts) => return Ok(acts),
             Err(e) => e.to_string(),
@@ -96,7 +113,7 @@ fn read_cache(path: &Path) -> Result<Vec<Activity>, String> {
     let aside = path.with_extension(format!("damaged-{secs}.json"));
     let kept = if fs::rename(path, &aside).is_ok() { &aside } else { path };
     let kept = kept.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    Err(crate::lang::trf(format!("Activity cache unreadable ({err}), kept as {kept}"), format!("Cache des activités illisible ({err}), conservé sous {kept}")))
+    Err(crate::lang::trf(format!("{unreadable} ({err}), kept as {kept}"), format!("{unreadable} ({err}), conservé sous {kept}")))
 }
 
 pub fn save_cache(acts: &[Activity]) -> Result<(), String> {

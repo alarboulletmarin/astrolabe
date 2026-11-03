@@ -4,7 +4,8 @@ use super::{agent, http_error};
 use crate::logic::activity::Activity;
 use std::collections::HashSet;
 
-const BASE: &str = "https://personal.connectapi.garmin.com";
+/// The real API; the tests point the app at a local stand-in instead.
+pub const BASE: &str = "https://personal.connectapi.garmin.com";
 const PAGE: usize = 100;
 
 #[derive(Debug, PartialEq)]
@@ -15,9 +16,9 @@ pub enum Fail {
 }
 
 /// Exchanges the API key for a bearer token (a JWT valid 24 h), kept in memory by the caller.
-pub fn token(key: &str) -> Result<String, String> {
+pub fn token(base: &str, key: &str) -> Result<String, String> {
     let mut res = agent()
-        .post(format!("{BASE}/personalapitoken-service/personal-api/personal-api-key/token"))
+        .post(format!("{base}/personalapitoken-service/personal-api/personal-api-key/token"))
         .header("Authorization", format!("ApiKey {key}"))
         .header("Accept", "*/*")
         .send_empty()
@@ -26,9 +27,9 @@ pub fn token(key: &str) -> Result<String, String> {
     Ok(token.trim().to_string())
 }
 
-fn page(token: &str, start: usize) -> Result<Vec<Activity>, String> {
+fn page(base: &str, token: &str, start: usize) -> Result<Vec<Activity>, String> {
     agent()
-        .get(format!("{BASE}/activitylist-service/activities/search/activities"))
+        .get(format!("{base}/activitylist-service/activities/search/activities"))
         .query("start", start.to_string())
         .query("limit", PAGE.to_string())
         .header("Authorization", format!("Bearer {token}"))
@@ -44,12 +45,12 @@ fn page(token: &str, start: usize) -> Result<Vec<Activity>, String> {
 // ponytail: stops at the first known activity, so edits made on Garmin to old activities aren't
 // picked up; add a "full resync" button if that matters.
 /// `seen` counts the activities received so far, for the progress shown while it runs.
-pub fn sync(token: &str, known: &[Activity], seen: &std::sync::atomic::AtomicUsize) -> Result<Vec<Activity>, String> {
+pub fn sync(base: &str, token: &str, known: &[Activity], seen: &std::sync::atomic::AtomicUsize) -> Result<Vec<Activity>, String> {
     let ids: HashSet<i64> = known.iter().map(|a| a.activity_id).collect();
     let mut fresh = Vec::new();
     let mut start = 0;
     loop {
-        let batch = page(token, start)?;
+        let batch = page(base, token, start)?;
         seen.fetch_add(batch.len(), std::sync::atomic::Ordering::Relaxed);
         let full = batch.len() == PAGE;
         let before = fresh.len();
@@ -72,9 +73,9 @@ fn merge(fresh: Vec<Activity>, known: &[Activity]) -> Vec<Activity> {
 }
 
 /// The original file (a ZIP holding the FIT). `None`: the activity has none (entered by hand).
-pub fn download_fit(token: &str, id: i64) -> Result<Option<Vec<u8>>, Fail> {
+pub fn download_fit(base: &str, token: &str, id: i64) -> Result<Option<Vec<u8>>, Fail> {
     let res = agent()
-        .get(format!("{BASE}/download-service/files/activity/{id}"))
+        .get(format!("{base}/download-service/files/activity/{id}"))
         .header("Authorization", format!("Bearer {token}"))
         // The official client's list (Garmin answers 406 without x-zip-compressed); anything else
         // is still checked when the ZIP is read.

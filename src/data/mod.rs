@@ -91,6 +91,8 @@ pub struct Data {
     pub fetch: Fetch,
     tiles: HashMap<(u8, u32, u32), Tile>,
     tiles_busy: usize,
+    /// Garmin's address (a local stand-in in the tests).
+    api: String,
 }
 
 impl EventEmitter<DataEvent> for Data {}
@@ -117,7 +119,16 @@ impl Data {
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
         let mut data = Self::blank(theme);
         crate::lang::choose(data.settings.get("language").map(String::as_str));
-        data.start(cx);
+        data.start(secrets::load_key, cx);
+        data
+    }
+
+    /// Opens like the app does, from the test's own folder, but with a given key (never the
+    /// key store's) and `api` standing in for Garmin.
+    #[cfg(test)]
+    pub fn open_with(theme: Theme, api: String, key: Option<String>, cx: &mut Context<Self>) -> Self {
+        let mut data = Data { api, ..Self::blank(theme) };
+        data.start(move || (secrets::Store::System, Ok(key)), cx);
         data
     }
 
@@ -151,6 +162,7 @@ impl Data {
             fetch: Fetch::default(),
             tiles: HashMap::new(),
             tiles_busy: 0,
+            api: garmin::BASE.into(),
         }
     }
 
@@ -182,11 +194,11 @@ impl Data {
     }
 
     /// Cache, derived tracks and keyring are read off the UI thread (the keyring may wait for an unlock prompt).
-    fn start(&mut self, cx: &mut Context<Self>) {
+    fn start(&mut self, load_key: impl FnOnce() -> (secrets::Store, Result<Option<String>, String>) + Send + 'static, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let (acts, derived, (key_store, key)) = cx
                 .background_executor()
-                .spawn(async { (store::load_cache(), store::load_derived(), secrets::load_key()) })
+                .spawn(async move { (store::load_cache(), store::load_derived(), load_key()) })
                 .await;
             this.update(cx, |this, cx| {
                 // A damaged cache was set aside: say so, and let the user start the sync that refills it.
@@ -232,12 +244,12 @@ impl Data {
 
     /// A bearer token, exchanged again after 12 h (they last 24).
     async fn token(this: &WeakEntity<Self>, cx: &mut AsyncApp) -> Result<String, String> {
-        let (cached, key) = this.read_with(cx, |d, _| (d.token.clone(), d.key.clone())).map_err(|e| e.to_string())?;
+        let (cached, key, api) = this.read_with(cx, |d, _| (d.token.clone(), d.key.clone(), d.api.clone())).map_err(|e| e.to_string())?;
         if let Some((t, _)) = cached.filter(|(_, at)| at.elapsed() < Duration::from_secs(12 * 3600)) {
             return Ok(t);
         }
         let key = key.ok_or(tr("No API key: add it in the settings.", "Aucune clé API : ajoute-la dans les réglages."))?;
-        let t = cx.background_executor().spawn(async move { garmin::token(&key) }).await?;
+        let t = cx.background_executor().spawn(async move { garmin::token(&api, &key) }).await?;
         this.update(cx, |d, _| d.token = Some((t.clone(), Instant::now()))).ok();
         Ok(t)
     }
@@ -254,6 +266,7 @@ impl Data {
         self.finished = None;
         cx.notify();
         let known = self.acts.clone();
+        let api = self.api.clone();
         let seen = Arc::new(AtomicUsize::new(0));
         // Live count while the pages arrive.
         let counter = seen.clone();
@@ -285,7 +298,7 @@ impl Data {
                 Ok(token) => {
                     cx.background_executor()
                         .spawn(async move {
-                            let all = garmin::sync(&token, &known, &seen)?;
+                            let all = garmin::sync(&api, &token, &known, &seen)?;
                             let added = all.len() - known.len();
                             store::save_cache(&all)?;
                             Ok::<_, String>((all, added))
@@ -339,6 +352,7 @@ impl Data {
         }
         self.fetch = Fetch { running: true, total: todo.len(), ..Fetch::default() };
         cx.notify();
+        let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let mut in_a_row = 0;
             for (n, (id, label)) in todo.iter().cloned().enumerate() {
@@ -360,10 +374,11 @@ impl Data {
                         break;
                     }
                 };
+                let api = api.clone();
                 let res = cx
                     .background_executor()
                     .spawn(async move {
-                        match garmin::download_fit(&token, id)? {
+                        match garmin::download_fit(&api, &token, id)? {
                             None => Ok(Derived::default()),
                             Some(zip) => {
                                 store::save_fit(id, &zip).map_err(Fail::Other)?;
@@ -521,7 +536,8 @@ impl Data {
                 Some(z) => Some(z),
                 None => {
                     let t = Self::token(&this, cx).await?;
-                    cx.background_executor().spawn(async move { garmin::download_fit(&t, id) }).await.map_err(|e| match e {
+                    let api = this.read_with(cx, |d, _| d.api.clone()).map_err(|e| e.to_string())?;
+                    cx.background_executor().spawn(async move { garmin::download_fit(&api, &t, id) }).await.map_err(|e| match e {
                         Fail::TooMany => tr("Garmin asks to slow down: try again in a moment.", "Garmin demande de ralentir : réessaie dans un moment.").to_string(),
                         Fail::Other(e) => e,
                     })?
@@ -601,6 +617,7 @@ impl Data {
         };
         self.key_error = None;
         let key_store = self.key_store.clone();
+        let api = self.api.clone();
         self.status = Status::Busy(tr("Checking the key…", "Vérification de la clé…").into());
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -609,7 +626,7 @@ impl Data {
                 .spawn({
                     let key = key.clone();
                     async move {
-                        let t = garmin::token(&key)?;
+                        let t = garmin::token(&api, &key)?;
                         secrets::store_key(&key, &key_store)?;
                         Ok::<_, String>(t)
                     }
@@ -713,28 +730,4 @@ fn rgb(c: Hsla) -> [u8; 3] {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Data, Status};
-    use crate::ui::theme::Theme;
-    use gpui::AppContext as _;
-
-    /// A write that fails reaches the status line; during a sync, which owns that line, its note.
-    #[gpui::test]
-    fn a_write_that_fails_is_shown(cx: &mut gpui::TestAppContext) {
-        let data = cx.new(|_| Data::with_activities(Theme::for_appearance(gpui::WindowAppearance::Dark), vec![]));
-        data.update(cx, |d, cx| d.persist(cx, || Err("disk full".into())));
-        cx.run_until_parked();
-        data.read_with(cx, |d, _| assert!(matches!(&d.status, Status::Failed(e) if e == "disk full")));
-
-        data.update(cx, |d, cx| {
-            d.status = Status::Listing("…".into());
-            d.persist(cx, || Err("read-only".into()));
-            d.persist(cx, || Ok(()));
-        });
-        cx.run_until_parked();
-        data.read_with(cx, |d, _| {
-            assert!(matches!(d.status, Status::Listing(_)));
-            assert_eq!(d.note.as_deref(), Some("read-only"));
-        });
-    }
-}
+mod tests;
