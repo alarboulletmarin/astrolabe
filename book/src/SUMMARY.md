@@ -9,3 +9,4 @@
 - [Shortcuts](shortcuts.md)
 - [Your data and backups](data.md)
 - [Troubleshooting](troubleshooting.md)
+- [Performance](performance.md)

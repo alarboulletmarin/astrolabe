@@ -230,3 +230,95 @@ fn the_form_page_draws_figures_when_heart_rates_are_known(cx: &mut TestAppContex
         }
     }
 }
+
+/// Timings on a large made-up history, for `book/src/performance.md`. Ignored by `cargo test`. Optimised, but
+/// with the debug selectors the clicks need (a release build drops them):
+/// `CARGO_PROFILE_DEV_OPT_LEVEL=3 cargo test -- --ignored --nocapture measure`. Prints, never fails on
+/// a figure (shared CI runners vary too much); it fails only if a page stops drawing.
+#[gpui::test]
+#[ignore]
+fn measure_a_large_history(cx: &mut TestAppContext) {
+    use crate::logic::fit::{self, Derived, Effort, Sample, Track};
+    use std::time::Instant;
+    // `MEASURE_N` activities, 5,000 by default.
+    let n: i64 = std::env::var("MEASURE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(5000);
+    let keys = ["running", "running", "trail_running", "road_biking", "lap_swimming", "walking"];
+    let acts: Vec<_> = (0..n)
+        .map(|i| {
+            let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 25).unwrap() - chrono::Duration::days(i * 3 / 2);
+            let mut a = outing(100_000 - i, 1, keys[i as usize % keys.len()]);
+            a.start_time_local = format!("{day} 08:00:00");
+            a.average_hr = Some(140.0 + (i % 20) as f64);
+            a
+        })
+        .collect();
+    // 400 points per track, around one place: 2 million points for the heat map.
+    let derived: std::collections::HashMap<i64, Derived> = acts
+        .iter()
+        .map(|a| {
+            let k = a.activity_id as f32;
+            let line = (0..400).map(|j| [45.9 + 0.02 * (j as f32 / 64.0 + k).sin(), 6.13 + 0.03 * (j as f32 / 64.0 + k).cos()]).collect();
+            let efforts = fit::EFFORTS.iter().take(6).map(|&m| Effort { metres: m as f32, seconds: m as f32 * 0.3 }).collect();
+            (a.activity_id, Derived { line, efforts, profile: vec![500.0; fit::PROFILE], hr_bands: vec![60.0; 40], max_hr: 180.0, version: fit::VERSION })
+        })
+        .collect();
+    let mut out = Vec::new();
+
+    // The files read at launch.
+    let t = Instant::now();
+    let acts_json = serde_json::to_vec(&acts).unwrap();
+    let derived_json = serde_json::to_vec(&derived).unwrap();
+    out.push(format!("write {n} activities + tracks to JSON: {:?} ({} + {} KB)", t.elapsed(), acts_json.len() / 1024, derived_json.len() / 1024));
+    let t = Instant::now();
+    let _: Vec<crate::logic::activity::Activity> = serde_json::from_slice(&acts_json).unwrap();
+    let _: std::collections::HashMap<i64, Derived> = serde_json::from_slice(&derived_json).unwrap();
+    out.push(format!("read them back (what opening does): {:?}", t.elapsed()));
+
+    // A long activity: 8 hours at one sample a second.
+    let samples: Vec<Sample> = (0..28_800)
+        .map(|s| {
+            let f = s as f64;
+            Sample { t: s as f32, lat: Some(45.9 + 0.05 * (f / 3000.0).sin()), lon: Some(6.13 + 0.05 * (f / 3000.0).cos()), dist: Some(s as f32 * 3.0), alt: Some(500.0 + 300.0 * (f / 5000.0).sin() as f32), hr: Some(140.0 + (s % 30) as f32), speed: Some(3.0) }
+        })
+        .collect();
+    let track = Track { samples, laps: Vec::new() };
+    let t = Instant::now();
+    let d = fit::derive(&track);
+    let splits = track.splits(1000.0);
+    out.push(format!("derive an 8 h track (28,800 samples): {:?} ({} map points, {} splits)", t.elapsed(), d.line.len(), splits.len()));
+
+    // The heat map's raster, drawn off the UI thread: every track, on a 2× screen.
+    let lines: Vec<&[[f32; 2]]> = derived.values().map(|d| d.line.as_slice()).collect();
+    let view = crate::logic::map::View::fit([45.88, 6.10, 45.92, 6.16], 2400.0, 1600.0, 52.0);
+    let t = Instant::now();
+    let counts = crate::logic::map::heat(&lines, &view, 2400, 1600);
+    out.push(format!("heat raster of {} points, 2400 × 1600: {:?}", lines.iter().map(|l| l.len()).sum::<usize>(), t.elapsed()));
+    assert!(counts.iter().any(|&c| c > 0));
+    drop(lines);
+
+    // The window: first draw, then each page opened from the rail; what a page starts in the
+    // background (the heat raster) is counted with it.
+    cx.update(gpui_kit::init);
+    cx.update(bind_keys);
+    cx.update(init_fonts);
+    let t = Instant::now();
+    let (shell, cx) = cx.add_window_view(move |window, cx| {
+        let data = cx.new(|_| Data::with_tracks(Theme::for_appearance(window.appearance()), acts, derived));
+        Shell::with_data(data, window, cx)
+    });
+    cx.run_until_parked();
+    out.push(format!("open the window on Today: {:?}", t.elapsed()));
+    for rail in ["rail-journal", "rail-calendar", "rail-stats", "rail-form", "rail-records", "rail-map", "rail-dashboard"] {
+        let t = Instant::now();
+        click(cx, rail);
+        out.push(format!("{rail}: {:?}", t.elapsed()));
+    }
+    click(cx, "rail-journal");
+    let t = Instant::now();
+    for _ in 0..50 {
+        cx.simulate_keystrokes("down");
+    }
+    out.push(format!("journal, 50 × ↓: {:?} each", t.elapsed() / 50));
+    assert_eq!(page(&shell, cx), Page::Journal);
+    println!("\n{n} activities\n{}", out.join("\n"));
+}
