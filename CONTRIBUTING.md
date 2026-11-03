@@ -18,7 +18,7 @@ cargo run --release       # what gets installed
 cargo test --locked       # or: make test
 ```
 
-The system packages needed on each platform are listed in the README (*Install*). The tests need no display: they run on GPUI's test platform, and the FIT parsing runs on the files of `tests/fixtures`.
+The system packages needed on each platform are listed in the [install guide](book/src/install.md). The tests need no display, no network and no Garmin account: they run on GPUI's test platform, the FIT parsing runs on the files of `tests/fixtures`, and the sync flows run against a local stand-in for Garmin.
 
 ## Rules of the code base
 
@@ -33,7 +33,7 @@ The system packages needed on each platform are listed in the README (*Install*)
 
 ## Documentation
 
-A visible feature updates the README and the changelog. Do not add screenshots made from real data: tracks, places and health figures are private.
+A visible feature updates the [user guide](book/src/introduction.md) (and the README when it changes what the app is), and the changelog. Do not add screenshots made from real data: tracks, places and health figures are private. `scripts/demo-data.py DIR` writes a made-up athlete's folder; open it with `XDG_DATA_HOME=DIR`.
 
 ## Commits and pull requests
 

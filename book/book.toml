@@ -1,0 +1,14 @@
+[book]
+title = "Astrolabe user guide"
+description = "How to use Astrolabe, a desktop journal of your sport activities read from your Garmin account."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/alarboulletmarin/astrolabe"
+edit-url-template = "https://github.com/alarboulletmarin/astrolabe/edit/develop/book/{path}"
+no-section-label = true

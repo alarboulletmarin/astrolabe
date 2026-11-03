@@ -1,0 +1,42 @@
+# Builds the user guide (book/, an mdBook) and checks every link of the docs and the website.
+name: Docs
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  # Links to other sites break without a change here: they are checked once a week.
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@0.4.52
+      - name: Guide
+        run: mdbook build book --dest-dir ../_site/guide
+      # Links inside the repository and the guide, anchors included: on every change.
+      - name: Links within the repository
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --offline --include-fragments --no-progress
+            --exclude-path _site/guide/print.html --exclude-path _site/guide/404.html
+            README.md CONTRIBUTING.md ARCHITECTURE.md SECURITY.md RELEASING.md CHANGELOG.md 'book/src/*.md' 'docs/*.html' '_site/**/*.html'
+          fail: true
+      # Links to other sites: only on the weekly run, so a site that is down blocks nobody.
+      - name: Links to other sites
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress --max-retries 3 README.md CONTRIBUTING.md ARCHITECTURE.md 'book/src/*.md' 'docs/*.html'
+          fail: true

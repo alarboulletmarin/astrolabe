@@ -2,6 +2,11 @@
 
 Notable changes, newest first. Versions follow [Semantic Versioning](https://semver.org); until 1.0, a minor version may change how things look or are stored.
 
+## Unreleased
+
+- **Storage errors are shown**: an activity cache that can't be read is set aside as `activities.damaged-<number>.json` and reported, instead of opening on an empty journal; a write that fails in the background (tracks, settings) shows in the status line.
+- **User guide** (`book/`): install, first steps, the pages, synchronising and working offline, shortcuts, your data and backups, troubleshooting. The README is shorter and shows made-up data.
+
 ## 0.1.0
 
 First release.
