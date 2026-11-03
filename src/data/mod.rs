@@ -568,6 +568,10 @@ impl Data {
 
     /// The tile if it's ready; otherwise asks for it (two downloads at a time, as the tile policy asks).
     pub fn tile(&mut self, k: (u8, u32, u32), cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
+        // The tests never go online: their maps draw on a blank background.
+        if cfg!(test) {
+            return None;
+        }
         match self.tiles.get(&k) {
             Some(Tile::Ready(img)) => return Some(img.clone()),
             Some(_) => return None,
