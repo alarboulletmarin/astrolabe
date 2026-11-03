@@ -44,8 +44,9 @@ A visible feature updates the README and the changelog. Do not add screenshots m
 
 `develop` is the working branch; `main` only moves by fast-forward from it, when releasing.
 
-1. CI is green on `develop`. Add the version's section to `CHANGELOG.md` (the release notes come from it).
-2. Optionally try the script without side effects: `DRY_RUN=1 scripts/release.sh X.Y.Z`. It bumps `Cargo.toml`, `Cargo.lock` and the `PKGBUILD`, runs the tests, prints the notes, and puts everything back.
-3. Fast-forward `main` to `develop`, then on `main`, clean and in sync with `origin`: `scripts/release.sh X.Y.Z`. It commits the bump, tags `vX.Y.Z`, pushes, creates the GitHub release, then pins the checksum of the tag's tarball in the `PKGBUILD` and regenerates `.SRCINFO`.
-4. Publishing the release starts two workflows that attach the downloads: *Binaries* (Windows installer and `.zip`, macOS `.dmg`) and *Arch package*. They take about 15 minutes. `gh workflow run Binaries -f tag=develop -f attach=false` builds the binaries from a branch without touching any release.
-5. The macOS and Windows files are not signed or notarized; the README says how to open them.
+1. CI is green on `develop`. Add the version's section to `CHANGELOG.md`.
+2. Rehearse with `DRY_RUN=1 scripts/release.sh X.Y.Z`; managed files are restored even if tests fail.
+3. Fast-forward `main` to `develop`, synchronize it with `origin`, then run `scripts/release.sh X.Y.Z` from clean `main`.
+4. The script creates a draft and explicitly dispatches **Native release**. It is published only after Arch, macOS and Windows packaging succeeds and every expected download has been attached and checked.
+
+Read [RELEASING.md](RELEASING.md) for prerequisites, recovery after failure, artifact-only builds and the release regression tests. macOS and Windows downloads remain unsigned and unnotarized.
