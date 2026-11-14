@@ -2,10 +2,10 @@
 
 use crate::logic::activity::Activity;
 use crate::logic::fit::Derived;
+use crate::logic::graph::{Graph, Unreadable};
 use std::{
     collections::HashMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -78,6 +78,13 @@ pub(super) fn cache_dir() -> PathBuf {
 
 /// Atomic write (temp file + rename); `private`: readable by the user only (health data).
 pub(super) fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
+    write_atomic_from(path, &mut &bytes[..], private).map(drop)
+}
+
+/// The same, from a reader, for what is too big to hold in memory (an extract of a few hundred
+/// MB). Returns the bytes written. If the reader fails, the temporary file is left behind (the
+/// next write takes it over) and the file in place is untouched.
+pub(super) fn write_atomic_from(path: &Path, from: &mut dyn std::io::Read, private: bool) -> std::io::Result<u64> {
     fs::create_dir_all(path.parent().unwrap())?;
     let tmp = path.with_extension("tmp");
     let mut opts = fs::OpenOptions::new();
@@ -86,10 +93,27 @@ pub(super) fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> std::io:
     if private {
         std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     }
-    let mut f = opts.open(&tmp)?;
-    f.write_all(bytes)?;
+    let mut f = std::io::BufWriter::new(opts.open(&tmp)?);
+    let n = std::io::copy(from, &mut f)?;
+    let f = f.into_inner().map_err(|e| e.into_error())?;
     f.sync_all()?;
-    fs::rename(&tmp, path)
+    drop(f);
+    fs::rename(&tmp, path)?;
+    Ok(n)
+}
+
+/// Seconds since 1970, for the names of files set aside.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Renames a file that can't be read to `<stem>.damaged-<seconds>.<ext>`, beside it, so that
+/// nothing writes over it; returns the name it is kept under.
+fn set_aside(path: &Path, ext: &str) -> String {
+    let stem = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().trim_end_matches(&format!(".{ext}")).to_string());
+    let aside = path.with_file_name(format!("{stem}.damaged-{}.{ext}", now_secs()));
+    let kept = if fs::rename(path, &aside).is_ok() { &aside } else { path };
+    kept.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
 
 /// The synced activities. No file is a first launch (empty); a file that can't be read is set
@@ -109,10 +133,7 @@ fn read_cache(path: &Path) -> Result<Vec<Activity>, String> {
             Err(e) => e.to_string(),
         },
     };
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let aside = path.with_extension(format!("damaged-{secs}.json"));
-    let kept = if fs::rename(path, &aside).is_ok() { &aside } else { path };
-    let kept = kept.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let kept = set_aside(path, "json");
     Err(crate::lang::trf(format!("{unreadable} ({err}), kept as {kept}"), format!("{unreadable} ({err}), conservé sous {kept}")))
 }
 
@@ -160,9 +181,72 @@ pub fn save_settings(s: &HashMap<String, String>) -> Result<(), String> {
     write_atomic(&data_dir().join("settings"), text.as_bytes(), false).map_err(|e| format!("{} : {e}", crate::lang::tr("Settings not saved", "Réglages non enregistrés")))
 }
 
+/// The folder of the OpenStreetMap extracts and the graphs built from them.
+pub fn osm_dir() -> PathBuf {
+    data_dir().join("osm")
+}
+
+pub fn extract_path(region: &str) -> PathBuf {
+    osm_dir().join(format!("{region}.osm.pbf"))
+}
+
+fn graph_path(region: &str) -> PathBuf {
+    osm_dir().join(format!("{region}.graph"))
+}
+
+/// The size of a region's extract, when it is on disk.
+pub fn extract_size(region: &str) -> Option<u64> {
+    fs::metadata(extract_path(region)).ok().map(|m| m.len()).filter(|n| *n > 0)
+}
+
+/// A region's extract that can't be read is set aside (it can be downloaded again).
+pub fn set_aside_extract(region: &str) -> String {
+    set_aside(&extract_path(region), "osm.pbf")
+}
+
+/// What is on disk of a region's graph.
+pub enum StoredGraph {
+    Absent,
+    Ready(Graph),
+    /// Written by another version: build it again from the extract.
+    Stale,
+    /// Damaged and set aside, or the folder can't be read: said plainly.
+    Failed(String),
+}
+
+pub fn load_graph(region: &str) -> StoredGraph {
+    read_graph(&graph_path(region))
+}
+
+fn read_graph(path: &Path) -> StoredGraph {
+    let unreadable = crate::lang::tr("Path network unreadable", "Réseau de chemins illisible");
+    let bytes = match fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return StoredGraph::Absent,
+        Err(e) => return StoredGraph::Failed(format!("{unreadable} : {e}")),
+        Ok(b) => b,
+    };
+    match Graph::decode(&bytes) {
+        Ok(g) => StoredGraph::Ready(g),
+        Err(Unreadable::Stale(_)) => StoredGraph::Stale,
+        Err(Unreadable::Damaged(why)) => {
+            let kept = set_aside(path, "graph");
+            StoredGraph::Failed(crate::lang::trf(format!("{unreadable} ({why}), kept as {kept}"), format!("{unreadable} ({why}), conservé sous {kept}")))
+        }
+    }
+}
+
+pub fn save_graph(region: &str, bytes: &[u8]) -> Result<(), String> {
+    write_atomic(&graph_path(region), bytes, false).map_err(|e| format!("{} : {e}", crate::lang::tr("Path network not saved", "Réseau de chemins non enregistré")))
+}
+
+/// Writes a file the user chose (an exported loop), whole or not at all.
+pub fn export(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    write_atomic(path, bytes, false).map_err(|e| format!("{} : {e}", crate::lang::tr("File not saved", "Fichier non enregistré")))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Dir, dir_in, read_cache};
+    use super::{Dir, StoredGraph, dir_in, read_cache, read_graph};
     use std::{collections::HashMap, ffi::OsString, path::PathBuf};
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
@@ -212,6 +296,54 @@ mod tests {
             assert_eq!(std::fs::read(aside[0].path()).unwrap(), bad);
             std::fs::remove_file(aside[0].path()).unwrap();
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_damaged_graph_is_kept_aside_and_an_old_one_is_stale() {
+        let dir = std::env::temp_dir().join(format!("astrolabe-graph-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.graph");
+        assert!(matches!(read_graph(&path), StoredGraph::Absent));
+        let good = crate::logic::graph::tests::build_from(&crate::logic::graph::tests::place()).unwrap().encode();
+        std::fs::write(&path, &good).unwrap();
+        assert!(matches!(read_graph(&path), StoredGraph::Ready(_)));
+        let mut old = good.clone();
+        old[8] = old[8].wrapping_sub(1);
+        std::fs::write(&path, &old).unwrap();
+        assert!(matches!(read_graph(&path), StoredGraph::Stale));
+        assert!(path.exists());
+        std::fs::write(&path, &good[..good.len() / 2]).unwrap();
+        let StoredGraph::Failed(e) = read_graph(&path) else { panic!() };
+        assert!(e.contains("r.damaged-") && e.ends_with(".graph"), "{e}");
+        assert!(!path.exists());
+        let aside: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(std::fs::read(aside[0].path()).unwrap(), &good[..good.len() / 2]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stream_is_written_whole_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("astrolabe-stream-test-{}", std::process::id()));
+        let path = dir.join("big.osm.pbf");
+        super::write_atomic_from(&path, &mut &b"first"[..], false).unwrap();
+        struct Cut(usize);
+        impl std::io::Read for Cut {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(std::io::Error::other("connection reset"));
+                }
+                self.0 -= 1;
+                buf[0] = b'x';
+                Ok(1)
+            }
+        }
+        assert!(super::write_atomic_from(&path, &mut Cut(1000), false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        assert_eq!(super::write_atomic_from(&path, &mut &b"second"[..], false).unwrap(), 6);
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

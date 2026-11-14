@@ -1,9 +1,11 @@
-//! Everything that leaves the process: the OS keyring (or the sealed key file), Garmin's Personal API, map tiles and the
-//! local store. All functions block: call them from a background task.
+//! Everything that leaves the process: the OS keyring (or the sealed key file), Garmin's Personal API, map and
+//! elevation tiles, OpenStreetMap extracts and the local store. All functions block: call them from a background task.
 
 use crate::lang::tr;
 
+pub mod elevation;
 pub mod garmin;
+pub mod osm;
 pub mod secrets;
 pub mod store;
 pub mod tiles;
@@ -25,6 +27,15 @@ pub(crate) fn http_error(e: ureq::Error) -> String {
         .into(),
         ureq::Error::StatusCode(429) => tr("Too many requests: Garmin asks to wait a little.", "Trop de requêtes : Garmin demande d'attendre un peu.").into(),
         ureq::Error::StatusCode(c) => format!("{} {c}.", tr("Garmin answered", "Garmin a répondu")),
+        e => format!("{} : {e}", tr("Network", "Réseau")),
+    }
+}
+
+/// An HTTP error from another service than Garmin, said plainly: `who` answered a number, or the
+/// network failed.
+pub(crate) fn service_error(who: &str, e: ureq::Error) -> String {
+    match e {
+        ureq::Error::StatusCode(c) => format!("{who} {} {c}.", tr("answered", "a répondu")),
         e => format!("{} : {e}", tr("Network", "Réseau")),
     }
 }

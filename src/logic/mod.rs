@@ -14,5 +14,6 @@ pub mod map;
 pub mod osm;
 pub mod profiles;
 pub mod records;
+pub mod regions;
 pub mod sync;
 pub mod system;
