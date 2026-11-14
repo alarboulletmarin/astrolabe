@@ -127,11 +127,58 @@ fn the_columns_menu_keeps_its_clicks_from_the_rows_below(cx: &mut TestAppContext
 fn every_page_draws_empty_and_full(cx: &mut TestAppContext) {
     for n in [0, 1, 1500] {
         let (shell, cx) = start(cx, n);
-        for rail in ["rail-journal", "rail-calendar", "rail-stats", "rail-form", "rail-records", "rail-map", "rail-settings", "rail-dashboard"] {
+        for rail in ["rail-journal", "rail-calendar", "rail-stats", "rail-form", "rail-records", "rail-map", "rail-loops", "rail-settings", "rail-dashboard"] {
             click(cx, rail);
         }
         assert_eq!(page(&shell, cx), Page::Dashboard, "{n} outings");
     }
+}
+
+/// The Loops page: a click on the map sets the start and loops come; a click or the arrows pick
+/// one; the save key writes it as GPX where the dialog says. The region is the made-up town,
+/// already built.
+#[gpui::test]
+fn a_click_on_the_map_plans_loops_and_one_is_saved_as_gpx(cx: &mut TestAppContext) {
+    let (shell, cx) = start(cx, 3);
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| d.loops.graph = Some(std::sync::Arc::new(crate::logic::graph::tests::town()))));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    assert_eq!(page(&shell, cx), Page::Loops);
+    // The whole region shows at first: zoomed on the town, a click on its south street, 1 km in.
+    let (lat, lon) = (43.70, 7.25 + 1000.0 / (111_195.0 * 0.7230));
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| {
+        l.look_at(lat, lon, 15.0);
+        l.type_km("5", window, cx);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let at = shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(lat, lon));
+    cx.simulate_click(at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    let found = shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.len());
+    assert!(found >= 2, "{found} loops, {:?}", shell.read_with(cx, |s, cx| s.data.read(cx).loops.plan_error.clone()));
+    click(cx, "loop-1");
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).selected()), 1);
+    cx.simulate_keystrokes("down");
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).selected()), 2 % found);
+    cx.simulate_keystrokes("up up");
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).selected()), 0);
+    // Saved where the dialog says.
+    let out = std::env::temp_dir().join(format!("astrolabe-loop-{}.gpx", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    cx.simulate_keystrokes(&format!("{mod_key}-s"));
+    let chosen = out.clone();
+    cx.simulate_new_path_selection(move |_| Some(chosen));
+    cx.run_until_parked();
+    let gpx = std::fs::read_to_string(&out).unwrap();
+    assert!(gpx.contains("<trkseg>") && gpx.matches("<trkpt").count() > 20);
+    std::fs::remove_file(&out).unwrap();
+    // Other loops for the same start.
+    let first = shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[0].seed);
+    cx.simulate_keystrokes(&format!("{mod_key}-n"));
+    cx.run_until_parked();
+    assert_ne!(shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[0].seed), first);
 }
 
 /// A record row opens on its ten best, a click on one opens its outing, and a second click on the row closes it.
@@ -162,7 +209,7 @@ fn every_page_draws_in_english(cx: &mut TestAppContext) {
     for n in [0, 1, 1500] {
         let (shell, cx) = start(cx, n);
         cx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(1600.)));
-        for rail in ["rail-journal", "rail-calendar", "rail-stats", "rail-form", "rail-records", "rail-map", "rail-settings", "rail-dashboard"] {
+        for rail in ["rail-journal", "rail-calendar", "rail-stats", "rail-form", "rail-records", "rail-map", "rail-loops", "rail-settings", "rail-dashboard"] {
             click(cx, rail);
         }
         assert_eq!(page(&shell, cx), Page::Dashboard, "{n} outings");

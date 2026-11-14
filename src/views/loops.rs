@@ -170,6 +170,33 @@ impl LoopsView {
         }
     }
 
+    /// Where a position is drawn in the window, for the tests' clicks.
+    #[cfg(test)]
+    pub fn screen_of(&self, lat: f64, lon: f64) -> Point<Pixels> {
+        let b = self.map.bounds.get();
+        let (x, y) = self.map.view.screen(lat, lon, (b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
+        point(b.origin.x + px(x as f32), b.origin.y + px(y as f32))
+    }
+
+    /// Centres the map on a position at zoom `z`, as a user would by dragging and zooming.
+    #[cfg(test)]
+    pub fn look_at(&mut self, lat: f64, lon: f64, z: f64) {
+        let (cx, cy) = map::world(lat, lon, z);
+        self.map.view = View { cx, cy, z };
+    }
+
+    /// Types a distance in the km field.
+    #[cfg(test)]
+    pub fn type_km(&mut self, km: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let km = km.to_string();
+        self.km.update(cx, |s, cx| s.set_value(km, window, cx));
+    }
+
+    #[cfg(test)]
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
     fn snap_found(&self, cx: &App) -> Arc<Vec<Loop>> {
         self.data.read(cx).loops.found.clone()
     }

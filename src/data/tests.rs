@@ -309,3 +309,146 @@ fn a_write_that_fails_is_shown(cx: &mut TestAppContext) {
         assert_eq!(d.note.as_deref(), Some("read-only"));
     });
 }
+
+/// Geofabrik and the elevation tiles, stood in for: the made-up town's extract (`extract`, cut
+/// short if asked) and the same sloping tile everywhere.
+fn osm_servers(extract: Vec<u8>) -> Garmin {
+    let tile = crate::logic::elevation::tests::terrarium(|x, _| 100.0 + x as f32 * 0.5);
+    Garmin::new(move |path| match path {
+        p if p.ends_with(".osm.pbf") => (200, extract.clone()),
+        p if p.contains("/terrarium/12/") => (200, tile.clone()),
+        _ => (404, vec![]),
+    })
+}
+
+fn town_extract() -> Vec<u8> {
+    std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/loops.osm.pbf")).unwrap()
+}
+
+/// Data whose loop planner reads from `osm` and `elevation` (both stand-ins, or nothing).
+fn open_loops(cx: &mut TestAppContext, osm: &str, elevation: &str) -> Entity<Data> {
+    let data = open(cx, &offline(), None);
+    let (osm, elevation) = (osm.to_string(), elevation.to_string());
+    data.update(cx, |d, cx| {
+        d.loops.osm_base = osm;
+        d.loops.elevation_base = elevation;
+        d.open_loops(cx);
+    });
+    settle(cx);
+    data
+}
+
+fn graph_nodes(data: &Entity<Data>, cx: &mut TestAppContext) -> Option<usize> {
+    data.read_with(cx, |d, _| d.loops.graph.as_ref().map(|g| g.nodes()))
+}
+
+fn osm_files(root: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root.join("data/osm")).map(|r| r.flatten().map(|f| f.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// A region downloaded and built once, then read back without the network; a damaged graph set
+/// aside, said, and built again from the extract; an older one built again; all offline.
+#[gpui::test]
+fn a_region_is_downloaded_once_and_planned_offline(cx: &mut TestAppContext) {
+    let root = folder("loops");
+    let servers = osm_servers(town_extract());
+    let data = open_loops(cx, &servers.url, &servers.url);
+    // Nothing on disk: nothing happens until asked.
+    assert_eq!(graph_nodes(&data, cx), None);
+    assert_eq!(servers.asked(""), 0);
+    data.update(cx, |d, cx| d.download_region(cx));
+    settle(cx);
+    assert_eq!(graph_nodes(&data, cx), Some(173));
+    assert_eq!(servers.asked(".osm.pbf"), 1);
+    let tiles = servers.asked("/terrarium/");
+    assert!(tiles >= 1);
+    data.read_with(cx, |d, _| {
+        let g = d.loops.graph.as_ref().unwrap();
+        assert_eq!(g.meta.missing, 0);
+        // The tile rises eastward: the grid's streets climb one way.
+        assert!(g.edges.iter().any(|e| e.up > 1.0));
+        assert!(d.loops.job.is_none() && d.loops.error.is_none());
+    });
+    assert_eq!(osm_files(&root), ["provence-alpes-cote-d-azur.graph", "provence-alpes-cote-d-azur.osm.pbf"]);
+    let stored = std::fs::read(root.join("data/osm/provence-alpes-cote-d-azur.graph")).unwrap();
+
+    // Loops from the town's south-west street.
+    let req = crate::logic::loops::Request {
+        lat: 43.70,
+        lon: 7.25 + 100.0 / (111_195.0 * 0.7230),
+        target: crate::logic::loops::Target::Exact(5000.0),
+        prefs: Default::default(),
+        climb: None,
+        seed: 5,
+        count: 3,
+    };
+    data.update(cx, |d, cx| d.plan_loops(req, cx));
+    settle(cx);
+    data.read_with(cx, |d, _| {
+        assert!(!d.loops.planning);
+        assert!(!d.loops.found.is_empty(), "{:?}", d.loops.plan_error);
+        assert!(d.loops.found.iter().all(|l| (l.dist - 5000.0).abs() <= 100.0));
+    });
+
+    // Reopened without the network: read back, the same.
+    let again = open_loops(cx, &offline(), &offline());
+    assert_eq!(graph_nodes(&again, cx), Some(173));
+    assert_eq!(std::fs::read(root.join("data/osm/provence-alpes-cote-d-azur.graph")).unwrap(), stored);
+
+    // Damaged: set aside, said, built again from the extract (tiles from the cache).
+    let path = root.join("data/osm/provence-alpes-cote-d-azur.graph");
+    std::fs::write(&path, &stored[..stored.len() / 3]).unwrap();
+    let damaged = open_loops(cx, &offline(), &offline());
+    assert_eq!(graph_nodes(&damaged, cx), Some(173));
+    // Said in the status line, which keeps it once the graph is built again.
+    assert!(failed(&damaged, cx).is_some_and(|e| e.contains(".damaged-")), "{:?}", failed(&damaged, cx));
+    let files = osm_files(&root);
+    assert_eq!(files.len(), 3, "{files:?}");
+    assert!(files.iter().any(|f| f.starts_with("provence-alpes-cote-d-azur.damaged-") && f.ends_with(".graph")));
+    assert_eq!(std::fs::read(&path).unwrap(), stored);
+
+    // Written by an older version: built again, nothing set aside.
+    let mut old = stored.clone();
+    old[8..12].copy_from_slice(&(crate::logic::graph::VERSION - 1).to_le_bytes());
+    std::fs::write(&path, &old).unwrap();
+    let stale = open_loops(cx, &offline(), &offline());
+    assert_eq!(graph_nodes(&stale, cx), Some(173));
+    stale.read_with(cx, |d, _| assert_eq!(d.loops.error, None));
+    assert_eq!(osm_files(&root).len(), 3);
+    assert_eq!(std::fs::read(&path).unwrap(), stored);
+    assert_eq!(servers.asked("/terrarium/"), tiles, "no tile asked again");
+}
+
+/// An extract that can't be read is set aside and said; without the elevation server, the graph
+/// is built and its altitude said incomplete. (A download cut mid-stream is `store`'s test.)
+#[gpui::test]
+fn a_bad_extract_or_no_elevation_is_said(cx: &mut TestAppContext) {
+    let root = folder("loops-bad");
+    let town = town_extract();
+    // Half an extract, served as if whole.
+    let cut = osm_servers(town[..town.len() / 2].to_vec());
+    let data = open_loops(cx, &cut.url, &cut.url);
+    data.update(cx, |d, cx| d.download_region(cx));
+    settle(cx);
+    assert_eq!(graph_nodes(&data, cx), None);
+    let files = osm_files(&root);
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].starts_with("provence-alpes-cote-d-azur.damaged-") && files[0].ends_with(".osm.pbf"));
+    data.read_with(cx, |d, _| {
+        assert_eq!(d.loops.extract, None);
+        assert!(d.loops.error.as_deref().is_some_and(|e| e.contains("PBF")), "{:?}", d.loops.error);
+    });
+
+    // A good extract, no elevation server: built, altitude incomplete, said.
+    let osm_only = Garmin::new(move |p| if p.ends_with(".osm.pbf") { (200, town.clone()) } else { (404, vec![]) });
+    let data = open_loops(cx, &osm_only.url, &osm_only.url);
+    data.update(cx, |d, cx| d.download_region(cx));
+    settle(cx);
+    assert_eq!(graph_nodes(&data, cx), Some(173));
+    data.read_with(cx, |d, _| {
+        assert!(d.loops.graph.as_ref().unwrap().meta.missing > 0);
+        assert!(d.loops.error.as_deref().is_some_and(|e| e.contains("404")), "{:?}", d.loops.error);
+    });
+}
