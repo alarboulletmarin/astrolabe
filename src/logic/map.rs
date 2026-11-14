@@ -81,6 +81,14 @@ impl View {
         (x - self.cx + w / 2.0, y - self.cy + h / 2.0)
     }
 
+    /// The position under a point of the screen: the inverse of `screen`.
+    pub fn position(&self, sx: f64, sy: f64, w: f64, h: f64) -> (f64, f64) {
+        let n = TILE * 2f64.powf(self.z);
+        let (x, y) = (sx - w / 2.0 + self.cx, sy - h / 2.0 + self.cy);
+        let lat = (std::f64::consts::PI * (1.0 - 2.0 * y / n)).sinh().atan().to_degrees();
+        (lat, x / n * 360.0 - 180.0)
+    }
+
     pub fn pan(&mut self, dx: f64, dy: f64) {
         self.cx -= dx;
         self.cy -= dy;
@@ -224,6 +232,15 @@ pub fn tint(png: &[u8], bg: [u8; 3], fg: [u8; 3]) -> Option<(u32, u32, Vec<u8>)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_point_of_the_screen_gives_its_position_back() {
+        let (cx, cy) = world(43.7, 7.25, 13.3);
+        let v = View { cx, cy, z: 13.3 };
+        let (sx, sy) = v.screen(43.71, 7.27, 800.0, 600.0);
+        let (lat, lon) = v.position(sx, sy, 800.0, 600.0);
+        assert!((lat - 43.71).abs() < 1e-9 && (lon - 7.27).abs() < 1e-9);
+    }
 
     #[test]
     fn home_is_where_most_points_are() {

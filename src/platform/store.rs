@@ -239,6 +239,18 @@ pub fn save_graph(region: &str, bytes: &[u8]) -> Result<(), String> {
     write_atomic(&graph_path(region), bytes, false).map_err(|e| format!("{} : {e}", crate::lang::tr("Path network not saved", "Réseau de chemins non enregistré")))
 }
 
+/// Where the save dialog opens: the Downloads folder, else the home folder.
+pub fn export_dir() -> PathBuf {
+    #[cfg(test)]
+    return dir(Dir::Data);
+    #[cfg(not(test))]
+    {
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default();
+        let downloads = home.join("Downloads");
+        if downloads.is_dir() { downloads } else { home }
+    }
+}
+
 /// Writes a file the user chose (an exported loop), whole or not at all.
 pub fn export(path: &Path, bytes: &[u8]) -> Result<(), String> {
     write_atomic(path, bytes, false).map_err(|e| format!("{} : {e}", crate::lang::tr("File not saved", "Fichier non enregistré")))

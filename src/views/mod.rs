@@ -7,6 +7,7 @@ pub mod dashboard;
 pub mod form;
 pub mod heatmap;
 pub mod journal;
+pub mod loops;
 pub mod map;
 pub mod records;
 pub mod settings;
@@ -29,6 +30,7 @@ pub enum Page {
     Form,
     Records,
     Heatmap,
+    Loops,
     Settings,
 }
 

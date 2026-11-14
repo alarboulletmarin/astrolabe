@@ -24,11 +24,6 @@ impl Region {
         let [s, w, n, e] = self.bbox;
         (s..=n).contains(&lat) && (w..=e).contains(&lon)
     }
-
-    pub fn centre(&self) -> (f64, f64) {
-        let [s, w, n, e] = self.bbox;
-        ((s + n) / 2.0, (w + e) / 2.0)
-    }
 }
 
 // ponytail: one region to start with; Geofabrik's index (index-v1.json) would give them all.

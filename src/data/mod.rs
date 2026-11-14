@@ -93,6 +93,8 @@ pub struct Data {
     tiles_busy: usize,
     /// Garmin's address (a local stand-in in the tests).
     api: String,
+    /// The loop planner: the region's graph, the loops planned.
+    pub loops: loops::Loops,
 }
 
 impl EventEmitter<DataEvent> for Data {}
@@ -135,7 +137,10 @@ impl Data {
     /// Data that never reads the disk nor the key store, never goes online: for the tests of the window.
     #[cfg(test)]
     pub fn with_activities(theme: Theme, acts: Vec<Activity>) -> Self {
-        Data { acts: Arc::new(acts), key_loaded: true, status: Status::Idle, ..Self::blank(theme) }
+        let mut d = Data { acts: Arc::new(acts), key_loaded: true, status: Status::Idle, ..Self::blank(theme) };
+        // No region on disk to look for.
+        d.loops.looked = true;
+        d
     }
 
     /// The same, with the tracks already read.
@@ -163,6 +168,7 @@ impl Data {
             tiles: HashMap::new(),
             tiles_busy: 0,
             api: garmin::BASE.into(),
+            loops: loops::Loops::default(),
         }
     }
 
@@ -732,6 +738,8 @@ fn rgb(c: Hsla) -> [u8; 3] {
     let r = c.to_rgb();
     [(r.r * 255.0) as u8, (r.g * 255.0) as u8, (r.b * 255.0) as u8]
 }
+
+mod loops;
 
 #[cfg(test)]
 mod tests;

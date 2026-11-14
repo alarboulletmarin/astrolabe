@@ -12,6 +12,7 @@ use crate::views::dashboard::DashboardView;
 use crate::views::form::FormView;
 use crate::views::heatmap::HeatmapView;
 use crate::views::journal::JournalView;
+use crate::views::loops::LoopsView;
 use crate::views::records::RecordsView;
 use crate::views::settings::SettingsView;
 use crate::views::stats::StatsView;
@@ -24,7 +25,7 @@ use std::time::Duration;
 /// Height of the strip at the top of the window that moves it; the pages start lower.
 const HEADER: f32 = 36.0;
 
-actions!(astrolabe, [SelectNext, SelectPrev, OpenSelected, Back, GoBack, GoForward, Older, Newer, CalPrev, CalNext, CalToday]);
+actions!(astrolabe, [SelectNext, SelectPrev, OpenSelected, Back, GoBack, GoForward, Older, Newer, CalPrev, CalNext, CalToday, OpenLoops, LoopNext, LoopPrev, LoopsAgain, LoopExport]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -39,6 +40,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("left", CalPrev, Some("Calendar")),
         KeyBinding::new("right", CalNext, Some("Calendar")),
         KeyBinding::new("t", CalToday, Some("Calendar")),
+        // Loops: modified keys, so that typing a distance never triggers them.
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-l" } else { "ctrl-l" }, OpenLoops, None),
+        KeyBinding::new("down", LoopNext, Some("Loops")),
+        KeyBinding::new("up", LoopPrev, Some("Loops")),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-n" } else { "ctrl-n" }, LoopsAgain, Some("Loops")),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-s" } else { "ctrl-s" }, LoopExport, Some("Loops")),
     ]);
 }
 
@@ -54,6 +61,7 @@ pub struct Shell {
     form: Entity<FormView>,
     records: Entity<RecordsView>,
     heatmap: Entity<HeatmapView>,
+    loops: Entity<LoopsView>,
     settings: Entity<SettingsView>,
     focus: FocusHandle,
     width: Width,
@@ -77,6 +85,7 @@ impl Shell {
         let form = cx.new(|cx| FormView::new(data.clone(), width.clone(), cx));
         let records = cx.new(|cx| RecordsView::new(data.clone(), width.clone(), cx));
         let heatmap = cx.new(|cx| HeatmapView::new(data.clone(), cx));
+        let loops = cx.new(|cx| LoopsView::new(data.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(data.clone(), width.clone(), window, cx));
         let subs = vec![
             cx.observe_window_appearance(window, |this, window, cx| this.data.update(cx, |d, cx| d.follow_theme(window, cx))),
@@ -93,10 +102,11 @@ impl Shell {
             cx.subscribe_in(&form, window, Self::follow),
             cx.subscribe_in(&records, window, Self::follow),
             cx.subscribe_in(&heatmap, window, Self::follow),
+            cx.subscribe_in(&loops, window, Self::follow),
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Shell { data, page: Page::Dashboard, history: History::new(Page::Dashboard), dashboard, journal, calendar, activity, stats, form, records, heatmap, settings, focus, width, _subscriptions: subs }
+        Shell { data, page: Page::Dashboard, history: History::new(Page::Dashboard), dashboard, journal, calendar, activity, stats, form, records, heatmap, loops, settings, focus, width, _subscriptions: subs }
     }
 
     /// Shows `page` and makes it the newest history entry. Moving from one activity to another
@@ -213,6 +223,7 @@ impl Shell {
             .child(item("rail-form", Page::Form, IconName::HeartPulse, tr("Form", "Forme"), cx))
             .child(item("rail-records", Page::Records, IconName::Trophy, "Records", cx))
             .child(item("rail-map", Page::Heatmap, IconName::Map, tr("Heatmap", "Carte de chaleur"), cx))
+            .child(item("rail-loops", Page::Loops, IconName::Route, tr("Loops", "Boucles"), cx))
             // The empty part of the rail moves the window, as in Bref.
             .child(crate::ui::drag_window(div().id("rail-drag").flex_1().w_full()))
             .child(
@@ -279,12 +290,14 @@ impl Shell {
             (format!("{} {line}", "Synchronisation"), t.soft)
         } else if let Status::Busy(s) = &d.status {
             (s.clone(), t.soft)
+        } else if let Some((line, _)) = d.loops_line() {
+            (line, t.soft)
         } else if let Some(why) = &d.fetch.stopped {
             (format!("{outings} · {} : {why}", tr("synchronisation interrupted", "synchronisation interrompue")), t.bad())
         } else {
             (format!("{outings}{}", d.note.as_ref().map(|x| format!(" · {x}")).unwrap_or_default()), t.dim)
         };
-        let share = d.sync_share();
+        let share = d.sync_share().or_else(|| d.loops_line().and_then(|l| l.1));
         div()
             .id("status")
             .absolute()
@@ -371,6 +384,7 @@ impl Render for Shell {
             Page::Form => self.form.clone().into_any_element(),
             Page::Records => self.records.clone().into_any_element(),
             Page::Heatmap => self.heatmap.clone().into_any_element(),
+            Page::Loops => self.loops.clone().into_any_element(),
             Page::Settings => self.settings.clone().into_any_element(),
         };
         div()
@@ -387,6 +401,7 @@ impl Render for Shell {
                 Page::Journal => "Journal",
                 Page::Activity(_) => "Activity",
                 Page::Calendar => "Calendar",
+                Page::Loops => "Loops",
                 _ => "Home",
             })
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.journal.update(cx, |j, cx| j.select_step(1, cx))))
@@ -411,6 +426,11 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &CalPrev, _, cx| this.calendar.update(cx, |c, cx| c.step(-1, cx))))
             .on_action(cx.listener(|this, _: &CalNext, _, cx| this.calendar.update(cx, |c, cx| c.step(1, cx))))
             .on_action(cx.listener(|this, _: &CalToday, _, cx| this.calendar.update(cx, |c, cx| c.go_today(cx))))
+            .on_action(cx.listener(|this, _: &OpenLoops, window, cx| this.go(Page::Loops, window, cx)))
+            .on_action(cx.listener(|this, _: &LoopNext, _, cx| this.loops.update(cx, |l, cx| l.step(1, cx))))
+            .on_action(cx.listener(|this, _: &LoopPrev, _, cx| this.loops.update(cx, |l, cx| l.step(-1, cx))))
+            .on_action(cx.listener(|this, _: &LoopsAgain, _, cx| this.loops.update(cx, |l, cx| l.propose(true, cx))))
+            .on_action(cx.listener(|this, _: &LoopExport, _, cx| this.loops.update(cx, |l, cx| l.export(cx))))
             .on_action(cx.listener(|this, _: &Older, _, cx| this.activity.update(cx, |a, cx| a.step(true, cx))))
             .on_action(cx.listener(|this, _: &Newer, _, cx| this.activity.update(cx, |a, cx| a.step(false, cx))))
             .child(self.rail(cx))

@@ -72,11 +72,8 @@ pub struct Stretch {
 /// start being node 0.
 pub struct Local<'g> {
     pub graph: &'g Graph,
-    pub origin: [f64; 2],
     pub x: Vec<f32>,
     pub y: Vec<f32>,
-    /// The graph's node of each local one (`u32::MAX` for the start when it falls inside an edge).
-    pub nodes: Vec<u32>,
     pub first: Vec<u32>,
     pub arcs: Vec<u32>,
     pub stretches: Vec<Stretch>,
@@ -123,7 +120,6 @@ impl<'g> Local<'g> {
             local_of: std::collections::HashMap<u32, u32>,
             x: Vec<f32>,
             y: Vec<f32>,
-            nodes: Vec<u32>,
             queue: std::collections::VecDeque<u32>,
         }
         impl Grow {
@@ -139,12 +135,11 @@ impl<'g> Local<'g> {
                 self.local_of.insert(v, l);
                 self.x.push(px);
                 self.y.push(py);
-                self.nodes.push(v);
                 self.queue.push_back(v);
                 Some(l)
             }
         }
-        let mut grow = Grow { local_of: Default::default(), x: vec![0.0], y: vec![0.0], nodes: vec![at_end.unwrap_or(u32::MAX)], queue: Default::default() };
+        let mut grow = Grow { local_of: Default::default(), x: vec![0.0], y: vec![0.0], queue: Default::default() };
         let mut stretches = Vec::new();
         match at_end {
             Some(v) => {
@@ -183,7 +178,7 @@ impl<'g> Local<'g> {
                 stretches.push(Stretch { a, b, len: ed.len, up: ed.up, down: ed.down, class: ed.class, edge: ei, from: 0.0, to: 1.0, cost });
             }
         }
-        let Grow { x, y, nodes, .. } = grow;
+        let Grow { x, y, .. } = grow;
         let n = x.len();
         let mut first = vec![0u32; n + 1];
         for s in &stretches {
@@ -202,7 +197,7 @@ impl<'g> Local<'g> {
             fill[s.b as usize] += 1;
         }
         let grid = NodeGrid::new(&x, &y);
-        Ok(Local { graph: g, origin: start, x, y, nodes, first, arcs, stretches, grid })
+        Ok(Local { graph: g, x, y, first, arcs, stretches, grid })
     }
 
     pub fn len(&self) -> usize {
@@ -438,7 +433,6 @@ mod tests {
         // 100 m east of the south-west corner, 5 m north of the street: on the first stretch.
         let (lat, lon) = (43.70 + 5.0 / 111_195.0, 7.25 + 100.0 / (111_195.0 * 0.7230));
         let l = Local::around(&g, lat, lon, 5_000.0, &Prefs::default()).unwrap();
-        assert_eq!(l.nodes[0], u32::MAX);
         // The island is out of reach; everything else is in.
         assert_eq!(l.len(), 1 + 171);
         let parts: Vec<&Stretch> = l.stretches.iter().filter(|s| s.a == 0 || s.b == 0).collect();
@@ -462,7 +456,7 @@ mod tests {
             prev = Some(line.last().unwrap().0);
         }
         // The first arc starts at the start.
-        assert!(metres(l.line(arcs[0])[0].0, l.origin) < 0.5);
+        assert!(metres(l.line(arcs[0])[0].0, [43.70, lon]) < 0.5);
         assert!(Local::around(&g, 44.5, 7.0, 5_000.0, &Prefs::default()).is_err());
     }
 }

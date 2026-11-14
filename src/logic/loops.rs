@@ -230,7 +230,7 @@ fn attempt(l: &Local, req: &Request, seed: u64, search: &mut Search) -> Option<L
         w
     };
     let mut best: Option<Try> = None;
-    let mut keep = |t: Try, best: &mut Option<Try>| {
+    let keep = |t: Try, best: &mut Option<Try>| {
         let better = best.as_ref().is_none_or(|b| req.target.miss(t.dist) < req.target.miss(b.dist));
         if better {
             *best = Some(t);
