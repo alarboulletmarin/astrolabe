@@ -15,8 +15,10 @@ pub const DETOUR: f64 = 1.3;
 pub const TOLERANCE: f64 = 0.02;
 /// Times the polygon is resized before keeping the best try.
 const RESIZES: usize = 7;
-/// Moves of single waypoints to a neighbouring node, in exact mode, after the resizing.
+/// Moves of single waypoints to a nearby node, in exact mode, after the resizing; and the nodes
+/// tried at each.
 const NUDGES: usize = 12;
+const NUDGE_OPTIONS: usize = 6;
 /// A stretch already taken costs this many times more for each time it was taken.
 const REUSE: f32 = 4.0;
 /// Two loops sharing more than this share of the shorter one: only the better is kept.
@@ -146,7 +148,7 @@ pub fn plan(g: &Graph, req: &Request, threads: usize) -> Result<Vec<Loop>, NoLoo
     if local.stretches.is_empty() {
         return Err(NoLoop::NoPath);
     }
-    let attempts = (req.count * 3).max(4);
+    let attempts = (req.count * 2).max(4);
     let threads = threads.clamp(1, attempts);
     let mut found: Vec<(usize, Loop)> = std::thread::scope(|s| {
         let local = &local;
@@ -204,7 +206,10 @@ pub fn overlap(a: &Loop, b: &Loop) -> f32 {
 /// One loop: its waypoints' places, then the routes through them.
 struct Try {
     waypoints: Vec<u32>,
+    /// Start → first waypoint, …, last waypoint → start, as routed.
     legs: Vec<Vec<u32>>,
+    /// The legs joined, spurs cut.
+    arcs: Vec<u32>,
     dist: f64,
 }
 
@@ -259,31 +264,31 @@ fn attempt(l: &Local, req: &Request, seed: u64, search: &mut Search) -> Option<L
         scale = next.clamp(scale * 0.4, scale * 2.5).max(0.05);
     }
     let mut best = best?;
-    // Exact mode: move one waypoint at a time to a neighbouring node, while it brings the length
+    // Exact mode: move one waypoint at a time to a nearby node, while it brings the length
     // closer; the routes stay loops, never an out-and-back added for length.
-    if matches!(req.target, Target::Exact(_)) && !req.target.holds(best.dist) {
+    if matches!(req.target, Target::Exact(_)) {
+        let mut stuck = 0;
         for k in 0..NUDGES {
-            if req.target.holds(best.dist) || best.waypoints.is_empty() {
+            let n = best.waypoints.len();
+            if req.target.holds(best.dist) || n == 0 || stuck >= n {
                 break;
             }
-            let i = k % best.waypoints.len();
+            let i = k % n;
+            // Too short: try the nodes farther from the start first; too long, the nearer.
+            let longer = best.dist < aim;
+            let far = |v: u32| l.x[v as usize].hypot(l.y[v as usize]);
+            let mut options: Vec<u32> = neighbours(l, best.waypoints[i]).into_iter().filter(|v| *v != 0 && !best.waypoints.contains(v)).collect();
+            options.sort_by(|a, b| if longer { far(*b).total_cmp(&far(*a)) } else { far(*a).total_cmp(&far(*b)) });
             let mut moved = false;
-            for v in neighbours(l, best.waypoints[i]) {
-                let mut w = best.waypoints.clone();
-                w[i] = v;
-                if v == 0 || w.windows(2).any(|p| p[0] == p[1]) {
-                    continue;
-                }
-                if let Some(t) = route_all(l, &w, search)
+            for v in options.into_iter().take(NUDGE_OPTIONS) {
+                if let Some(t) = nudge(l, &best, i, v, search)
                     && (t.dist - aim).abs() < (best.dist - aim).abs()
                 {
                     best = t;
                     moved = true;
                 }
             }
-            if !moved && k >= best.waypoints.len() {
-                break;
-            }
+            stuck = if moved { 0 } else { stuck + 1 };
         }
     }
     Some(measure(l, req, seed, &best))
@@ -307,39 +312,72 @@ fn neighbours(l: &Local, v: u32) -> Vec<u32> {
     out
 }
 
-/// Start → waypoints → start, each leg avoiding what the previous ones took; spurs (in and out
-/// by the same stretch) cut away.
+/// Start → waypoints → start, each leg avoiding what the previous ones took.
 fn route_all(l: &Local, waypoints: &[u32], search: &mut Search) -> Option<Try> {
     let mut used = vec![0u8; l.stretches.len()];
     let mut legs = Vec::with_capacity(waypoints.len() + 1);
     let stops: Vec<u32> = std::iter::once(0).chain(waypoints.iter().copied()).chain(std::iter::once(0)).collect();
     for w in stops.windows(2) {
-        let leg = search.route(l, w[0], w[1], |s| l.stretches[s as usize].cost * (1.0 + REUSE * used[s as usize] as f32))?;
-        for a in &leg {
-            used[(a >> 1) as usize] = used[(a >> 1) as usize].saturating_add(1);
-        }
+        let leg = leg(l, w[0], w[1], &used, search)?;
+        take(&mut used, &leg, 1);
         legs.push(leg);
     }
-    let mut arcs: Vec<u32> = legs.iter().flatten().copied().collect();
-    // In by a stretch and straight back out by it: cut, again and again.
-    let mut out: Vec<u32> = Vec::with_capacity(arcs.len());
-    for a in arcs.drain(..) {
-        if out.last().is_some_and(|p| p >> 1 == a >> 1 && p & 1 != a & 1) {
-            out.pop();
-        } else {
-            out.push(a);
+    join(l, waypoints.to_vec(), legs)
+}
+
+/// A leg from `a` to `b`, what was already taken costing more.
+fn leg(l: &Local, a: u32, b: u32, used: &[u8], search: &mut Search) -> Option<Vec<u32>> {
+    search.route(l, a, b, |s| l.stretches[s as usize].cost * (1.0 + REUSE * used[s as usize] as f32))
+}
+
+/// Counts the stretches of `arcs` as taken (`by` 1) or no more (`by` −1).
+fn take(used: &mut [u8], arcs: &[u32], by: i8) {
+    for a in arcs {
+        let u = &mut used[(a >> 1) as usize];
+        *u = if by > 0 { u.saturating_add(1) } else { u.saturating_sub(1) };
+    }
+}
+
+/// The same loop with waypoint `i` moved to `v`: only its two legs are routed again, avoiding
+/// what the others take.
+fn nudge(l: &Local, t: &Try, i: usize, v: u32, search: &mut Search) -> Option<Try> {
+    let mut used = vec![0u8; l.stretches.len()];
+    for (k, leg) in t.legs.iter().enumerate() {
+        if k != i && k != i + 1 {
+            take(&mut used, leg, 1);
         }
     }
-    if out.is_empty() {
+    let before = if i == 0 { 0 } else { t.waypoints[i - 1] };
+    let after = t.waypoints.get(i + 1).copied().unwrap_or(0);
+    let mut legs = t.legs.clone();
+    legs[i] = leg(l, before, v, &used, search)?;
+    take(&mut used, &legs[i], 1);
+    legs[i + 1] = leg(l, v, after, &used, search)?;
+    let mut waypoints = t.waypoints.clone();
+    waypoints[i] = v;
+    join(l, waypoints, legs)
+}
+
+/// The legs as one loop: in by a stretch and straight back out by it is cut, again and again.
+fn join(l: &Local, waypoints: Vec<u32>, legs: Vec<Vec<u32>>) -> Option<Try> {
+    let mut arcs: Vec<u32> = Vec::with_capacity(legs.iter().map(Vec::len).sum());
+    for &a in legs.iter().flatten() {
+        if arcs.last().is_some_and(|p| p >> 1 == a >> 1 && p & 1 != a & 1) {
+            arcs.pop();
+        } else {
+            arcs.push(a);
+        }
+    }
+    if arcs.is_empty() {
         return None;
     }
-    let dist = out.iter().map(|a| l.stretches[(a >> 1) as usize].len as f64).sum();
-    Some(Try { waypoints: waypoints.to_vec(), legs: vec![out], dist })
+    let dist = arcs.iter().map(|a| l.stretches[(a >> 1) as usize].len as f64).sum();
+    Some(Try { waypoints, legs, arcs, dist })
 }
 
 /// What a loop is like: its line, length, climb, surfaces, the share run twice, its score.
 fn measure(l: &Local, req: &Request, seed: u64, t: &Try) -> Loop {
-    let arcs = &t.legs[0];
+    let arcs = &t.arcs;
     let (mut up, mut down, mut trail, mut paved) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut count: std::collections::HashMap<u32, u8> = std::collections::HashMap::new();
     let mut edges: std::collections::BTreeMap<u32, f32> = std::collections::BTreeMap::new();
