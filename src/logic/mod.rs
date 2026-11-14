@@ -10,6 +10,7 @@ pub mod form;
 pub mod graph;
 pub mod history;
 pub mod journal;
+pub mod loops;
 pub mod map;
 pub mod osm;
 pub mod profiles;
