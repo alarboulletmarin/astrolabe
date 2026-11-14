@@ -11,9 +11,11 @@ src/
   main.rs      opens the window (app id dev.andrea.Astrolabe, client-side decorations)
   lang.rs      tr("English", "Français"), trf for built strings, the language setting
   logic/       pure: no gpui, no disk, no network
-  platform/    what leaves the process, all blocking: Garmin, the store, the key, the tiles
+  platform/    what leaves the process, all blocking: Garmin, the store, the key, the tiles,
+               OpenStreetMap extracts and elevation tiles
   ui/          the look shared by every view: theme, fonts, widgets, charts, date formats
-  data/        `Data`, the one entity that holds the activities and talks to platform
+  data/        `Data`, the one entity that holds the activities (and the loop planner's graph)
+               and talks to platform
   views/       one entity per page, each with its own state
   app/         `Shell`: the window, the rail, the page shown, the status line, the shortcuts
 ```
@@ -71,6 +73,36 @@ by hand, so the error stays visible and nothing writes over the file.
 The activity page reads a file from disk, or downloads it if the queue hasn't reached it yet
 (`Data::track`).
 
+### Planning loops
+
+`Data::loops` (`data/loops.rs`) holds the loop planner's state: the region, its walking graph once
+loaded, the job under way, and the loops last planned.
+
+1. **Opening the page** (`Data::open_loops`, once): the graph is read from disk off the UI thread.
+   - A graph from another `graph::VERSION` is built again from the extract kept on disk.
+   - A damaged graph is set aside as `<region>.damaged-<seconds>.graph`, reported, and built again.
+2. **Download** (`Data::download_region`): the Geofabrik extract is streamed straight to disk
+   (`platform/osm.rs`, `store::write_atomic_from`). A cut download leaves the previous file
+   untouched.
+3. **Build** (`Data::build_graph`), on the background executor, with all cores but one:
+   - three passes over the extract (`logic/osm.rs` decodes, `logic/graph.rs` builds): the ways one
+     can run on and their nodes, those nodes' positions, then the ways cut at the junctions, with
+     nodes of degree 2 contracted;
+   - the elevation tiles not cached yet are fetched (`platform/elevation.rs`);
+   - climb and descent are read along each edge (`logic/elevation.rs`);
+   - the graph is written with `store::save_graph`.
+
+   The status line reads `Data::loops_line`. An extract that can't be decoded is set aside as
+   `<region>.damaged-<seconds>.osm.pbf`.
+4. **Planning** (`Data::plan_loops`, `logic/loops.rs`):
+   - a local graph around the start (`logic/route.rs`): the part reachable within half the longest
+     loop, the start cut into its edge;
+   - attempts on worker threads: waypoints on a polygon, A* legs, the polygon resized until the
+     length fits;
+   - the loops kept: different from each other, best first, the seed's own loop first.
+
+   A newer request makes an older one's result moot.
+
 ## On disk
 
 | Folder (Linux) | File | What |
@@ -81,13 +113,29 @@ The activity page reads a file from disk, or downloads it if the queue hasn't re
 | | `settings` | `key=value` lines: tiles, theme, language, journal columns |
 | | `key.enc` | the API key, sealed, when the system has no keyring |
 | `~/.config/astrolabe` | `master.key` | the key that opens `key.enc` |
+| | `osm/<region>.osm.pbf` | the region's OpenStreetMap extract, as Geofabrik gives it |
+| | `osm/<region>.graph` | its walking graph: nodes, edges with length, climb, descent and class, geometry; `graph::VERSION` |
 | `~/.cache/astrolabe` | `tiles/` | map tiles, by server |
+| | `elevation/terrarium/<z>/<x>/<y>.png` | elevation tiles (Terrarium) |
 
 macOS uses `~/Library/Application Support` and `~/Library/Caches`, Windows the local and roaming
 `AppData` folders; the `XDG_*` variables win everywhere (`platform/store.rs`).
 
-Every write goes through `store::write_atomic` (a temporary file, synced, then renamed); health
-data are created readable by the user alone. Nothing is deleted. A write made in the background
+Every write goes through `store::write_atomic` (a temporary file, synced, then renamed), or
+`store::write_atomic_from` for what is streamed (an extract); health data are created readable by the
+user alone. Nothing is deleted.
+
+The graph file is little-endian:
+
+- `ASTRLOOP`, `VERSION`;
+- the extract's size and cut time, and how many positions lack an altitude;
+- the counts of nodes, edges and points;
+- the arrays: node positions (1e-7°), altitudes (u16 decimetres from −500 m), components, adjacency,
+  edges, points;
+- an FNV-1a checksum over 8-byte words.
+
+`Graph::decode` checks every size and index, and tells a file from another version (`Stale`) from a
+damaged one. A write made in the background
 (`Data::persist`) reports its failure in the status line.
 
 The API key goes to the system keyring (`platform/secrets.rs`); without one, it is sealed with
@@ -100,9 +148,9 @@ never written in the clear or logged.
 
 | Kind | Where | What it proves |
 |---|---|---|
-| Pure | `#[cfg(test)]` at the bottom of each `logic/` file | figures, FIT parsing on `tests/fixtures`, records, columns, dates |
-| Window | `app/tests.rs` | the whole window on GPUI's test platform: clicks and keys in, the page shown out, with activities made up in memory |
-| Flows | `data/tests.rs` | the real chain, HTTP client to files and back, against a local stand-in for Garmin that each test scripts: sync then reopen offline, 429 on the list or the files and resuming, a cut connection, a damaged file, a disk that refuses writes, an older version's files |
+| Pure | `#[cfg(test)]` at the bottom of each `logic/` file | figures, FIT parsing on `tests/fixtures`, records, columns, dates; PBF decoding (damaged input included), the graph built from `tests/fixtures/loops.osm.pbf` (a made-up town written by `scripts/osm-fixture.py`), A*, loops |
+| Window | `app/tests.rs` | the whole window on GPUI's test platform: clicks and keys in, the page shown out, with activities made up in memory; a loop planned from a click and saved through the simulated save dialog |
+| Flows | `data/tests.rs` | the real chain, HTTP client to files and back, against a local stand-in for Garmin that each test scripts: sync then reopen offline, 429 on the list or the files and resuming, a cut connection, a damaged file, a disk that refuses writes, an older version's files; the same for Geofabrik and the elevation tiles: download, build, plan, reopen offline, a damaged or older graph, a damaged extract, no elevation server |
 | Rules | `main.rs` | the layers; no French text outside `tr` |
 
 Each flow test points the store at a folder of its own (`store::use_root`) and gives `Data` its
@@ -119,6 +167,14 @@ key directly (`Data::open_with`): the tests never touch the user's files or keyr
 | records and podiums | `logic/records.rs` |
 | form: load, fatigue, freshness | `logic/form.rs` |
 | map projection, tiles, heat raster | `logic/map.rs`; the widget: `views/map.rs` |
+| reading OpenStreetMap extracts, which ways are kept | `logic/osm.rs` |
+| the walking graph, its file format | `logic/graph.rs` (bump `VERSION` when what it keeps changes) |
+| altitude, climb, the relief | `logic/elevation.rs`, `logic/relief.rs` |
+| the cost of a way, A* | `logic/route.rs` |
+| loop generation, its constants (detour, tolerance, overlap) | `logic/loops.rs` |
+| regions offered | `logic/regions.rs` |
+| downloading extracts and elevation tiles | `platform/osm.rs`, `platform/elevation.rs` |
+| the loop planner's jobs | `data/loops.rs`; the page: `views/loops.rs` |
 | what the end of a sync says | `logic/sync.rs` |
 | Garmin's endpoints, HTTP errors | `platform/garmin.rs`, `platform/mod.rs` |
 | where files go, atomic writes | `platform/store.rs` |

@@ -18,13 +18,14 @@ An astrolabe is the old instrument of astronomers and sailors: you take the heig
 - **Journal**: every activity, week by week, with a search, a filter by sport and the columns you choose, down to the gap to your usual pace and the time in each heart rate zone.
 - **Activity**: the map of the track, pace, heart rate and elevation curves pointing at each other, splits and laps.
 - **Calendar**, **Statistics** (any measure, grouping, period and sports), **Form** (load, fatigue, freshness, stated without advice), **Records** (road, trail, cycling, swimming) and a **Heatmap** of all your tracks.
+- **Loops**: click a start, ask for a distance, and get running or trail loops on OpenStreetMap's paths, with their climb, profile and a GPX file. Computed on your machine, offline once the region is downloaded.
 - Light and dark, English and French, following your system.
 
 The [guide](book/src/pages.md) describes each page.
 
 ## Your data stay yours
 
-- Activities and their files live in the app's data folder, readable by you only, and work offline. Nothing goes anywhere but Garmin and the map tile server.
+- Activities and their files live in the app's data folder, readable by you only, and work offline. Nothing goes anywhere but Garmin and the map tile server; and, for loops, Geofabrik and the elevation tile server, which never see your start or your loops.
 - The Garmin key goes to your system's keyring, or to a file the app encrypts itself where there is none. It is never written in the clear.
 - Files are written whole or not at all; a damaged one is set aside, never thrown away.
 
@@ -61,4 +62,4 @@ Work happens on `develop`; `main` holds what is released. [ARCHITECTURE.md](ARCH
 
 ## License
 
-[MIT](LICENSE). The IBM Plex fonts are under the [SIL Open Font License](assets/fonts/LICENSE-IBM-Plex.txt). Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.
+[MIT](LICENSE). The IBM Plex fonts are under the [SIL Open Font License](assets/fonts/LICENSE-IBM-Plex.txt). Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors, under the [ODbL](https://opendatacommons.org/licenses/odbl/). Elevation from [Mapzen Terrain Tiles](https://github.com/tilezen/joerd/blob/master/docs/attribution.md) (SRTM, Copernicus EU-DEM and others).

@@ -52,6 +52,13 @@ swimming, the longest outings and the biggest climbs, for one year or all of the
 All your tracks on one map, darker where you go most. Filter by sport and year; a click on the map
 lists the activities that pass there.
 
+## Loops
+
+A click on the map sets a start; the page proposes up to five loops of the distance you ask (exact or
+a range), on streets or trails, with their climb, altitude profile and a GPX file. The map is shaded
+with the relief. The region's paths are downloaded once, then everything works offline. See
+[Planning loops](loops.md).
+
 ## Settings
 
 The Garmin key, the progress of the synchronisation, the map tiles, the theme and language, and

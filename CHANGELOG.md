@@ -4,6 +4,18 @@ Notable changes, newest first. Versions follow [Semantic Versioning](https://sem
 
 ## Unreleased
 
+- **Loops**: a new page (`Ctrl + L`).
+  - Click a start on the map, ask for an exact distance (±2 %) or a range, streets or trails,
+    asphalt or not, and a climb if you like. Up to five different running or trail loops come on
+    OpenStreetMap's paths, each with its distance, climb, descent, shares of trail, asphalt and
+    out-and-back, and an altitude profile linked to the map.
+  - The chosen loop saves as GPX (`Ctrl + S`), and its seed gives it back.
+  - The map is shaded with the relief.
+  - The region's extract (Provence-Alpes-Côte d'Azur for now) is downloaded once from Geofabrik,
+    and the elevation tiles that cover it from the Amazon open data bucket. The network of paths is
+    built and kept on disk, and everything is computed on the machine: no account, no routing
+    service, offline afterwards.
+  - A damaged network or extract is set aside, never deleted.
 - **Storage errors are shown**: an activity cache that can't be read is set aside as `activities.damaged-<number>.json` and reported, instead of opening on an empty journal; a write that fails in the background (tracks, settings) shows in the status line.
 - **Windows**: the app no longer opens a console window behind its own.
 - **User guide** (`book/`): install, first steps, the pages, synchronising and working offline, shortcuts, your data and backups, troubleshooting. The README is shorter and shows made-up data.

@@ -1,17 +1,23 @@
 # Shortcuts
 
-On macOS, `Cmd + [` and `Cmd + ]` replace `Alt + ←` and `Alt + →`.
+On macOS, `Cmd + [` and `Cmd + ]` replace `Alt + ←` and `Alt + →`, and `Cmd` replaces `Ctrl`.
 
 | Where | Keys | Does |
 |---|---|---|
 | Everywhere | `Alt + ←`, `Alt + →` | back and forward through the pages shown |
 | Everywhere | mouse back and forward buttons | the same |
+| Everywhere | `Ctrl + L` | the Loops page |
 | Journal | `↑`, `↓` | select the previous or next activity |
 | Journal | `Enter` | open the selected activity |
 | Activity | `←`, `→` | the older or newer activity |
 | Activity | `Esc` | back to the page before |
 | Calendar | `←`, `→` | the previous or next week, month or year |
 | Calendar | `T` | today |
+| Loops | `↑`, `↓` | the previous or next loop |
+| Loops | `Ctrl + N` | other loops from the same start |
+| Loops | `Ctrl + S` | save the chosen loop as GPX |
+| Loops | `Enter` in a field | propose loops |
+| Loops | click on the map | set the start and propose loops |
 | Maps | `Ctrl + wheel` | zoom around the pointer (the wheel alone scrolls the page) |
 | Maps | drag | move the map |
 

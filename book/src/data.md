@@ -1,7 +1,10 @@
 # Your data and backups
 
 Astrolabe keeps everything on your machine and sends nothing anywhere but Garmin (to read your
-activities) and the map tile server (to draw the maps).
+activities) and the map tile server (to draw the maps). If you use [Loops](loops.md), it also
+downloads the region's OpenStreetMap extract from Geofabrik, once, and elevation tiles from the
+Amazon open data bucket (`elevation-tiles-prod`). Neither one learns your start or your loops: Geofabrik
+sees which region, the tile server which tiles.
 
 ## Where things are
 
@@ -9,7 +12,7 @@ activities) and the map tile server (to draw the maps).
 |---|---|---|---|
 | activities, files, settings | `~/.local/share/astrolabe` | `~/Library/Application Support/astrolabe` | `%LOCALAPPDATA%\astrolabe` |
 | the key that opens `key.enc` | `~/.config/astrolabe` | `~/Library/Application Support/astrolabe` | `%APPDATA%\astrolabe` |
-| map tiles | `~/.cache/astrolabe` | `~/Library/Caches/astrolabe` | `%LOCALAPPDATA%\astrolabe` |
+| map and elevation tiles | `~/.cache/astrolabe` | `~/Library/Caches/astrolabe` | `%LOCALAPPDATA%\astrolabe` |
 
 On Linux, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` move them, as for any application.
 The settings page shows the data folder of your machine.
@@ -23,6 +26,8 @@ In the data folder:
 | `fit/<id>.zip` | the original file of each activity |
 | `settings` | tiles, theme, language, journal columns |
 | `key.enc` | your Garmin key, encrypted, only when your system has no keyring |
+| `osm/<region>.osm.pbf` | the region's OpenStreetMap extract, as Geofabrik gives it (a few hundred MB) |
+| `osm/<region>.graph` | the network of paths built from it, with the climb of every stretch |
 
 Health data (activities, files, the key) are readable by you only. Each file is written in full to a
 temporary file, then put in place, so a crash or a full disk never leaves half a file.
@@ -40,7 +45,8 @@ delete it on the Garmin Connect website too.
 ## Backups
 
 Everything can be downloaded again from Garmin, but the files take a while. To keep them, copy the
-data folder; the tiles folder can be left out.
+data folder; the tiles folder can be left out, and so can the `osm` folder (downloaded and built
+again from the Loops page).
 
 To move to another machine, copy the data folder to the same place there. The key comes along
 only if it was in `key.enc` and you copy `master.key` too; otherwise paste it again in the settings
@@ -52,3 +58,8 @@ If `activities.json` can't be read when the app opens, Astrolabe does not throw 
 it `activities.damaged-<number>.json`, says so in red in the status line, and does not synchronise
 on its own. Click the sync button to download the list again. The renamed file stays where it was,
 for you to keep or delete.
+
+The same goes for the Loops network: a `osm/<region>.graph` that can't be read is renamed
+`<region>.damaged-<number>.graph`, said in the status line, and built again from the extract. An
+extract that can't be read is renamed `<region>.damaged-<number>.osm.pbf`, and the page offers to
+download it again.

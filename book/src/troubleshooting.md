@@ -31,6 +31,19 @@ Problems with the files of activities are listed in the settings, under the sync
 | *Activity cache unreadable : …* (without *kept as*) | the data folder itself can't be read: check that it exists and belongs to you |
 | *Cache not saved*, *Tracks not saved*, *Track not saved*, *Settings not saved* | the disk is full or the folder can't be written: free some space or check its permissions, then synchronise again |
 
+## Loops
+
+| Message | What to do |
+|---|---|
+| *No path within 500 m of this point.* | click nearer a path or a street |
+| *No loop of this length from here* | try another length or another start: a dead-end valley or an island may hold no loop that long |
+| *The start is outside …, the region downloaded.* | click inside the region |
+| *Altitude incomplete: … tiles could not be fetched* | the network or the elevation server failed during the build; climbs read low there. **Build the network** again once online |
+| *Path network unreadable (…), kept as ….damaged-….graph* | nothing: it is built again from the extract; the damaged file is yours to delete |
+| *Extract unreadable (…), kept as …: download it again.* | **Download the region** again |
+| *Download cut* | the network failed; **Download the region** again. The previous extract, if any, is untouched |
+| *Path network not saved* | the disk is full or the folder can't be written |
+
 ## The window
 
 - **On Linux, the window doesn't open**: Astrolabe draws with Vulkan; check that a Vulkan driver
