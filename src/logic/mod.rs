@@ -9,6 +9,7 @@ pub mod form;
 pub mod history;
 pub mod journal;
 pub mod map;
+pub mod osm;
 pub mod profiles;
 pub mod records;
 pub mod sync;
