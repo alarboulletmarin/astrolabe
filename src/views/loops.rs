@@ -363,6 +363,7 @@ impl LoopsView {
         let region = l.region.name();
         let ready = l.graph.is_some();
         let job = d.loops_line();
+        let running = job.is_some();
         let (has_extract, error, planning, plan_error) = (l.extract.is_some(), l.error.clone(), l.planning, l.plan_error.clone());
         let built = l.graph.as_ref().map(|g| g.meta.source_time);
         let small = |text: String, color: Hsla| div().text_size(px(12.)).text_color(color).child(text);
@@ -416,6 +417,11 @@ impl LoopsView {
                     trf(format!("OpenStreetMap data of {}.", date.format("%Y-%m-%d")), format!("Données OpenStreetMap du {}.", date.format("%d/%m/%Y"))),
                     t.dim,
                 ));
+            }
+            if !running {
+                body = body.child(
+                    div().child(button("loops-update", tr("Download the region again", "Télécharger à nouveau la région"), false, t).on_click(cx.listener(|this, _, _, cx| this.data.update(cx, |d, cx| d.download_region(cx))))),
+                );
             }
         }
         body = body.child(small(tr("Elevation: Mapzen Terrain Tiles (SRTM, Copernicus EU-DEM and others).", "Altitude : Mapzen Terrain Tiles (SRTM, Copernicus EU-DEM et d'autres).").into(), t.dim));
