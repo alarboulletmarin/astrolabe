@@ -7,6 +7,7 @@ pub mod dashboard;
 pub mod elevation;
 pub mod fit;
 pub mod form;
+pub mod gpx;
 pub mod graph;
 pub mod history;
 pub mod journal;
