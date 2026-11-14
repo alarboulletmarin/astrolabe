@@ -499,4 +499,96 @@ mod tests {
         assert_eq!(r.next(), 0xe220a8397b1dcdaf);
         assert!((0..1000).map(|_| r.unit()).all(|u| (0.0..1.0).contains(&u)));
     }
+
+    /// 200 requests of 5 to 40 km in exact mode, from starts drawn within 12 km of Nice: how many
+    /// get a loop within 2 %, and how long planning takes. Run by hand, in release, on a graph
+    /// built by `measure_graph_build`:
+    ///
+    /// ASTROLABE_GRAPH=target/measure/region.graph cargo test --release -- --ignored --nocapture measure_loops_around_nice
+    #[test]
+    #[ignore]
+    fn measure_loops_around_nice() {
+        use std::time::Instant;
+        let path = std::env::var("ASTROLABE_GRAPH").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/target/measure/region.graph").into());
+        let t = Instant::now();
+        let g = crate::logic::graph::Graph::decode(&std::fs::read(&path).expect("a graph: see measure_graph_build")).unwrap();
+        println!("graph read in {:.2} s", t.elapsed().as_secs_f64());
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).max(1);
+        let mut rng = Rng::new(2026);
+        let (mut times, mut twenty, mut fit, mut asked, mut none) = (Vec::new(), Vec::new(), 0, 0, 0);
+        let mut first_fit = 0;
+        while asked < 200 {
+            let (r, a) = (12_000.0 * rng.unit().sqrt(), rng.unit() * 2.0 * PI);
+            let lat = 43.7034 + r * a.sin() / 111_195.0;
+            let lon = 7.2663 + r * a.cos() / (111_195.0 * 43.7034f64.to_radians().cos());
+            let km = 5.0 + rng.unit() * 35.0;
+            let req = Request { lat, lon, target: Target::Exact(km * 1000.0), prefs: Prefs::default(), climb: None, seed: rng.next(), count: 5 };
+            let t = Instant::now();
+            let res = plan(&g, &req, threads);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            match res {
+                // In the sea or beyond the paths: not a request one would make.
+                Err(NoLoop::NoPath) => continue,
+                Err(NoLoop::NoLoop) => none += 1,
+                Ok(loops) => {
+                    fit += loops.iter().any(|l| req.target.holds(l.dist)) as usize;
+                    first_fit += req.target.holds(loops[0].dist) as usize;
+                }
+            }
+            asked += 1;
+            times.push(ms);
+            if (18.0..=22.0).contains(&km) {
+                twenty.push(ms);
+            }
+        }
+        let q = |v: &mut Vec<f64>, p: f64| {
+            v.sort_by(f64::total_cmp);
+            v.get(((v.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or(f64::NAN)
+        };
+        println!("{asked} requests, {threads} threads: {fit} with a loop within 2 % ({first_fit} the first one), {none} without a loop");
+        println!("planning: p50 {:.0} ms, p95 {:.0} ms, max {:.0} ms", q(&mut times, 0.5), q(&mut times, 0.95), q(&mut times, 1.0));
+        println!("18 to 22 km ({}): p50 {:.0} ms, p95 {:.0} ms", twenty.len(), q(&mut twenty, 0.5), q(&mut twenty, 0.95));
+    }
+
+    /// The same on a made-up network, denser than a city (a jittered grid every 120 m over
+    /// 40 × 40 km, every fifth street a path): for tuning without a real extract. Its figures
+    /// are not Nice's.
+    ///
+    /// cargo test --release -- --ignored --nocapture measure_loops_on_a_made_up_network
+    #[test]
+    #[ignore]
+    fn measure_loops_on_a_made_up_network() {
+        use std::time::Instant;
+        let (n, step) = (333i64, 120.0);
+        let mut rng = Rng::new(1);
+        let (dlat, dlon) = (1.0 / 111_195.0, 1.0 / (111_195.0 * 0.7230));
+        let id = |r: i64, c: i64| 1 + r * 1000 + c;
+        let nodes: Vec<(i64, f64, f64)> = (0..n)
+            .flat_map(|r| (0..n).map(move |c| (r, c)))
+            .map(|(r, c)| (id(r, c), 43.5 + (r as f64 * step) * dlat, 7.0 + (c as f64 * step) * dlon))
+            .map(|(i, la, lo)| (i, la + (rng.unit() - 0.5) * 40.0 * dlat, lo + (rng.unit() - 0.5) * 40.0 * dlon))
+            .collect();
+        let mut ways = Vec::new();
+        for r in 0..n {
+            let tags = if r % 5 == 0 { vec![("highway", "path")] } else { vec![("highway", "residential")] };
+            ways.push((10_000_000 + r, tags.clone(), (0..n).map(|c| id(r, c)).collect::<Vec<_>>()));
+            ways.push((20_000_000 + r, tags, (0..n).map(|c| id(c, r)).collect::<Vec<_>>()));
+        }
+        let t = Instant::now();
+        let g = crate::logic::graph::tests::build_from(&crate::logic::graph::tests::extract(&nodes, &ways)).unwrap();
+        println!("made up: {} nodes, {} edges, built in {:.1} s", g.nodes(), g.edges.len(), t.elapsed().as_secs_f64());
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).max(1);
+        let mut rng = Rng::new(7);
+        let (mut times, mut fit) = (Vec::new(), 0);
+        for _ in 0..60 {
+            let km = 5.0 + rng.unit() * 35.0;
+            let req = Request { lat: 43.68 + rng.unit() * 0.01, lon: 7.25 + rng.unit() * 0.01, target: Target::Exact(km * 1000.0), prefs: Prefs::default(), climb: None, seed: rng.next(), count: 5 };
+            let t = Instant::now();
+            let res = plan(&g, &req, threads);
+            times.push((km, t.elapsed().as_secs_f64() * 1000.0));
+            fit += res.is_ok_and(|l| req.target.holds(l[0].dist)) as usize;
+        }
+        times.sort_by(|a, b| a.1.total_cmp(&b.1));
+        println!("60 requests, {threads} threads, {fit} within 2 %: p50 {:.0} ms, p95 {:.0} ms, max {:.0} ms at {:.0} km", times[30].1, times[57].1, times[59].1, times[59].0);
+    }
 }

@@ -51,7 +51,11 @@ pub fn download(base: &str, region: &Region, done: &AtomicU64, total: &AtomicU64
 /// Reads a region's extract, handing each blob (its type and bytes) to `f`; `done` counts the
 /// bytes read.
 pub fn read_extract(region: &str, done: &AtomicU64, f: &mut dyn FnMut(&str, Vec<u8>) -> Result<(), String>) -> Result<(), String> {
-    let file = File::open(extract_path(region)).map_err(|e| format!("{} : {e}", tr("Extract unreadable", "Extrait illisible")))?;
+    read_frames(&extract_path(region), done, f)
+}
+
+fn read_frames(path: &std::path::Path, done: &AtomicU64, f: &mut dyn FnMut(&str, Vec<u8>) -> Result<(), String>) -> Result<(), String> {
+    let file = File::open(path).map_err(|e| format!("{} : {e}", tr("Extract unreadable", "Extrait illisible")))?;
     let mut r = BufReader::with_capacity(1 << 20, file);
     loop {
         let mut len = [0u8; 4];
@@ -103,5 +107,63 @@ mod tests {
         assert_eq!(crate::platform::store::extract_size("missing"), None);
         assert!(read_extract("missing", &done, &mut |_, _| Ok(())).is_err());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The highest resident memory of this process so far, in MB (Linux only).
+    fn peak_mb() -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+        line.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kb| kb / 1024)
+    }
+
+    /// Builds the graph of a real extract and says how long each step took and the memory at
+    /// its peak. Run by hand, in release, with the extract's path:
+    ///
+    /// ASTROLABE_PBF=paca.osm.pbf cargo test --release -- --ignored --nocapture measure_graph_build
+    ///
+    /// Elevation tiles go to `target/measure/cache` (fetched once, the network needed then), the
+    /// graph to `target/measure/region.graph` (or `ASTROLABE_GRAPH`), for `measure_loops_around_nice`.
+    #[test]
+    #[ignore]
+    fn measure_graph_build() {
+        use crate::logic::{elevation, graph};
+        use std::time::Instant;
+        let pbf = std::path::PathBuf::from(std::env::var("ASTROLABE_PBF").expect("ASTROLABE_PBF: the extract to build"));
+        let out = std::env::var("ASTROLABE_GRAPH").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/measure/region.graph")));
+        crate::platform::store::use_root(std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/measure")));
+        let size = std::fs::metadata(&pbf).unwrap().len();
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).max(1);
+        let progress = graph::Progress::default();
+        let mut passes: Vec<(Instant, u32)> = Vec::new();
+        let t0 = Instant::now();
+        let mut read = |pass: u32, f: &mut dyn FnMut(&str, Vec<u8>) -> Result<(), String>| {
+            passes.push((Instant::now(), pass));
+            read_frames(&pbf, &progress.bytes, f)
+        };
+        let mut g = graph::build(&mut read, size, threads, &AtomicBool::new(false), &progress).unwrap();
+        let built = t0.elapsed();
+        let tiles = g.tiles();
+        let t1 = Instant::now();
+        let (failed, last) = crate::platform::elevation::fetch_all(crate::platform::elevation::TERRARIUM, elevation::ZOOM, &tiles, &AtomicU64::new(0), &AtomicBool::new(false));
+        let fetched = t1.elapsed();
+        let t2 = Instant::now();
+        let mut dem = elevation::Dem::new(64, |x, y| crate::platform::elevation::cached(elevation::ZOOM, x, y).and_then(|b| elevation::decode(&b)));
+        g.set_elevation(&mut dem);
+        let altitudes = t2.elapsed();
+        let t3 = Instant::now();
+        let bytes = g.encode();
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        std::fs::write(&out, &bytes).unwrap();
+        let saved = t3.elapsed();
+        let t4 = Instant::now();
+        let back = graph::Graph::decode(&std::fs::read(&out).unwrap()).unwrap();
+        let read_back = t4.elapsed();
+        let p = |i: usize| passes.get(i + 1).map_or(t0 + built, |x| x.0) - passes[i].0;
+        println!("extract: {} MB, {threads} threads", size / 1_000_000);
+        println!("passes: {:.1} s, {:.1} s, {:.1} s; graph: {:.1} s", p(0).as_secs_f64(), p(1).as_secs_f64(), p(2).as_secs_f64(), built.as_secs_f64());
+        println!("nodes {}, edges {}, points {}", back.nodes(), back.edges.len(), back.pts.len());
+        println!("elevation tiles: {} ({failed} failed {last:?}) in {:.1} s; altitudes {:.1} s", tiles.len(), fetched.as_secs_f64(), altitudes.as_secs_f64());
+        println!("file {} MB written in {:.1} s, read back in {:.2} s", bytes.len() / 1_000_000, saved.as_secs_f64(), read_back.as_secs_f64());
+        println!("peak memory: {:?} MB", peak_mb());
     }
 }
