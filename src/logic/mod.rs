@@ -22,3 +22,4 @@ pub mod route;
 pub mod slope;
 pub mod sync;
 pub mod system;
+pub mod terrain;
