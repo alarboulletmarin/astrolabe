@@ -426,6 +426,70 @@ fn a_loop_is_kept_and_opened_again(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(&root).ok();
 }
 
+/// A zone to avoid: drawn by a button then a click, sized by its edge, kept in the settings,
+/// the loops kept out of it, taken away by a right click, put back by undo.
+#[gpui::test]
+fn a_zone_is_drawn_and_kept_out_of(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let (shell, cx) = start(cx, 3);
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| d.loops.graph = Some(std::sync::Arc::new(crate::logic::graph::tests::town()))));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    let at = |east: f64, north: f64| [43.70 + north / 111_195.0, 7.25 + east / (111_195.0 * 0.7230)];
+    let look = |cx: &mut gpui::VisualTestContext| {
+        shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
+            l.look_at(43.70 + 1500.0 / 111_195.0, 7.25 + 500.0 / (111_195.0 * 0.7230), 14.0);
+            cx.notify();
+        }));
+        cx.run_until_parked();
+    };
+    look(cx);
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| l.type_km("6", window, cx)));
+    let screen = |cx: &mut gpui::VisualTestContext, p: [f64; 2]| shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(p[0], p[1]));
+    let zones = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.loops.read(cx).zones());
+    // Drawn before the start: kept, no complaint.
+    click(cx, "loops-zone");
+    // The region is fitted at the first frame: in close now.
+    look(cx);
+    let c = at(1500.0, 1500.0);
+    let p = screen(cx, c);
+    cx.simulate_click(p, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(zones(cx).len(), 1);
+    assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()).is_none(), "the click drew a zone, it set no start");
+    assert!(shell.read_with(cx, |s, cx| s.data.read(cx).settings.get("loops.zones").is_some_and(|z| z.contains(','))));
+    // Sized by its edge: dragged 200 m farther east.
+    let z = zones(cx)[0];
+    let edge = [z.lat, z.lon + z.radius / (111_195.0 * z.lat.to_radians().cos())];
+    let (from, to) = (screen(cx, edge), screen(cx, [edge[0], edge[1] + 200.0 / (111_195.0 * z.lat.to_radians().cos())]));
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point((from.x + to.x) / 2., from.y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let r = zones(cx)[0].radius;
+    assert!((r - (z.radius + 200.0)).abs() < 15.0, "{r}");
+    // A start, loops: none runs in the zone.
+    let p = screen(cx, at(1000.0, 0.0));
+    cx.simulate_click(p, Modifiers::none());
+    cx.run_until_parked();
+    let found = shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.clone());
+    assert!(!found.is_empty());
+    let zone = zones(cx)[0];
+    assert!(found.iter().all(|l| l.line.iter().all(|p| !zone.holds(p[0], p[1]))));
+    // A right click inside takes it away; undo puts it back.
+    look(cx);
+    let p = screen(cx, [zone.lat + 50.0 / 111_195.0, zone.lon]);
+    cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(p, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    assert!(zones(cx).is_empty());
+    cx.simulate_keystrokes(&format!("{mod_key}-z"));
+    cx.run_until_parked();
+    assert_eq!(zones(cx).len(), 1);
+}
+
 /// A record row opens on its ten best, a click on one opens its outing, and a second click on the row closes it.
 #[gpui::test]
 fn a_record_row_unfolds_its_ranking(cx: &mut TestAppContext) {

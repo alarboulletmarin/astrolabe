@@ -8,7 +8,7 @@ use crate::logic::activity::{fmt_km, fmt_m, group};
 use crate::logic::loops::{Loop, Request, Route, Target};
 use crate::logic::map::{self, View};
 use crate::logic::relief;
-use crate::logic::route::Prefs;
+use crate::logic::route::{Places, Prefs, Zone};
 use crate::ui::chart::{Series, line_chart, nearest, range};
 use crate::ui::theme::blend;
 use crate::ui::{Plots, button, heading, icon, num, render_image, segmented};
@@ -39,6 +39,32 @@ enum Handle {
     Pin(usize),
     /// A point of the loop chosen (index in its waypoints, as in `draft`).
     Point(usize),
+    /// A zone to keep out of: its centre, or its edge (its size).
+    Zone(usize),
+    ZoneEdge(usize),
+}
+
+/// A new zone's radius, metres.
+const ZONE_RADIUS: f64 = 250.0;
+
+/// Zones as kept in the settings: `lat,lon,radius` separated by `;`.
+fn read_zones(s: &str) -> Vec<Zone> {
+    s.split(';')
+        .filter_map(|z| {
+            let mut v = z.split(',').map(|n| n.trim().parse::<f64>().ok().filter(|f| f.is_finite()));
+            let (lat, lon, radius) = (v.next()??, v.next()??, v.next()??);
+            ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon) && radius > 0.0).then_some(Zone { lat, lon, radius: radius.min(50_000.0) })
+        })
+        .collect()
+}
+
+fn write_zones(z: &[Zone]) -> String {
+    z.iter().map(|z| format!("{:.6},{:.6},{:.0}", z.lat, z.lon, z.radius)).collect::<Vec<_>>().join(";")
+}
+
+/// (lat, lon) `m` metres east of a position.
+fn east_of(lat: f64, lon: f64, m: f64) -> [f64; 2] {
+    [lat, lon + m / (111_195.0 * lat.to_radians().cos().max(0.01))]
 }
 
 /// What undo puts back.
@@ -46,6 +72,7 @@ enum Handle {
 struct Step {
     start: Option<(f64, f64)>,
     pins: Vec<(f64, f64)>,
+    zones: Vec<Zone>,
     found: Arc<Vec<Loop>>,
     selected: usize,
 }
@@ -94,6 +121,15 @@ pub struct LoopsView {
     /// 0: streets, 1: either, 2: trails.
     trail: usize,
     avoid_paved: bool,
+    avoid_industrial: bool,
+    lit: bool,
+    /// One's own tracks: 1 run them again, −1 discover others, 0 either.
+    mine: i8,
+    zones: Vec<Zone>,
+    /// The next click on the map draws a zone.
+    placing_zone: bool,
+    /// The avoid settings unfolded.
+    avoid_open: bool,
     seed: u64,
     selected: usize,
     /// The point of the profile pointed at.
@@ -157,6 +193,12 @@ impl LoopsView {
             exact: get("loops.mode", "exact") != "range",
             trail: get("loops.trail", "1").parse().unwrap_or(1).min(2),
             avoid_paved: get("loops.paved", "0") == "1",
+            avoid_industrial: get("loops.industrial", "0") == "1",
+            lit: get("loops.lit", "0") == "1",
+            mine: get("loops.mine", "0").parse::<i8>().unwrap_or(0).clamp(-1, 1),
+            zones: read_zones(&get("loops.zones", "")),
+            placing_zone: false,
+            avoid_open: false,
             data,
             map: MapState::new(),
             start: None,
@@ -185,7 +227,7 @@ impl LoopsView {
     }
 
     /// The request the panel describes, or why it can't be one.
-    fn request(&self, cx: &App) -> Result<Request, String> {
+    fn request(&self, places: Places, cx: &App) -> Result<Request, String> {
         let (lat, lon) = self.start.ok_or(tr("Click on the map to set the start.", "Clique sur la carte pour poser le départ."))?;
         let region = self.data.read(cx).loops.region;
         if !region.holds(lat, lon) {
@@ -201,7 +243,7 @@ impl LoopsView {
         };
         let climb = value(&self.climb).trim().replace(',', ".").parse::<f64>().ok().filter(|v| *v > 0.0);
         let prefs = self.prefs();
-        Ok(Request { lat, lon, target, prefs, climb, seed: self.seed, count: COUNT, via: self.pins.iter().map(|p| [p.0, p.1]).collect() })
+        Ok(Request { lat, lon, target, prefs, climb, seed: self.seed, count: COUNT, via: self.pins.iter().map(|p| [p.0, p.1]).collect(), places })
     }
 
     /// Plans with the panel's settings; `again`: other loops (a new seed).
@@ -209,33 +251,37 @@ impl LoopsView {
         if again {
             self.seed = crate::logic::loops::Rng::new(self.seed ^ 0x5eed).next();
         }
-        match self.request(cx) {
+        let km = |i: &Entity<InputState>| i.read(cx).value().to_string();
+        let saved = [
+            ("loops.km", km(&self.km)),
+            ("loops.min", km(&self.min_km)),
+            ("loops.max", km(&self.max_km)),
+            ("loops.climb", km(&self.climb)),
+            ("loops.mode", if self.exact { "exact" } else { "range" }.to_string()),
+            ("loops.trail", self.trail.to_string()),
+            ("loops.paved", if self.avoid_paved { "1" } else { "0" }.to_string()),
+            ("loops.industrial", if self.avoid_industrial { "1" } else { "0" }.to_string()),
+            ("loops.lit", if self.lit { "1" } else { "0" }.to_string()),
+            ("loops.mine", self.mine.to_string()),
+            ("loops.zones", write_zones(&self.zones)),
+        ];
+        self.data.update(cx, |d, cx| {
+            for (k, v) in saved {
+                if d.settings.get(k) != Some(&v) {
+                    d.set_setting(k, v, cx);
+                }
+            }
+        });
+        let places = self.places(cx);
+        match self.request(places, cx) {
             Ok(req) => {
                 self.bad_input = None;
                 self.selected = 0;
                 // New loops: no longer the route opened.
                 self.opened = None;
-                self.hover = None;
-                let km = |i: &Entity<InputState>| i.read(cx).value().to_string();
-                let saved = [
-                    ("loops.km", km(&self.km)),
-                    ("loops.min", km(&self.min_km)),
-                    ("loops.max", km(&self.max_km)),
-                    ("loops.climb", km(&self.climb)),
-                    ("loops.mode", if self.exact { "exact" } else { "range" }.to_string()),
-                    ("loops.trail", self.trail.to_string()),
-                    ("loops.paved", if self.avoid_paved { "1" } else { "0" }.to_string()),
-                ];
-                self.data.update(cx, |d, cx| {
-                    for (k, v) in saved {
-                        if d.settings.get(k) != Some(&v) {
-                            d.set_setting(k, v, cx);
-                        }
-                    }
-                    d.plan_loops(req, cx)
-                });
+                self.data.update(cx, |d, cx| d.plan_loops(req, cx));
             }
-            Err(e) => self.bad_input = Some(e),
+            Err(e) => self.bad_input = self.start.is_some().then_some(e),
         }
         cx.notify();
     }
@@ -260,7 +306,19 @@ impl LoopsView {
     }
 
     fn prefs(&self) -> Prefs {
-        Prefs { trail: [0.0, 0.5, 1.0][self.trail], avoid_paved: self.avoid_paved }
+        Prefs { trail: [0.0, 0.5, 1.0][self.trail], avoid_paved: self.avoid_paved, avoid_industrial: self.avoid_industrial, lit: self.lit }
+    }
+
+    /// The zones, and one's tracks when they matter.
+    fn places(&mut self, cx: &mut Context<Self>) -> Places {
+        let known = (self.mine != 0).then(|| self.data.update(cx, |d, _| d.known_tracks()));
+        Places { zones: self.zones.clone(), known, mine: self.mine }
+    }
+
+    /// How many pixels a zone's radius takes on the map.
+    fn zone_px(&self, z: &Zone) -> f32 {
+        let (a, b) = (self.on_map(z.lat, z.lon), { let e = east_of(z.lat, z.lon, z.radius); self.on_map(e[0], e[1]) });
+        (b.0 - a.0).hypot(b.1 - a.1)
     }
 
     /// Where a position is on the map, in pixels from its top left corner.
@@ -290,13 +348,20 @@ impl LoopsView {
             let (hx, hy) = self.on_map(q[0], q[1]);
             (hx - at.0).hypot(hy - at.1) <= GRAB
         };
+        // A zone's edge first: it lies where nothing else is meant to be grabbed.
+        if let Some(i) = self.zones.iter().position(|z| near(east_of(z.lat, z.lon, z.radius))) {
+            return Some(Handle::ZoneEdge(i));
+        }
         if let Some(i) = self.points(cx).iter().position(|q| near(*q)) {
             return Some(Handle::Point(i));
         }
         if let Some(i) = self.pins.iter().position(|q| near([q.0, q.1])) {
             return Some(Handle::Pin(i));
         }
-        self.start.filter(|s| near([s.0, s.1])).map(|_| Handle::Start)
+        if self.start.is_some_and(|s| near([s.0, s.1])) {
+            return Some(Handle::Start);
+        }
+        self.zones.iter().position(|z| near([z.lat, z.lon])).map(Handle::Zone)
     }
 
     /// Where the chosen loop's line passes under the pointer: the index of its point there.
@@ -310,7 +375,7 @@ impl LoopsView {
     }
 
     fn step_now(&self, cx: &App) -> Step {
-        Step { start: self.start, pins: self.pins.clone(), found: self.snap_found(cx), selected: self.selected }
+        Step { start: self.start, pins: self.pins.clone(), zones: self.zones.clone(), found: self.snap_found(cx), selected: self.selected }
     }
 
     /// Keeps what is there, for undo, before a change.
@@ -327,6 +392,7 @@ impl LoopsView {
     fn restore(&mut self, s: Step, cx: &mut Context<Self>) {
         self.start = s.start;
         self.pins = s.pins;
+        self.zones = s.zones;
         self.selected = s.selected;
         self.draft = None;
         self.drag = None;
@@ -378,6 +444,11 @@ impl LoopsView {
         match h {
             Handle::Start => self.start = Some(at),
             Handle::Pin(i) => self.pins[i] = at,
+            Handle::Zone(i) => (self.zones[i].lat, self.zones[i].lon) = at,
+            Handle::ZoneEdge(i) => {
+                let z = &mut self.zones[i];
+                z.radius = crate::logic::fit::metres([z.lat, z.lon], [at.0, at.1]).clamp(30.0, 50_000.0);
+            }
             Handle::Point(i) => {
                 let mut points = self.points(cx);
                 if let Some(p) = points.get_mut(i) {
@@ -398,6 +469,7 @@ impl LoopsView {
             // A click on a point: nothing moves.
             self.start = before.start;
             self.pins = before.pins;
+            self.zones = before.zones;
             self.draft = None;
             cx.notify();
             return;
@@ -415,6 +487,7 @@ impl LoopsView {
                 self.propose(false, cx);
             }
             Handle::Point(i) => self.edit(Some(i), cx),
+            Handle::Zone(_) | Handle::ZoneEdge(_) => self.propose(false, cx),
         }
     }
 
@@ -433,8 +506,8 @@ impl LoopsView {
         {
             *pin = (points[i][0], points[i][1]);
         }
-        let (prefs, i) = (self.prefs(), self.selected);
-        self.data.update(cx, |d, cx| d.reroute(i, [start.0, start.1], points, prefs, cx));
+        let (prefs, places, i) = (self.prefs(), self.places(cx), self.selected);
+        self.data.update(cx, |d, cx| d.reroute(i, [start.0, start.1], points, prefs, places, cx));
         cx.notify();
     }
 
@@ -463,7 +536,21 @@ impl LoopsView {
                 self.pins.remove(i);
                 self.propose(false, cx);
             }
-            _ => {}
+            _ => {
+                // Inside a zone: the zone goes.
+                let b = self.map.bounds.get();
+                let at = (((e.position.x - b.origin.x) / px(1.)), ((e.position.y - b.origin.y) / px(1.)));
+                let inside = self.zones.iter().position(|z| {
+                    let c = self.on_map(z.lat, z.lon);
+                    (c.0 - at.0).hypot(c.1 - at.1) <= self.zone_px(z).max(GRAB)
+                });
+                if let Some(i) = inside {
+                    cx.stop_propagation();
+                    self.remember(cx);
+                    self.zones.remove(i);
+                    self.propose(false, cx);
+                }
+            }
         }
     }
 
@@ -572,6 +659,11 @@ impl LoopsView {
     pub fn name_as(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let name = name.to_string();
         self.name.update(cx, |s, cx| s.set_value(name, window, cx));
+    }
+
+    #[cfg(test)]
+    pub fn zones(&self) -> Vec<Zone> {
+        self.zones.clone()
     }
 
     #[cfg(test)]
@@ -692,7 +784,12 @@ impl Render for LoopsView {
         // The first click sets the start; the next ones, points to pass by.
         if let Some((sx, sy)) = self.map.click.take() {
             let at = self.map.view.position(sx, sy, w, h);
-            if self.start.is_none() {
+            if self.placing_zone {
+                self.placing_zone = false;
+                self.remember(cx);
+                self.zones.push(Zone { lat: at.0, lon: at.1, radius: ZONE_RADIUS });
+                self.propose(false, cx);
+            } else if self.start.is_none() {
                 self.remember(cx);
                 self.start = Some(at);
                 if self.data.read(cx).loops.graph.is_some() {
@@ -720,6 +817,8 @@ impl Render for LoopsView {
         let fade = if self.data.read(cx).loops.planning { 0.45 } else { 1.0 };
         let start = self.start;
         let pins = self.pins.clone();
+        let zones = self.zones.clone();
+        let bad = t.bad();
         let points = self.points(cx);
         let pinned: Vec<bool> = chosen.map(|l| l.pinned.clone()).unwrap_or_default();
         // Being moved: straight lines from point to point, until routed.
@@ -751,6 +850,15 @@ impl Render for LoopsView {
                 let dot = |p: Point<Pixels>, r: f32, c: Hsla, window: &mut Window| {
                     window.paint_quad(fill(Bounds::new(point(p.x - px(r), p.y - px(r)), size(px(2. * r), px(2. * r))), c).corner_radii(px(r)));
                 };
+                // Zones under the loops: a tinted disc, its edge, and the handle that sizes it.
+                for z in &zones {
+                    let (c, e) = (at([z.lat, z.lon]), at(east_of(z.lat, z.lon, z.radius)));
+                    let r = (e.x - c.x).max(px(2.));
+                    window.paint_quad(fill(Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)), bad.opacity(0.12)).corner_radii(r).border_widths(px(1.5)).border_color(bad.opacity(0.7)));
+                    dot(c, 3.0, bad, window);
+                    dot(e, 5.0, bg, window);
+                    dot(e, 3.5, bad, window);
+                }
                 if let Some(d) = &draft {
                     let mut path = PathBuilder::stroke(px(1.5));
                     path.move_to(at(d[0]));
@@ -962,6 +1070,56 @@ impl LoopsView {
             this.settle(cx);
         });
         let field = |i: &Entity<InputState>| div().w(px(80.)).child(Input::new(i).small());
+        let mine = segmented(
+            "loops-mine",
+            vec![(tr("My ways", "Mes chemins").into(), self.mine > 0), (tr("Either", "Égal").into(), self.mine == 0), (tr("Elsewhere", "Ailleurs").into(), self.mine < 0)],
+            t,
+            cx,
+            |this: &mut LoopsView, i, _, cx| {
+                this.mine = [1, 0, -1][i];
+                this.settle(cx);
+            },
+        );
+        let industrial = segmented(
+            "loops-industrial",
+            vec![(tr("Industry allowed", "Industrie permise").into(), !self.avoid_industrial), (tr("Avoid industry", "Éviter l'industrie").into(), self.avoid_industrial)],
+            t,
+            cx,
+            |this: &mut LoopsView, i, _, cx| {
+                this.avoid_industrial = i == 1;
+                this.settle(cx);
+            },
+        );
+        let lit = segmented("loops-lit", vec![(tr("Any light", "Éclairage égal").into(), !self.lit), (tr("Lit ways", "Voies éclairées").into(), self.lit)], t, cx, |this: &mut LoopsView, i, _, cx| {
+            this.lit = i == 1;
+            this.settle(cx);
+        });
+        let zones = self.zones.len();
+        // What the folded settings say, in a few words.
+        let summary = {
+            let mut said: Vec<String> = Vec::new();
+            match self.mine {
+                1 => said.push(tr("my ways", "mes chemins").into()),
+                -1 => said.push(tr("new ways", "chemins nouveaux").into()),
+                _ => {}
+            }
+            if self.avoid_industrial {
+                said.push(tr("no industry", "sans industrie").into());
+            }
+            if self.lit {
+                said.push(tr("lit", "éclairé").into());
+            }
+            if zones > 0 {
+                said.push(trf(format!("{zones} zone{}", if zones > 1 { "s" } else { "" }), format!("{zones} zone{}", if zones > 1 { "s" } else { "" })));
+            }
+            if said.is_empty() { tr("nothing", "rien").to_string() } else { said.join(" · ") }
+        };
+        let draw = button("loops-zone", if self.placing_zone { tr("Click on the map…", "Clique sur la carte…") } else { tr("Draw a zone to avoid", "Dessiner une zone à éviter") }, self.placing_zone, t)
+            .debug_selector(|| "loops-zone".into())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.placing_zone = !this.placing_zone;
+                cx.notify();
+            }));
         let distance = if self.exact {
             div().flex().items_center().gap(px(6.)).child(field(&self.km)).child(label("km"))
         } else {
@@ -974,6 +1132,36 @@ impl LoopsView {
             .child(div().flex().flex_col().gap(px(5.)).child(label(tr("Distance", "Distance"))).child(mode).child(distance))
             .child(div().flex().flex_col().gap(px(5.)).child(label(tr("Ground", "Terrain"))).child(trail).child(paved))
             .child(div().flex().items_center().gap(px(6.)).child(label(tr("Climb wished", "D+ souhaité"))).child(field(&self.climb)).child(label("m")))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .id("loops-avoid")
+                            .debug_selector(|| "loops-avoid".into())
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.avoid_open = !this.avoid_open;
+                                cx.notify();
+                            }))
+                            .child(icon(if self.avoid_open { IconName::ChevronDown } else { IconName::ChevronRight }, t.soft, 12.))
+                            .child(label(tr("Avoid", "Éviter")))
+                            .when(!self.avoid_open, |d| d.child(div().text_size(px(12.)).text_color(t.text).child(summary))),
+                    )
+                    .when(self.avoid_open, |d| d.child(mine).child(industrial).child(lit))
+                    .child(div().flex().flex_wrap().gap(px(8.)).child(draw).when(zones > 0, |d| {
+                        d.child(button("loops-zones-clear", tr("Take the zones away", "Retirer les zones"), false, t).on_click(cx.listener(|this, _, _, cx| {
+                            this.remember(cx);
+                            this.zones.clear();
+                            this.propose(false, cx);
+                        })))
+                    })),
+            )
 
     }
 
@@ -1025,13 +1213,14 @@ impl LoopsView {
                 )
                 .child(mini)
                 .child(div().text_size(px(11.)).text_color(t.soft).child(format!(
-                    "{} {} · {} {} · {} {}",
+                    "{} {} · {} {} · {} {}{}",
                     pct(l.trail),
                     tr("trail", "sentier"),
                     pct(l.paved),
                     tr("asphalt", "bitume"),
                     pct(l.back),
-                    tr("twice", "en double")
+                    tr("twice", "en double"),
+                    l.mine.map(|m| format!(" · {} {}", pct(m), tr("on my tracks", "sur mes traces"))).unwrap_or_default()
                 )))
         });
         div().flex().flex_col().gap(px(4.)).children(rows).child(
@@ -1159,7 +1348,18 @@ impl LoopsView {
 
 #[cfg(test)]
 mod tests {
-    use super::read_km;
+    use super::{read_km, read_zones, write_zones};
+
+    #[test]
+    fn zones_read_back_and_bad_ones_are_dropped() {
+        assert!(read_zones("").is_empty());
+        assert!(read_zones(";;").is_empty());
+        let z = read_zones("43.7,7.25,300;garbage;1,2;NaN,7,10;43.7,7.25,-5;91,7,10;43.7,7.25,1e9");
+        assert_eq!(z.len(), 2);
+        assert_eq!((z[0].lat, z[0].lon, z[0].radius), (43.7, 7.25, 300.0));
+        assert_eq!(z[1].radius, 50_000.0);
+        assert_eq!(read_zones(&write_zones(&z)), z);
+    }
 
     #[test]
     fn distances_read_with_a_comma_or_a_dot() {

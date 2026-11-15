@@ -15,11 +15,119 @@ pub struct Prefs {
     /// 0: streets rather than trails, 1: trails rather than streets, 0.5: either.
     pub trail: f32,
     pub avoid_paved: bool,
+    /// Keep out of industrial areas (and rail yards, quarries).
+    #[serde(default)]
+    pub avoid_industrial: bool,
+    /// Ways said to be lit rather than the others, for running at night.
+    #[serde(default)]
+    pub lit: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { trail: 0.5, avoid_paved: false }
+        Prefs { trail: 0.5, avoid_paved: false, avoid_industrial: false, lit: false }
+    }
+}
+
+/// A circle to keep out of, drawn on the map.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Zone {
+    pub lat: f64,
+    pub lon: f64,
+    /// Metres.
+    pub radius: f64,
+}
+
+impl Zone {
+    pub fn holds(&self, lat: f64, lon: f64) -> bool {
+        metres([self.lat, self.lon], [lat, lon]) <= self.radius
+    }
+}
+
+/// Where one has run already: the cells of about 25 m that past tracks cross.
+#[derive(Default)]
+pub struct Known(std::collections::HashSet<(i32, i32)>);
+
+/// A cell of `Known`, in degrees (about 28 m north, 20 m east around 44°).
+const KNOWN_CELL: f64 = 0.00025;
+
+impl Known {
+    /// From lines of (lat, lon), however far apart their points: each segment is walked every
+    /// 10 m.
+    pub fn from_lines<'a>(lines: impl Iterator<Item = &'a [[f32; 2]]>) -> Known {
+        let mut cells = std::collections::HashSet::new();
+        let cell = |lat: f64, lon: f64| ((lat / KNOWN_CELL).floor() as i32, (lon / KNOWN_CELL).floor() as i32);
+        for line in lines {
+            for p in line {
+                cells.insert(cell(p[0] as f64, p[1] as f64));
+            }
+            for w in line.windows(2) {
+                let (a, b) = ([w[0][0] as f64, w[0][1] as f64], [w[1][0] as f64, w[1][1] as f64]);
+                // A jump (a gap in the recording): no path between.
+                let d = metres(a, b);
+                if d > 2_000.0 {
+                    continue;
+                }
+                let n = (d / 10.0).ceil().max(1.0) as usize;
+                for k in 0..=n {
+                    let t = k as f64 / n as f64;
+                    cells.insert(cell(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t));
+                }
+            }
+        }
+        Known(cells)
+    }
+
+    /// Whether a position is within a cell of a past track.
+    pub fn holds(&self, lat: f64, lon: f64) -> bool {
+        let (r, c) = ((lat / KNOWN_CELL).floor() as i32, (lon / KNOWN_CELL).floor() as i32);
+        (-1..=1).any(|dr| (-1..=1).any(|dc| self.0.contains(&(r + dr, c + dc))))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// What makes a way dearer or cheaper by where it is: zones to keep out of, and one's tracks.
+#[derive(Clone, Default)]
+pub struct Places {
+    pub zones: Vec<Zone>,
+    pub known: Option<std::sync::Arc<Known>>,
+    /// 1: where one has run already, −1: where one never has, 0: either.
+    pub mine: i8,
+}
+
+impl std::fmt::Debug for Places {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Places({} zones, {} known cells, mine {})", self.zones.len(), self.known.as_ref().map_or(0, |k| k.0.len()), self.mine)
+    }
+}
+
+/// A way within a zone costs this many times more: still possible, to leave a zone one starts in.
+const ZONE: f32 = 25.0;
+
+impl Places {
+    fn is_neutral(&self) -> bool {
+        self.zones.is_empty() && (self.mine == 0 || self.known.as_ref().is_none_or(|k| k.is_empty()))
+    }
+
+    /// How much more (at least 1) an edge of the graph costs for where it runs.
+    pub fn factor(&self, g: &Graph, e: u32) -> f32 {
+        if self.is_neutral() {
+            return 1.0;
+        }
+        let pts: Vec<[f64; 2]> = g.line(e).into_iter().map(|(p, _)| [p[0] as f64 * 1e-7, p[1] as f64 * 1e-7]).collect();
+        let mut f = 1.0;
+        if self.zones.iter().any(|z| pts.iter().any(|p| z.holds(p[0], p[1]))) {
+            f *= ZONE;
+        }
+        if let Some(k) = self.known.as_ref().filter(|_| self.mine != 0) {
+            let share = pts.iter().filter(|p| k.holds(p[0], p[1])).count() as f32 / pts.len().max(1) as f32;
+            // Never below 1: the rest dearer rather than the known cheaper.
+            f *= if self.mine > 0 { 1.0 + 1.5 * (1.0 - share) } else { 1.0 + 1.5 * share };
+        }
+        f
     }
 }
 
@@ -45,6 +153,16 @@ pub fn factor(c: Class, p: &Prefs) -> Option<f32> {
         5 | 6 => 3.0,
         _ => 1.0,
     };
+    if p.avoid_industrial && c.industrial() {
+        f *= 3.0;
+    }
+    if p.lit {
+        f *= match c.lit() {
+            1 => 1.0,
+            2 => 3.0,
+            _ => 1.4,
+        };
+    }
     let lean = (p.trail.clamp(0.0, 1.0) - 0.5) * 2.0;
     f *= if c.is_trail() { 1.0 + (-lean).max(0.0) } else { 1.0 + lean.max(0.0) };
     if p.avoid_paved && c.is_paved() {
@@ -99,7 +217,7 @@ const NETWORK: u32 = 200;
 impl<'g> Local<'g> {
     /// The part of `g` reachable from the path nearest to (lat, lon) without going farther than
     /// `radius` metres from it, on ways `prefs` allows.
-    pub fn around(g: &'g Graph, lat: f64, lon: f64, radius: f64, prefs: &Prefs) -> Result<Local<'g>, NoStart> {
+    pub fn around(g: &'g Graph, lat: f64, lon: f64, radius: f64, prefs: &Prefs, places: &Places) -> Result<Local<'g>, NoStart> {
         let usable = |e: u32| factor(g.edges[e as usize].class, prefs).is_some();
         // A path cut off from the rest (a yard's footway, streets boxed in by main roads, which
         // aren't kept) holds no loop: the start goes to the nearest part of a real network, if
@@ -158,7 +276,7 @@ impl<'g> Local<'g> {
                 grow.queue.push_back(v);
             }
             None => {
-                let cost = factor(e.class, prefs).unwrap();
+                let cost = factor(e.class, prefs).unwrap() * places.factor(g, snap.edge);
                 for (end, from, to) in [(e.a, 0.0, frac), (e.b, frac, 1.0)] {
                     if let Some(l) = grow.add(end, xy(g.position(end)), r2) {
                         let part = to - from;
@@ -185,7 +303,7 @@ impl<'g> Local<'g> {
                 let Some(lw) = grow.add(w, xy(g.position(w)), r2) else { continue };
                 let ed = g.edges[ei as usize];
                 let (a, b) = if arc & 1 == 0 { (lv, lw) } else { (lw, lv) };
-                let cost = ed.len * factor(ed.class, prefs).unwrap();
+                let cost = ed.len * factor(ed.class, prefs).unwrap() * places.factor(g, ei);
                 stretches.push(Stretch { a, b, len: ed.len, up: ed.up, down: ed.down, class: ed.class, edge: ei, from: 0.0, to: 1.0, cost });
             }
         }
@@ -437,9 +555,9 @@ mod tests {
         let neutral = Prefs::default();
         assert_eq!(factor(path, &neutral), Some(1.0));
         assert_eq!(factor(alpine, &neutral), None);
-        let trails = Prefs { trail: 1.0, avoid_paved: true };
+        let trails = Prefs { trail: 1.0, avoid_paved: true, ..Prefs::default() };
         assert!(factor(street, &trails).unwrap() > 4.0 * factor(path, &trails).unwrap());
-        let streets = Prefs { trail: 0.0, avoid_paved: false };
+        let streets = Prefs { trail: 0.0, avoid_paved: false, ..Prefs::default() };
         assert!(factor(path, &streets).unwrap() > factor(street, &streets).unwrap());
         for c in [path, street] {
             for p in [neutral, trails, streets] {
@@ -449,11 +567,67 @@ mod tests {
     }
 
     #[test]
+    fn industry_and_lighting_cost_when_asked() {
+        let street = Class::new(Highway::Residential, crate::logic::osm::Surface::Unknown, 0, 0, 0);
+        let (plain, base) = (Prefs::default(), factor(street, &Prefs::default()).unwrap());
+        let industrial = street.with_industrial();
+        assert_eq!(factor(industrial, &plain), Some(base));
+        let avoid = Prefs { avoid_industrial: true, ..plain };
+        assert!(factor(industrial, &avoid).unwrap() > 2.5 * base);
+        assert_eq!(factor(street, &avoid), Some(base));
+        let night = Prefs { lit: true, ..plain };
+        let (lit, unlit) = (street.with_lit(1), street.with_lit(2));
+        assert_eq!(factor(lit, &night), Some(base));
+        assert!(factor(unlit, &night).unwrap() > factor(street, &night).unwrap());
+        assert!(factor(street, &night).unwrap() > base);
+    }
+
+    #[test]
+    fn known_cells_follow_tracks_and_skip_gaps() {
+        let line: Vec<[f32; 2]> = vec![[43.70, 7.25], [43.70, 7.26], [43.80, 7.26]];
+        let k = Known::from_lines(std::iter::once(line.as_slice()));
+        // Between two points 800 m apart, all along; not 100 m off; not across the 11 km gap.
+        assert!((0..=10).all(|i| k.holds(43.70, 7.25 + 0.001 * i as f64)));
+        assert!(!k.holds(43.70 + 100.0 / 111_195.0, 7.255));
+        assert!(!k.holds(43.75, 7.26));
+        assert!(k.holds(43.80, 7.26));
+        assert!(Known::from_lines(std::iter::empty()).is_empty());
+        let one: Vec<[f32; 2]> = vec![[43.7, 7.25]];
+        assert!(Known::from_lines(std::iter::once(one.as_slice())).holds(43.7, 7.25));
+    }
+
+    #[test]
+    fn zones_and_ones_tracks_change_what_ways_cost() {
+        let g = town();
+        // The edge nearest to a point in the town.
+        let e = g.snap(43.70, 7.25 + 1000.0 / (111_195.0 * 0.7230), 500.0, |_| true).unwrap().edge;
+        let p = g.line(e)[0].0;
+        let (lat, lon) = (p[0] as f64 * 1e-7, p[1] as f64 * 1e-7);
+        assert_eq!(Places::default().factor(&g, e), 1.0);
+        let zone = Places { zones: vec![Zone { lat, lon, radius: 50.0 }], ..Places::default() };
+        assert_eq!(zone.factor(&g, e), ZONE);
+        let far = Places { zones: vec![Zone { lat: 44.5, lon: 7.0, radius: 500.0 }], ..Places::default() };
+        assert_eq!(far.factor(&g, e), 1.0);
+        let line: Vec<[f32; 2]> = g.line(e).iter().map(|(p, _)| [p[0] as f32 * 1e-7, p[1] as f32 * 1e-7]).collect();
+        let known = Some(std::sync::Arc::new(Known::from_lines(std::iter::once(line.as_slice()))));
+        let again = Places { known: known.clone(), mine: 1, ..Places::default() };
+        let elsewhere = Places { known: known.clone(), mine: -1, ..Places::default() };
+        let either = Places { known, mine: 0, ..Places::default() };
+        assert_eq!(again.factor(&g, e), 1.0);
+        assert!(elsewhere.factor(&g, e) > 2.0);
+        assert_eq!(either.factor(&g, e), 1.0);
+        // An edge far from the track: dearer when running one's ways again, not when discovering.
+        let other = (0..g.edges.len() as u32).find(|o| g.line(*o).iter().all(|(q, _)| !again.known.as_ref().unwrap().holds(q[0] as f64 * 1e-7, q[1] as f64 * 1e-7))).unwrap();
+        assert!(again.factor(&g, other) > 1.5);
+        assert_eq!(elsewhere.factor(&g, other), 1.0);
+    }
+
+    #[test]
     fn the_start_cuts_its_edge_and_a_star_finds_the_shortest_way() {
         let g = town();
         // 100 m east of the south-west corner, 5 m north of the street: on the first stretch.
         let (lat, lon) = (43.70 + 5.0 / 111_195.0, 7.25 + 100.0 / (111_195.0 * 0.7230));
-        let l = Local::around(&g, lat, lon, 5_000.0, &Prefs::default()).unwrap();
+        let l = Local::around(&g, lat, lon, 5_000.0, &Prefs::default(), &Places::default()).unwrap();
         // The island is out of reach; everything else is in.
         assert_eq!(l.len(), 1 + 171);
         let parts: Vec<&Stretch> = l.stretches.iter().filter(|s| s.a == 0 || s.b == 0).collect();
@@ -478,6 +652,6 @@ mod tests {
         }
         // The first arc starts at the start.
         assert!(metres(l.line(arcs[0])[0].0, [43.70, lon]) < 0.5);
-        assert!(Local::around(&g, 44.5, 7.0, 5_000.0, &Prefs::default()).is_err());
+        assert!(Local::around(&g, 44.5, 7.0, 5_000.0, &Prefs::default(), &Places::default()).is_err());
     }
 }

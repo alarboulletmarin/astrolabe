@@ -8,7 +8,7 @@ use crate::logic::elevation::{self, Dem};
 use crate::logic::graph::{self, CANCELLED, Graph};
 use crate::logic::loops::{self, Loop, NoLoop, Request, Route};
 use crate::logic::regions::{self, Region};
-use crate::logic::route::Prefs;
+use crate::logic::route::{Known, Places, Prefs};
 use crate::platform::{self, store};
 use gpui_kit::*;
 use std::collections::HashMap;
@@ -62,6 +62,8 @@ pub struct Loops {
     pub editing: bool,
     /// The routes kept, the ones taken away included (read when the page first shows).
     pub routes: Vec<Route>,
+    /// Where one has run, and the tracks it was made from (rebuilt when they change).
+    known: Option<(usize, Arc<Known>)>,
     /// Geofabrik's and the elevation tiles' addresses (local stand-ins in the tests).
     pub osm_base: String,
     pub elevation_base: String,
@@ -85,6 +87,7 @@ impl Default for Loops {
             plan_round: 0,
             editing: false,
             routes: Vec::new(),
+            known: None,
             osm_base: platform::osm::GEOFABRIK.into(),
             elevation_base: platform::elevation::TERRARIUM.into(),
             relief: HashMap::new(),
@@ -342,6 +345,19 @@ impl Data {
         .detach();
     }
 
+    /// The cells one's tracks cross, built again only when the tracks changed.
+    pub fn known_tracks(&mut self) -> Arc<Known> {
+        let key = Arc::as_ptr(&self.derived) as usize;
+        if let Some((k, known)) = &self.loops.known
+            && *k == key
+        {
+            return known.clone();
+        }
+        let known = Arc::new(Known::from_lines(self.derived.values().map(|d| d.line.as_slice())));
+        self.loops.known = Some((key, known.clone()));
+        known
+    }
+
     /// Keeps a route, or the new version of one kept already (same id).
     pub fn keep_route(&mut self, r: Route, cx: &mut Context<Self>) {
         let name = r.name.clone();
@@ -400,7 +416,7 @@ impl Data {
     }
 
     /// Routes loop `i` again from `start` through `points`, in their order, off the UI thread.
-    pub fn reroute(&mut self, i: usize, start: [f64; 2], points: Vec<[f64; 2]>, prefs: Prefs, cx: &mut Context<Self>) {
+    pub fn reroute(&mut self, i: usize, start: [f64; 2], points: Vec<[f64; 2]>, prefs: Prefs, places: Places, cx: &mut Context<Self>) {
         let Some(g) = self.loops.graph.clone() else { return };
         self.loops.plan_round += 1;
         let round = self.loops.plan_round;
@@ -409,7 +425,7 @@ impl Data {
         self.loops.plan_error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let res = cx.background_executor().spawn(async move { loops::through(&g, start, &points, &prefs) }).await;
+            let res = cx.background_executor().spawn(async move { loops::through(&g, start, &points, &prefs, &places) }).await;
             this.update(cx, |d, cx| {
                 if d.loops.plan_round != round {
                     return;
