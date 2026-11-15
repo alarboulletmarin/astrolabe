@@ -42,6 +42,9 @@ pub(super) struct Scene {
     draped: bool,
     pub(super) cam: Camera,
     image: Option<Arc<RenderImage>>,
+    /// The eye and the size `image` was drawn with. While the pointer moves the ground the picture
+    /// on screen is a drawing late; what is laid over it is placed with these, not with `cam`.
+    shown: Option<(Camera, usize, usize)>,
     busy: bool,
     drawn: Option<u64>,
     /// Where the pointer was at the last move of a drag, and whether it turns the ground
@@ -112,8 +115,8 @@ fn bytes(c: Hsla) -> [u8; 3] {
 impl Scene {
     /// The ground of a loop from the elevation tiles, the loop seen whole in what the panel leaves
     /// of a view of `size` (see `frame`); `None` while a tile is missing.
-    pub(super) fn of(l: &Loop, key: u64, dark: bool, size: (f64, f64), tile: &mut dyn FnMut(u8, u32, u32) -> Option<Arc<Vec<f32>>>) -> Option<Scene> {
-        let inner = bounds(&l.line)?;
+    pub(super) fn of(line: &[[f64; 2]], key: u64, dark: bool, size: (f64, f64), tile: &mut dyn FnMut(u8, u32, u32) -> Option<Arc<Vec<f32>>>) -> Option<Scene> {
+        let inner = bounds(line)?;
         let (bbox, z) = around(inner);
         // Every tile asked for at once, so that they come together; the scene waits for them all.
         let got: Vec<_> = tiles(bbox, z).into_iter().map(|(x, y)| ((x, y), tile(z, x, y))).collect();
@@ -122,17 +125,17 @@ impl Scene {
         let (lo, hi) = t.heights.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
         let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE };
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, terrain: Arc::new(t), bbox, texture: Arc::new(texture), draped: false, cam, image: None, busy: false, drawn: None, drag: None };
-        s.frame(l, size);
+        let mut s = Scene { key, terrain: Arc::new(t), bbox, texture: Arc::new(texture), draped: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None };
+        s.frame(line, size);
         Some(s)
     }
 
     /// Puts the eye so that the loop, rather than the whole ground (which runs out of the view),
     /// fills what the panel leaves of a view of `size`.
-    fn frame(&mut self, l: &Loop, size: (f64, f64)) {
+    fn frame(&mut self, line: &[[f64; 2]], size: (f64, f64)) {
         let (w, h) = (size.0.max(PANEL * 2.0), size.1.max(200.0));
         let (left, free) = (PANEL + 28.0, w - PANEL - 28.0);
-        let pts: Vec<[f64; 3]> = l.line.iter().map(|p| self.place(*p)).collect();
+        let pts: Vec<[f64; 3]> = line.iter().map(|p| self.place(*p)).collect();
         // Each round measures the loop on screen, then backs off and slides to fit; a few settle.
         for _ in 0..8 {
             let seen = pts.iter().filter_map(|p| terrain::project(&self.terrain, &self.cam, EXAGGERATION, *p, w as usize, h as usize));
@@ -156,9 +159,12 @@ impl Scene {
         [q[0], q[1], self.terrain.height_at(q[0], q[1])]
     }
 
-    /// Screen position of a point of the loop in a `w` × `h` view.
+    /// Screen position of a point of the loop in a `w` × `h` view, on the picture as it is
+    /// shown there (stretched to the view if it was drawn for another size).
     fn screen(&self, p: [f64; 2], w: f64, h: f64) -> Option<(f32, f32)> {
-        terrain::project(&self.terrain, &self.cam, EXAGGERATION, self.place(p), w as usize, h as usize)
+        let (cam, pw, ph) = self.shown.unwrap_or((self.cam, w as usize, h as usize));
+        let (x, y) = terrain::project(&self.terrain, &cam, EXAGGERATION, self.place(p), pw, ph)?;
+        Some((x * w as f32 / pw.max(1) as f32, y * h as f32 / ph.max(1) as f32))
     }
 }
 
@@ -180,7 +186,7 @@ impl LoopsView {
         }
         let data = self.data.clone();
         let mut tile = |z: u8, x: u32, y: u32| data.update(cx, |d, cx| d.relief_tile((z, x, y), cx));
-        if let Some(s) = Scene::of(l, key, self.snap.theme.dark, size, &mut tile) {
+        if let Some(s) = Scene::of(&l.line, key, self.snap.theme.dark, size, &mut tile) {
             self.scene = Some(s);
         }
     }
@@ -252,6 +258,7 @@ impl LoopsView {
                     s.drawn = Some(key);
                     if img.is_some() {
                         s.image = img;
+                        s.shown = Some((cam, w, h));
                     }
                 }
                 cx.notify();
@@ -387,7 +394,7 @@ impl LoopsView {
         let l = &found[self.selected];
         let b = self.plots.get("loops-3d").get();
         let key = self.scene_key(l);
-        self.scene = Scene::of(l, key, false, ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64), tile);
+        self.scene = Scene::of(&l.line, key, false, ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64), tile);
     }
 
     #[cfg(test)]
@@ -412,7 +419,31 @@ impl LoopsView {
 
 #[cfg(test)]
 mod tests {
-    use super::{around, bounds, map_zoom, span, tiles, tint, world};
+    use super::{Scene, around, bounds, map_zoom, span, tiles, tint, world};
+    use std::sync::Arc;
+
+    #[test]
+    fn marks_stay_on_the_picture_shown_while_the_eye_moves() {
+        let line = [[43.70, 7.25], [43.72, 7.27], [43.71, 7.29]];
+        let mut flat = |_: u8, _: u32, _: u32| Some(Arc::new(vec![100.0f32; 256 * 256]));
+        let mut s = Scene::of(&line, 0, false, (1200.0, 800.0), &mut flat).unwrap();
+        let at = |s: &Scene| s.screen(line[0], 1200.0, 800.0).unwrap();
+        // A picture drawn with this eye is on screen.
+        let before = at(&s);
+        s.shown = Some((s.cam, 1200, 800));
+        // The eye turns and moves; the next picture is still being drawn: the mark has not moved.
+        s.cam.orbit(0.4, 0.1);
+        s.cam.pan_screen(&s.terrain, super::EXAGGERATION, 90.0, 40.0, 800.0);
+        assert_eq!(at(&s), before);
+        // The new picture comes: the mark follows it.
+        s.shown = Some((s.cam, 1200, 800));
+        let after = at(&s);
+        assert!((after.0 - before.0).abs() > 20.0, "{before:?} {after:?}");
+        // A picture drawn at another size is stretched to the view, and the mark with it.
+        s.shown = Some((s.cam, 600, 400));
+        let half = at(&s);
+        assert!((half.0 - after.0).abs() < 1.0 && (half.1 - after.1).abs() < 1.0, "{after:?} {half:?}");
+    }
 
     #[test]
     fn the_box_and_its_tiles_cover_the_loop() {
