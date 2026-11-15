@@ -643,6 +643,7 @@ pub fn render(t: &Terrain, texture: &Texture, solids: &[Face], cam: &Camera, exa
             sc.spawn(|| {
                 let mut zbuf = vec![0f32; BAND * ss * sw];
                 let mut buf = vec![0u8; BAND * ss * sw * 4];
+                let mut veiled = vec![false; BAND * ss * sw];
                 loop {
                     let next = bands.lock().unwrap().next();
                     let Some((n, rows_out)) = next else { break };
@@ -656,12 +657,17 @@ pub fn render(t: &Terrain, texture: &Texture, solids: &[Face], cam: &Camera, exa
                         triangle([&v[0], &v[1], &v[2]], ((*k as usize) < ground_tris).then_some(&ground), y0, y1, sw, buf, &mut zbuf);
                     }
                     // The edging first and without depth of its own: no segment's edging covers
-                    // another's line.
+                    // another's line. Then what a hill or a building hides of the line, faint and
+                    // without edging, so that it is not lost in a town; then the line in sight.
                     for (a, b, _) in &segs {
-                        segment(a, b, edge_colour, edging, false, y0, y1, sw, buf, &mut zbuf);
+                        segment(a, b, edge_colour, edging, Part::Edging, y0, y1, sw, buf, &mut zbuf, &mut veiled);
+                    }
+                    veiled.iter_mut().for_each(|v| *v = false);
+                    for (a, b, color) in &segs {
+                        segment(a, b, *color, radius, Part::Hidden, y0, y1, sw, buf, &mut zbuf, &mut veiled);
                     }
                     for (a, b, color) in &segs {
-                        segment(a, b, *color, radius, true, y0, y1, sw, buf, &mut zbuf);
+                        segment(a, b, *color, radius, Part::Seen, y0, y1, sw, buf, &mut zbuf, &mut veiled);
                     }
                     if ss == 1 {
                         rows_out.copy_from_slice(buf);
@@ -740,10 +746,24 @@ fn triangle(v: [&[f32; 6]; 3], g: Option<&Ground>, y0: usize, y1: usize, w: usiz
     }
 }
 
-/// A thick segment (a capsule on screen), nearer than the surface by `LINE_BIAS`; `solid`: it
-/// hides what is drawn behind it afterwards.
+/// What is drawn of a segment of the line.
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    /// Where it is in sight, without hiding what is drawn afterwards.
+    Edging,
+    /// Where something stands in front of it: laid faintly over that, once per sample (`veiled`),
+    /// so that the segments' overlapping ends do not add up.
+    Hidden,
+    /// Where it is in sight; it hides what is drawn behind it afterwards.
+    Seen,
+}
+
+/// How much of the line shows through what hides it.
+const HIDDEN_LINE: f32 = 0.4;
+
+/// A thick segment (a capsule on screen), nearer than the surface by `LINE_BIAS`.
 #[allow(clippy::too_many_arguments)]
-fn segment(a: &[f32; 3], b: &[f32; 3], color: [u8; 3], r: f32, solid: bool, y0: usize, y1: usize, w: usize, rows_out: &mut [u8], zbuf: &mut [f32]) {
+fn segment(a: &[f32; 3], b: &[f32; 3], color: [u8; 3], r: f32, part: Part, y0: usize, y1: usize, w: usize, rows_out: &mut [u8], zbuf: &mut [f32], veiled: &mut [bool]) {
     let ys = (a[1].min(b[1]) - r).floor().max(y0 as f32) as usize;
     let ye = (a[1].max(b[1]) + r).ceil().min(y1 as f32 - 1.0);
     let xs = (a[0].min(b[0]) - r).floor().max(0.0) as usize;
@@ -764,11 +784,18 @@ fn segment(a: &[f32; 3], b: &[f32; 3], color: [u8; 3], r: f32, solid: bool, y0: 
             }
             let iz = (a[2] + t * (b[2] - a[2])) * LINE_BIAS;
             let zi = (y - y0) * w + x;
-            if iz > zbuf[zi] {
-                if solid {
+            let px = &mut rows_out[zi * 4..zi * 4 + 4];
+            match (part, iz > zbuf[zi]) {
+                (Part::Edging, true) => put(px, col),
+                (Part::Seen, true) => {
                     zbuf[zi] = iz;
+                    put(px, col);
                 }
-                put(&mut rows_out[zi * 4..zi * 4 + 4], col);
+                (Part::Hidden, false) if !veiled[zi] => {
+                    veiled[zi] = true;
+                    put(px, [0, 1, 2, 3].map(|k| px[k] as f32 + (col[k] - px[k] as f32) * HIDDEN_LINE));
+                }
+                _ => {}
             }
         }
     }
@@ -832,8 +859,18 @@ mod tests {
         let (t, cam, line) = ridge_scene(1500.0);
         let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false);
         let (x, y) = project(&t, &cam, 1.0, [1000.0, 1500.0, 0.0], 1200, 800).unwrap();
-        assert_ne!(pixel(&img, 1200, x, y)[..3], [255, 0, 0]);
         assert_eq!(pixel(&img, 1200, x, y)[3], 255, "the ridge covers that pixel");
+        // The line shows faintly through the ridge (40 % of its red over the ridge's green),
+        // without its edging, and evenly: where two segments overlap it is no stronger.
+        let ridge = pixel(&img, 1200, x, y + 40.0);
+        assert_eq!(ridge, [40, 160, 40, 255]);
+        let faint = [(40.0 + 215.0 * 0.4) as u8, (160.0 * 0.6) as u8, (40.0 * 0.6) as u8, 255];
+        assert_eq!(pixel(&img, 1200, x, y), faint);
+        let joined = vec![line[0], ([1000.0, 1500.0, 0.0], [255, 0, 0]), ([1000.0, 1500.0, 0.0], [255, 0, 0]), line[1]];
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &joined, 1200, 800, CLEAR, false);
+        assert_eq!(pixel(&img, 1200, x, y), faint);
+        let around: Vec<[u8; 4]> = (-12..=12).map(|d| pixel(&img, 1200, x, y + d as f32)).collect();
+        assert!(around.iter().all(|p| *p == faint || *p == ridge), "no edging: {around:?}");
     }
 
     #[test]
@@ -1096,7 +1133,8 @@ mod tests {
         assert_eq!(at(&[], [1000.0, 1100.0, 0.0]), [255, 0, 0, 255]);
         let wall = at(&block, [1000.0, 950.0, 60.0]);
         assert!(wall[0] == wall[1] && wall[1] == wall[2] && wall[0] < 70, "a south wall, in the shade: {wall:?}");
-        assert_eq!(at(&block, [1000.0, 1100.0, 0.0])[0], wall[0], "the line is behind the block");
+        let behind = at(&block, [1000.0, 1100.0, 0.0]);
+        assert!(behind[0] > wall[0] + 60 && behind[1] < wall[1] && behind[0] < 200, "the line is behind the block, faint: {behind:?}");
         assert_eq!(at(&block, [1000.0, 1000.0, 120.0]), [10, 20, 250, 255]);
         assert_eq!(at(&block, [700.0, 1100.0, 0.0]), [255, 0, 0, 255]);
         assert_eq!(at(&block, [700.0, 900.0, 0.0]), [40, 160, 40, 255]);
