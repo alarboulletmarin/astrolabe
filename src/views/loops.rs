@@ -1035,9 +1035,11 @@ impl Render for LoopsView {
     }
 }
 
-/// The colours of the grade classes (`slope::class`): the accent, from pale to dark.
+/// The colours of the grade classes (`slope::class`): the accent, from pale to dark. In the dark
+/// theme the gentle grades keep more of the accent, or they would sink into the dark map.
 fn slope_ramp(t: &crate::ui::theme::Theme) -> [Hsla; 5] {
-    [blend(t.accent, t.bg, 0.3), blend(t.accent, t.bg, 0.55), blend(t.accent, t.bg, 0.8), t.accent, blend(t.text, t.accent, 0.55)]
+    let [a, b, c] = if t.dark { [0.5, 0.68, 0.84] } else { [0.3, 0.55, 0.8] };
+    [blend(t.accent, t.bg, a), blend(t.accent, t.bg, b), blend(t.accent, t.bg, c), t.accent, blend(t.text, t.accent, 0.55)]
 }
 
 /// What the colours of the grade say.

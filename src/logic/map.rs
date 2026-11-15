@@ -229,9 +229,56 @@ pub fn tint(png: &[u8], bg: [u8; 3], fg: [u8; 3]) -> Option<(u32, u32, Vec<u8>)>
     Some((w, h, out))
 }
 
+/// A map colour for the ground in 3D. In the light theme, as it is. In the dark one the map is
+/// dimmed rather than inverted, so that water and woods stay darker than the land around them;
+/// only what is dark on the map (names, rails, borders) turns light, to stay readable.
+pub fn ground_colour(rgb: [u8; 3], dark: bool) -> [u8; 3] {
+    if !dark {
+        return rgb;
+    }
+    let (hi, lo) = (rgb.iter().copied().max().unwrap_or(0) as f32, rgb.iter().copied().min().unwrap_or(0) as f32);
+    let l = (hi + lo) / 510.0;
+    let to = if l >= 0.6 { 0.08 + (l - 0.6) * 0.42 } else { 0.08 + (0.6 - l) / 0.6 * 0.5 };
+    // The hue is kept, at under half its strength.
+    rgb.map(|c| (to * 255.0 + (c as f32 - l * 255.0) * 0.45).clamp(0.0, 255.0) as u8)
+}
+
+/// A tile in the colours of the ground in 3D (`ground_colour`). BGRA out.
+pub fn ground(png: &[u8], dark: bool) -> Option<(u32, u32, Vec<u8>)> {
+    let img = image::load_from_memory(png).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for p in img.pixels() {
+        let [r, g, b] = ground_colour([p[0], p[1], p[2]], dark);
+        out.extend_from_slice(&[b, g, r, 255]);
+    }
+    Some((w, h, out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ground_keeps_its_colours_and_its_order_in_the_dark() {
+        // The map's land, water, woods, a white road and a name.
+        let (land, water, wood, road, name) = ([242, 239, 233], [170, 211, 223], [173, 209, 158], [255, 255, 255], [40, 40, 40]);
+        assert_eq!(ground_colour(water, false), water);
+        let lum = |c: [u8; 3]| 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
+        let d = |c| ground_colour(c, true);
+        // Dark land, water and woods darker still, roads a little lighter, names light.
+        assert!((30.0..60.0).contains(&lum(d(land))), "{:?}", d(land));
+        assert!(lum(d(water)) < lum(d(land)) - 5.0 && lum(d(wood)) < lum(d(land)) - 5.0);
+        assert!(lum(d(road)) > lum(d(land)) && lum(d(name)) > 100.0);
+        // Water is still blue, woods still green.
+        assert!(d(water)[2] > d(water)[0] + 15 && d(wood)[1] > d(wood)[0] + 10 && d(wood)[1] > d(wood)[2] + 10, "{:?} {:?}", d(water), d(wood));
+        // Black and white stay within the bytes.
+        assert_eq!(d([0, 0, 0]), [147; 3]);
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([170, 211, 223, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        assert_eq!(ground(&png, false).unwrap(), (2, 1, vec![223, 211, 170, 255, 223, 211, 170, 255]));
+        assert!(ground(b"no png", true).is_none());
+    }
 
     #[test]
     fn a_point_of_the_screen_gives_its_position_back() {

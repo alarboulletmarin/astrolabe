@@ -27,9 +27,6 @@ const FADE: f32 = 0.16;
 const MAP_PIXELS: f64 = 1024.0;
 /// The loop fills this share of the free area's width, or of its height.
 const FILL: f64 = 0.8;
-/// The map's tiles are faint, made to lie under a track; on the ground their darks are
-/// deepened this much, so that roads, water and woods read from afar.
-const CONTRAST: f32 = 1.6;
 
 pub(super) struct Scene {
     /// The loop and theme it was made for.
@@ -191,20 +188,16 @@ impl LoopsView {
         }
     }
 
-    /// Lays the map on the ground once all its tiles are there (the 2D map's, in the theme).
-    /// Until then, and offline, the ground stays grey.
+    /// Lays the map on the ground, in its colours, once all its tiles are there. Until then, and
+    /// offline, the ground stays grey.
     fn ensure_drape(&mut self, cx: &mut Context<Self>) {
         let Some(s) = self.scene.as_mut().filter(|s| !s.draped) else { return };
         let z = map_zoom(s.bbox);
         // Every tile asked for at once, so that they come together.
-        let got: Vec<_> = tiles(s.bbox, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.tile((z, x, y), cx)))).collect();
-        let Some(have) = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<std::collections::HashMap<(u32, u32), Arc<RenderImage>>>>() else { return };
+        let got: Vec<_> = tiles(s.bbox, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
+        let Some(have) = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<std::collections::HashMap<(u32, u32), Arc<Vec<u8>>>>>() else { return };
         // ponytail: resampled on the main thread, about 10 ms once per loop; in the background if it shows.
-        if let Some(mut t) = Texture::from_tiles(s.bbox, z, FADE, &|x, y| have.get(&(x, y)).and_then(|i| i.as_bytes(0))) {
-            let bg = bytes(self.snap.theme.bg).map(|v| v as f32);
-            for p in &mut t.px {
-                *p = [0, 1, 2].map(|k| (bg[k] + (p[k] as f32 - bg[k]) * CONTRAST).clamp(0.0, 255.0) as u8);
-            }
+        if let Some(t) = Texture::from_tiles(s.bbox, z, FADE, &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) {
             s.texture = Arc::new(t);
             s.draped = true;
         }
