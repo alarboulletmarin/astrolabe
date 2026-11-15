@@ -302,9 +302,12 @@ pub enum Highway {
     Unclassified,
     Service,
     Tertiary,
+    Cycleway,
+    Secondary,
+    Primary,
 }
 
-const HIGHWAYS: [(&[u8], Highway); 11] = [
+const HIGHWAYS: [(&[u8], Highway); 14] = [
     (b"path", Highway::Path),
     (b"footway", Highway::Footway),
     (b"track", Highway::Track),
@@ -316,6 +319,9 @@ const HIGHWAYS: [(&[u8], Highway); 11] = [
     (b"unclassified", Highway::Unclassified),
     (b"service", Highway::Service),
     (b"tertiary", Highway::Tertiary),
+    (b"cycleway", Highway::Cycleway),
+    (b"secondary", Highway::Secondary),
+    (b"primary", Highway::Primary),
 ];
 
 /// The surface, in four kinds.
@@ -378,7 +384,15 @@ impl Class {
             Surface::Paved => true,
             Surface::Unknown => matches!(
                 self.highway(),
-                Highway::Pedestrian | Highway::LivingStreet | Highway::Residential | Highway::Unclassified | Highway::Service | Highway::Tertiary
+                Highway::Pedestrian
+                    | Highway::LivingStreet
+                    | Highway::Residential
+                    | Highway::Unclassified
+                    | Highway::Service
+                    | Highway::Tertiary
+                    | Highway::Cycleway
+                    | Highway::Secondary
+                    | Highway::Primary
             ) || (self.highway() == Highway::Track && self.tracktype() == 1),
             _ => false,
         }
@@ -551,7 +565,11 @@ pub mod tests {
         assert!(c(&[("highway", "footway")]).is_some_and(|c| !c.is_trail()));
         assert!(c(&[("highway", "footway"), ("surface", "dirt")]).unwrap().is_trail());
         assert_eq!(c(&[("highway", "steps"), ("trail_visibility", "bad")]).unwrap().visibility(), 4);
-        assert_eq!(c(&[("highway", "cycleway")]), None);
+        // Main roads and cycleways link the rest, at a cost; motorways and trunks never.
+        assert!(c(&[("highway", "cycleway")]).unwrap().is_paved());
+        assert_eq!(c(&[("highway", "cycleway"), ("foot", "no")]), None);
+        assert_eq!(c(&[("highway", "primary")]).unwrap().highway(), Highway::Primary);
+        assert_eq!(c(&[("highway", "trunk")]), None);
         assert_eq!(c(&[("building", "yes")]), None);
     }
 

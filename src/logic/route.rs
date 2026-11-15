@@ -30,7 +30,9 @@ pub fn factor(c: Class, p: &Prefs) -> Option<f32> {
         Highway::Path | Highway::Footway | Highway::Bridleway | Highway::Pedestrian | Highway::LivingStreet | Highway::Track => 1.0,
         Highway::Steps => 1.6,
         Highway::Residential | Highway::Unclassified | Highway::Service => 1.15,
-        Highway::Tertiary => 1.4,
+        Highway::Tertiary | Highway::Cycleway => 1.4,
+        Highway::Secondary => 1.8,
+        Highway::Primary => 2.5,
     };
     f *= match c.sac_scale() {
         0..=2 => 1.0,

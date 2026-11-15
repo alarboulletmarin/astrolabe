@@ -11,7 +11,7 @@ use std::sync::{Mutex, mpsc};
 
 /// Raised when the filter, the classes, the contraction or the format change: an older graph is
 /// built again from the extract kept on disk.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const MAGIC: &[u8; 8] = b"ASTRLOOP";
 /// Edges are cut so that no straight stretch is longer: the altitude is read along it, and the
 /// snapping grid finds every edge from its points.

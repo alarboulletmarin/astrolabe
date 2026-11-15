@@ -15,8 +15,9 @@ Astrolabe then does the following:
    folder.
 2. It builds the network of paths one can run on from it: three passes over the extract. Paths,
    tracks, footways, bridleways, steps, pedestrian and living streets, residential, unclassified,
-   service and tertiary roads are kept. Ways that are private, forbidden, or closed to walkers are
-   left out.
+   service and tertiary roads are kept. So are cycleways and secondary and primary roads, which tie
+   the rest together. Ways that are private, forbidden, or closed to walkers are left out, and so
+   are motorways and trunk roads.
 3. It fetches the elevation tiles that cover the paths, kept in the cache folder, and reads the climb
    and descent of every stretch from them.
 
@@ -58,6 +59,8 @@ these costs:
 
 - trails or streets cost more depending on what you chose;
 - asphalt costs more if you avoid it;
+- secondary and primary roads cost twice as much or more: they are taken to link paths, not to
+  run along;
 - difficult or faint mountain paths cost more, and alpine scrambles are left out;
 - a stretch already taken costs four times more.
 
