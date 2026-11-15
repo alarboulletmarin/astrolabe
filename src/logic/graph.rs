@@ -623,6 +623,7 @@ pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &Atomi
     // Pass 3: the ways again, cut at junctions into pieces (node indices into `ids`). A way with
     // a node the extract lacks is left out.
     // ponytail: such a way is dropped whole; cutting it at the gap would keep the rest of it.
+    let industrial = Industrial::new(&rings);
     type Pieces = Vec<(u64, Vec<u32>, Vec<(u32, u32, Class)>)>;
     let (_, states) = pass(read, 3, threads, cancel, progress, Pieces::new, |out, seq, d| {
         let (mut flat, mut pieces) = (Vec::new(), Vec::new());
@@ -634,13 +635,21 @@ pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &Atomi
                     _ => continue 'way,
                 }
             }
-            let mut start = flat.len() as u32;
+            // Industrial or not, segment by segment (`ind[k]`: between `idx[k]` and `idx[k + 1]`).
+            // A piece is cut where that changes, so that edges stop at the area's border.
+            // ponytail: the test is on a segment's middle, so a segment crossing the border is
+            // wholly in or out; fine while way nodes are close (tens of metres), a cut at the
+            // border itself if long straight segments turn out to matter.
+            let ind: Vec<bool> = idx.windows(2).map(|s| industrial.segment(pos(s[0]), pos(s[1]))).collect();
+            let class = |k: usize| if ind[k] { w.class.with_industrial() } else { w.class };
+            let (mut start, mut first) = (flat.len() as u32, 0);
             flat.push(idx[0]);
-            for &i in &idx[1..] {
+            for (k, &i) in idx.iter().enumerate().skip(1) {
                 flat.push(i);
-                if junction[i as usize] {
-                    pieces.push((start, flat.len() as u32 - start, w.class));
+                if junction[i as usize] || ind[k] != ind[k - 1] {
+                    pieces.push((start, flat.len() as u32 - start, class(first)));
                     start = flat.len() as u32;
+                    first = k;
                     flat.push(i);
                 }
             }
@@ -788,7 +797,6 @@ pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &Atomi
         g.edges.push(Edge { a: rank(line[0]), b: rank(*line.last().unwrap()), len: len as f32, up: 0.0, down: 0.0, class: pieces[chain[0].0 as usize].2, geom });
     }
     g.pts_ele = vec![elevation::UNKNOWN; g.pts.len()];
-    g.mark_industrial(&rings);
     g.link();
     g.grid = Grid::new(&g);
     Ok(g)
@@ -807,13 +815,17 @@ fn inside(ring: &[[i32; 2]], p: [i32; 2]) -> bool {
     odd
 }
 
-impl Graph {
-    /// Marks every edge whose midpoint is inside one of the rings. Rings are indexed by the
-    /// cells (of `CELL`) their bounding box touches.
-    fn mark_industrial(&mut self, rings: &[Vec<[i32; 2]>]) {
-        use std::collections::HashMap;
+/// The industrial areas' rings, indexed by the cells (of `CELL`) their bounding box touches.
+struct Industrial<'a> {
+    rings: &'a [Vec<[i32; 2]>],
+    boxes: Vec<[i32; 4]>,
+    index: std::collections::HashMap<(i64, i64), Vec<u32>>,
+}
+
+impl<'a> Industrial<'a> {
+    fn new(rings: &'a [Vec<[i32; 2]>]) -> Self {
         let cell = |v: i32| (v as i64).div_euclid(CELL);
-        let mut index: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
+        let mut index: std::collections::HashMap<(i64, i64), Vec<u32>> = Default::default();
         let mut boxes = Vec::with_capacity(rings.len());
         for (i, r) in rings.iter().enumerate() {
             let (la0, la1) = (r.iter().map(|p| p[0]).min().unwrap(), r.iter().map(|p| p[0]).max().unwrap());
@@ -825,34 +837,22 @@ impl Graph {
                 }
             }
         }
-        if index.is_empty() {
-            return;
-        }
-        for e in 0..self.edges.len() {
-            let edge = self.edges[e];
-            let end = self.edges.get(e + 1).map_or(self.pts.len(), |n| n.geom as usize);
-            let line: Vec<[i32; 2]> = std::iter::once([self.lat[edge.a as usize], self.lon[edge.a as usize]])
-                .chain(self.pts[edge.geom as usize..end].iter().copied())
-                .chain(std::iter::once([self.lat[edge.b as usize], self.lon[edge.b as usize]]))
-                .collect();
-            // ponytail: the middle point of the line, not of its length; fine for edges of a few hundred metres.
-            let n = line.len();
-            let mid = if n % 2 == 1 {
-                line[n / 2]
-            } else {
-                let (a, b) = (line[n / 2 - 1], line[n / 2]);
-                [((a[0] as i64 + b[0] as i64) / 2) as i32, ((a[1] as i64 + b[1] as i64) / 2) as i32]
-            };
-            let Some(cands) = index.get(&(cell(mid[0]), cell(mid[1]))) else { continue };
-            if cands.iter().any(|&i| {
-                let b = boxes[i as usize];
-                mid[0] >= b[0] && mid[0] <= b[1] && mid[1] >= b[2] && mid[1] <= b[3] && inside(&rings[i as usize], mid)
-            }) {
-                self.edges[e].class = edge.class.with_industrial();
-            }
-        }
+        Industrial { rings, boxes, index }
     }
 
+    /// Whether the middle of the segment `a`-`b` is inside one of the rings.
+    fn segment(&self, a: [i32; 2], b: [i32; 2]) -> bool {
+        let mid = [((a[0] as i64 + b[0] as i64) / 2) as i32, ((a[1] as i64 + b[1] as i64) / 2) as i32];
+        let cell = |v: i32| (v as i64).div_euclid(CELL);
+        let Some(cands) = self.index.get(&(cell(mid[0]), cell(mid[1]))) else { return false };
+        cands.iter().any(|&i| {
+            let b = self.boxes[i as usize];
+            mid[0] >= b[0] && mid[0] <= b[1] && mid[1] >= b[2] && mid[1] <= b[3] && inside(&self.rings[i as usize], mid)
+        })
+    }
+}
+
+impl Graph {
     fn count_components(&mut self) {
         let mut sizes = vec![0u32; self.comp.iter().max().map_or(0, |m| *m as usize + 1)];
         for c in &self.comp {
@@ -1070,20 +1070,54 @@ pub mod tests {
         let g = build_from(&extract(&nodes, &ways)).unwrap();
         // 3-4 (unlit), 3-6, and the rest of the square contracted into one edge from 3 to 4.
         assert_eq!(g.edges.len(), 3);
+        // The 606 m rest of the square lies below the area (its segments are outside, though both
+        // its ends are on the border's inside): not marked. The two short edges are inside.
         for e in &g.edges {
-            // The contracted square (over 500 m) swings down to 43.7: its middle is outside even
-            // though both ends are inside. The two short edges are inside.
             assert_eq!(e.class.industrial(), e.len < 500.0, "{e:?}");
         }
         assert!(g.edges.iter().any(|e| e.class.lit() == 2 && e.class.industrial()));
         assert_eq!(g.edges.iter().filter(|e| e.class.industrial()).count(), 2);
-        // Other landuse, or a ring left open: nothing marked.
+        // Other landuse: nothing marked.
         let mut forest = ways.clone();
         forest[5] = ring("forest");
         assert!(build_from(&extract(&nodes, &forest)).unwrap().edges.iter().all(|e| !e.class.industrial()));
         // The bits survive the file.
         let back = Graph::decode(&g.encode()).unwrap();
         assert_eq!(back.edges.iter().map(|e| e.class).collect::<Vec<_>>(), g.edges.iter().map(|e| e.class).collect::<Vec<_>>());
+    }
+
+    /// One street of `n + 1` nodes, 81 m apart along a parallel, and a ring over the nodes
+    /// `from..=to` (in steps, widened by a quarter step); `open`: its last node is left out.
+    fn street_and_ring(n: i64, from: f64, to: f64, open: bool) -> Graph {
+        let d = 0.001;
+        let mut nodes: Vec<(i64, f64, f64)> = (0..=n).map(|k| (k + 1, 43.7, 7.25 + k as f64 * d)).collect();
+        let (x0, x1) = (7.25 + (from - 0.25) * d, 7.25 + (to + 0.25) * d);
+        nodes.extend([(20, 43.699, x0), (21, 43.701, x0), (22, 43.701, x1), (23, 43.699, x1)]);
+        let refs = if open { vec![20, 21, 22, 23] } else { vec![20, 21, 22, 23, 20] };
+        let ways = [
+            (100, vec![("highway", "residential")], (1..=n + 1).collect::<Vec<_>>()),
+            (300, vec![("landuse", "industrial")], refs),
+        ];
+        build_from(&extract(&nodes, &ways)).unwrap()
+    }
+
+    #[test]
+    fn cuts_edges_at_the_border_of_an_industrial_area() {
+        // Eight segments (650 m) wholly inside: one edge, marked even though it is long.
+        let g = street_and_ring(8, 0.0, 8.0, false);
+        assert_eq!((g.edges.len(), g.edges[0].class.industrial()), (1, true));
+        assert!(g.edges[0].len > 600.0, "{}", g.edges[0].len);
+        // Nodes 3 to 6 inside: the street is cut where it enters and where it leaves.
+        let g = street_and_ring(9, 3.0, 6.0, false);
+        let mut e: Vec<_> = g.edges.iter().map(|e| (e.len.round(), e.class.industrial())).collect();
+        e.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(e.iter().filter(|e| e.1).count(), 1, "{e:?}");
+        assert_eq!(e.iter().map(|e| e.0).sum::<f32>().round(), 723.0, "{e:?}");
+        let inside = g.edges.iter().find(|e| e.class.industrial()).unwrap();
+        assert!((inside.len - 241.0).abs() < 2.0, "{}", inside.len);
+        assert_eq!(g.edges.len(), 3);
+        // A ring left open is no area.
+        assert!(street_and_ring(8, 0.0, 8.0, true).edges.iter().all(|e| !e.class.industrial()));
     }
 
     #[test]
