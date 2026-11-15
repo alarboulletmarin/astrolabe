@@ -29,6 +29,31 @@ mod three;
 /// The height of the band under the map that holds the profile and the climbs.
 const BAND: f64 = 132.0;
 
+/// A setting that is on or off: a box, ticked with the accent, and what it says.
+fn check(id: &'static str, label: &'static str, on: bool, t: crate::ui::theme::Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .cursor_pointer()
+        .child(
+            div()
+                .size(px(15.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.))
+                .bg(if on { blend(t.accent, t.bg, 0.12) } else { t.bg })
+                .border_1()
+                .border_color(if on { t.accent } else { t.border })
+                .when(on, |d| d.child(icon(IconName::Check, t.accent, 11.))),
+        )
+        .child(div().text_size(px(13.)).text_color(t.text).child(label))
+}
+
 /// A loop's ground as a bar: asphalt, other ways, trails; the shares in its tooltip.
 fn surfaces(l: &Loop, i: usize, t: crate::ui::theme::Theme) -> Stateful<Div> {
     let (trail, paved) = (l.trail.clamp(0.0, 1.0), l.paved.clamp(0.0, 1.0 - l.trail.clamp(0.0, 1.0)));
@@ -221,7 +246,7 @@ impl LoopsView {
         let min_km = input(get("loops.min", "10"), window, cx);
         let max_km = input(get("loops.max", "15"), window, cx);
         let climb = cx.new(|cx| InputState::new(window, cx).placeholder(tr("any", "libre")).default_value(get("loops.climb", "")));
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("Name of the route", "Nom du parcours")));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("Name (optional)", "Nom (facultatif)")));
         let mut subs = vec![cx.observe(&data, |this, data, cx| {
             this.snap = data.read(cx).snapshot();
             cx.notify();
@@ -938,9 +963,9 @@ impl Render for LoopsView {
         let start = self.start;
         let pins = self.pins.clone();
         let zones = self.zones.clone();
-        let bad = t.bad();
         let points = self.points(cx);
         let pinned: Vec<bool> = chosen.map(|l| l.pinned.clone()).unwrap_or_default();
+        let show_points = self.hover.is_some() || self.drag.is_some() || self.draft.is_some();
         // Being moved: straight lines from point to point, until routed.
         let draft = self.draft.clone().zip(start).map(|(d, s)| std::iter::once([s.0, s.1]).chain(d).chain(std::iter::once([s.0, s.1])).collect::<Vec<_>>());
         let hover = chosen.zip(self.hover).and_then(|(l, i)| l.line.get(i).copied());
@@ -968,6 +993,28 @@ impl Render for LoopsView {
                     let (x, y) = view.screen(p[0], p[1], w, h);
                     point(b.origin.x + px(x as f32), b.origin.y + px(y as f32))
                 };
+                // Zones under the loops: a faint disc with a dashed edge, its centre, and the handle
+                // that sizes it.
+                for z in &zones {
+                    let (c, e) = (at([z.lat, z.lon]), at(east_of(z.lat, z.lon, z.radius)));
+                    let r = (e.x - c.x).max(px(2.));
+                    window.paint_quad(fill(Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)), ink.opacity(0.07)).corner_radii(r));
+                    let ring: Vec<Point<Pixels>> = (0..=72).map(|k| {
+                        let a = k as f32 / 72.0 * std::f32::consts::TAU;
+                        point(c.x + r * a.cos(), c.y + r * a.sin())
+                    }).collect();
+                    let mut path = PathBuilder::stroke(px(1.5)).dash_array(&[px(6.), px(4.)]);
+                    path.add_polygon(&ring, false);
+                    if let Ok(p) = path.build() {
+                        window.paint_path(p, ink.opacity(0.55));
+                    }
+                    let disc = |p: Point<Pixels>, r: f32, col: Hsla, window: &mut Window| {
+                        window.paint_quad(fill(Bounds::new(point(p.x - px(r), p.y - px(r)), size(px(2. * r), px(2. * r))), col).corner_radii(px(r)));
+                    };
+                    disc(c, 3.0, ink.opacity(0.7), window);
+                    disc(e, 5.0, bg, window);
+                    disc(e, 3.5, ink.opacity(0.7), window);
+                }
                 let stroke = |line: &[[f64; 2]], width: f32, colour: Hsla, window: &mut Window| {
                     if line.len() < 2 {
                         return;
@@ -1048,15 +1095,6 @@ impl Render for LoopsView {
                 let dot = |p: Point<Pixels>, r: f32, c: Hsla, window: &mut Window| {
                     window.paint_quad(fill(Bounds::new(point(p.x - px(r), p.y - px(r)), size(px(2. * r), px(2. * r))), c).corner_radii(px(r)));
                 };
-                // Zones under the loops: a tinted disc, its edge, and the handle that sizes it.
-                for z in &zones {
-                    let (c, e) = (at([z.lat, z.lon]), at(east_of(z.lat, z.lon, z.radius)));
-                    let r = (e.x - c.x).max(px(2.));
-                    window.paint_quad(fill(Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)), bad.opacity(0.12)).corner_radii(r).border_widths(px(1.5)).border_color(bad.opacity(0.7)));
-                    dot(c, 3.0, bad, window);
-                    dot(e, 5.0, bg, window);
-                    dot(e, 3.5, bad, window);
-                }
                 if let Some(d) = &draft {
                     let mut path = PathBuilder::stroke(px(1.5));
                     path.move_to(at(d[0]));
@@ -1065,17 +1103,20 @@ impl Render for LoopsView {
                         window.paint_path(p, ink.opacity(0.6));
                     }
                 }
-                // The loop's points: white, ringed; those asked for, filled with the accent.
+                // Three marks: the start (ink), the points asked for (accent), and the points that
+                // shape the loop, small rings, only while the pointer is on it.
                 for (i, p) in points.iter().enumerate() {
-                    dot(at(*p), 6.0, ink, window);
-                    dot(at(*p), 4.5, if pinned.get(i) == Some(&true) && draft.is_none() { accent } else { bg }, window);
+                    if pinned.get(i) == Some(&true) && draft.is_none() {
+                        dot(at(*p), 6.5, bg, window);
+                        dot(at(*p), 5.0, accent, window);
+                    } else if show_points {
+                        dot(at(*p), 4.5, ink, window);
+                        dot(at(*p), 3.0, bg, window);
+                    }
                 }
                 for p in &pins {
-                    let q = at([p.0, p.1]);
-                    let r = px(6.);
-                    window.paint_quad(fill(Bounds::new(point(q.x - r, q.y - r), size(r * 2., r * 2.)), bg).corner_radii(px(2.)));
-                    let r = px(4.5);
-                    window.paint_quad(fill(Bounds::new(point(q.x - r, q.y - r), size(r * 2., r * 2.)), accent).corner_radii(px(1.5)));
+                    dot(at([p.0, p.1]), 6.5, bg, window);
+                    dot(at([p.0, p.1]), 5.0, accent, window);
                 }
                 if let Some((lat, lon)) = start {
                     dot(at([lat, lon]), 8.0, bg, window);
@@ -1111,12 +1152,27 @@ impl Render for LoopsView {
                     .child(num(letter(i).to_string()).text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(if on { t.accent } else { t.soft })),
             )
         });
+        // Before a start: one's usual starts, with how many outings start there.
+        let usual = if self.start.is_none() { self.usual_starts(cx) } else { Vec::new() };
+        let usual = usual.into_iter().map(|(p, n)| {
+            let (x, y) = view.screen(p[0], p[1], w, h);
+            div()
+                .absolute()
+                .left(px(x as f32 - 4.))
+                .top(px(y as f32 - 4.))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .child(div().size(px(8.)).rounded(px(4.)).bg(t.text).border_1().border_color(t.bg))
+                .child(div().px(px(5.)).rounded(px(4.)).bg(t.bg.opacity(0.9)).shadow_sm().child(num(n.to_string()).text_size(px(11.)).text_color(t.soft)))
+        });
         let overlay = div()
             .absolute()
             .size_full()
             .children(shade)
             .child(drawing)
             .children(letters)
+            .children(usual)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab(e, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.move_to(e, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, cx| this.drop_at(e, cx)))
@@ -1130,12 +1186,35 @@ impl Render for LoopsView {
         };
         let three = chosen.is_some() && self.three_d;
         let band = (!found.is_empty()).then(|| self.band(&found, cx));
+        // What a click does now, said where one clicks.
+        let ready = self.data.read(cx).loops.graph.is_some();
+        let hint = (ready && !three).then(|| {
+            let text = if self.placing_zone {
+                tr("Click on the map to place the zone to avoid", "Clique sur la carte pour poser la zone à éviter")
+            } else if self.start.is_none() {
+                tr("Click on the map to set the start", "Clique sur la carte pour poser le départ")
+            } else if found.is_empty() {
+                tr("Click: pass by here · drag the start to move it", "Clic : passer par ici · glisser le départ pour le déplacer")
+            } else {
+                tr("Click: pass by here · drag a point or the line: move · right click: take away", "Clic : passer par ici · glisser un point ou le tracé : déplacer · clic droit : retirer")
+            };
+            div()
+                .id("loops-hint")
+                .absolute()
+                .left(px(PANEL as f32 + 28.0))
+                .right(px(14.))
+                .bottom(px(if found.is_empty() { 26.0 } else { (BAND + 24.0 + 10.0) as f32 }))
+                .flex()
+                .justify_center()
+                .child(div().px(px(8.)).py(px(3.)).rounded(px(6.)).bg(t.bg.opacity(0.9)).shadow_sm().text_size(px(12.)).text_color(t.soft).child(text))
+        });
         div()
             .size_full()
             .relative()
             .child(ground)
             .child(self.panel(&found, cx))
             .children(band)
+            .children(hint)
             .child(
                 div()
                     .absolute()
@@ -1145,7 +1224,7 @@ impl Render for LoopsView {
                     .gap(px(6.))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .when(!three, |d| {
-                        d.child(div().bg(t.bg).rounded(px(8.)).shadow_sm().child(segmented("loops-relief", vec![(tr("Relief", "Relief").into(), self.show_relief), (tr("Flat", "Plate").into(), !self.show_relief)], t, cx, |this: &mut LoopsView, i, _, _| {
+                        d.child(div().bg(t.bg).rounded(px(8.)).shadow_sm().child(segmented("loops-relief", vec![(tr("Shading", "Ombrage").into(), self.show_relief), (tr("None", "Sans").into(), !self.show_relief)], t, cx, |this: &mut LoopsView, i, _, _| {
                             this.show_relief = i == 0;
                             this.relief.drawn = None;
                         })))
@@ -1157,7 +1236,7 @@ impl Render for LoopsView {
                         })))
                     }),
             )
-            .child(
+            .when(chosen.is_some(), |d| d.child(
                 div()
                     .absolute()
                     .top(px(14.0f32.max(crate::ui::top() - 14.0) + 80.0))
@@ -1178,12 +1257,11 @@ impl Render for LoopsView {
                             this.data.update(cx, |d, cx| d.set_setting("loops.slope", v.to_string(), cx));
                         },
                     )))
-                    .when(self.show_slope && chosen.is_some(), |d| d.child(slope_legend(&t))),
-            )
+                    .when(self.show_slope, |d| d.child(slope_legend(&t))),
+            ))
     }
 }
 
-/// The colours of the grade classes (`slope::class`): the accent, from pale to dark.
 /// The colours of the grade: the flat in a neutral grey that holds on any ground, then the
 /// accent, deeper as it steepens.
 fn slope_ramp(t: &crate::ui::theme::Theme) -> [Hsla; 5] {
@@ -1249,24 +1327,48 @@ impl LoopsView {
             } else if let Some(e) = plan_error {
                 body = body.child(small(e, t.bad()));
             }
-            if self.start.is_none() {
-                body = body.child(small(tr("Click on the map to set the start.", "Clique sur la carte pour poser le départ.").into(), t.soft));
+            let has_start = self.start.is_some();
+            if let Some(start) = self.start {
+                if self.zones.iter().any(|z| crate::logic::fit::metres([z.lat, z.lon], [start.0, start.1]) < z.radius) {
+                    body = body.child(small(tr("The start is in a zone to avoid: the loops leave it as soon as they can.", "Le départ est dans une zone à éviter : les boucles en sortent au plus vite.").into(), t.soft));
+                }
             } else {
-                body = body.child(small(
-                    tr(
-                        "Click: a point to pass by. Drag a point or the line to change the loop; right click: take a point away.",
-                        "Clic : un point de passage. Glisse un point ou le tracé pour changer la boucle ; clic droit : retirer un point.",
-                    )
-                    .into(),
-                    t.soft,
-                ));
-                let n = self.pins.len();
+                body = body.child(self.usual(cx));
+            }
+            // The edits: a new start, the points away, and undo and redo, which can bring back a
+            // start taken away.
+            let n = self.pins.len();
+            let (can_undo, can_redo) = (!self.undo.is_empty(), !self.redo.is_empty());
+            let key = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+            if has_start || can_undo || can_redo {
                 body = body.child(
                     div()
                         .flex()
                         .flex_wrap()
                         .gap(px(8.))
-                        .child(button("loops-clear", tr("New start", "Nouveau départ"), false, t).debug_selector(|| "loops-clear".into()).on_click(cx.listener(|this, _, _, cx| this.clear(cx))))
+                        .when(has_start, |d| {
+                            d.child(button("loops-clear", tr("New start", "Nouveau départ"), false, t).debug_selector(|| "loops-clear".into()).on_click(cx.listener(|this, _, _, cx| this.clear(cx))))
+                        })
+                        .when(can_undo, |d| {
+                            let tip = format!("{key}+Z");
+                            d.child(
+                                button("loops-undo", tr("Undo", "Annuler"), false, t)
+                                    .debug_selector(|| "loops-undo".into())
+                                    .tooltip_show_delay(crate::ui::TIP_DELAY)
+                                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                                    .on_click(cx.listener(|this, _, _, cx| this.undo(true, cx))),
+                            )
+                        })
+                        .when(can_redo, |d| {
+                            let tip = format!("{key}+{}+Z", tr("Shift", "Maj"));
+                            d.child(
+                                button("loops-redo", tr("Redo", "Rétablir"), false, t)
+                                    .debug_selector(|| "loops-redo".into())
+                                    .tooltip_show_delay(crate::ui::TIP_DELAY)
+                                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                                    .on_click(cx.listener(|this, _, _, cx| this.undo(false, cx))),
+                            )
+                        })
                         .when(n > 0, |d| {
                             d.child(
                                 button(
@@ -1421,7 +1523,7 @@ impl LoopsView {
         });
         let trail = segmented(
             "loops-trail",
-            vec![(tr("Streets", "Routes").into(), self.trail == 0), (tr("Either", "Égal").into(), self.trail == 1), (tr("Trails", "Sentiers").into(), self.trail == 2)],
+            vec![(tr("Streets", "Routes").into(), self.trail == 0), (tr("Both", "Les deux").into(), self.trail == 1), (tr("Trails", "Sentiers").into(), self.trail == 2)],
             t,
             cx,
             |this: &mut LoopsView, i, _, cx| {
@@ -1429,14 +1531,14 @@ impl LoopsView {
                 this.settle(cx);
             },
         );
-        let paved = segmented("loops-paved", vec![(tr("Asphalt allowed", "Bitume permis").into(), !self.avoid_paved), (tr("Avoid asphalt", "Éviter le bitume").into(), self.avoid_paved)], t, cx, |this: &mut LoopsView, i, _, cx| {
-            this.avoid_paved = i == 1;
+        let paved = check("loops-paved", tr("Avoid asphalt", "Éviter le bitume"), self.avoid_paved, t).on_click(cx.listener(|this, _, _, cx| {
+            this.avoid_paved = !this.avoid_paved;
             this.settle(cx);
-        });
+        }));
         let field = |i: &Entity<InputState>| div().w(px(80.)).child(Input::new(i).small());
         let mine = segmented(
             "loops-mine",
-            vec![(tr("My ways", "Mes chemins").into(), self.mine > 0), (tr("Either", "Égal").into(), self.mine == 0), (tr("Elsewhere", "Ailleurs").into(), self.mine < 0)],
+            vec![(tr("My ways", "Mes chemins").into(), self.mine > 0), (tr("Any", "Peu importe").into(), self.mine == 0), (tr("Elsewhere", "Ailleurs").into(), self.mine < 0)],
             t,
             cx,
             |this: &mut LoopsView, i, _, cx| {
@@ -1444,20 +1546,14 @@ impl LoopsView {
                 this.settle(cx);
             },
         );
-        let industrial = segmented(
-            "loops-industrial",
-            vec![(tr("Industry allowed", "Industrie permise").into(), !self.avoid_industrial), (tr("Avoid industry", "Éviter l'industrie").into(), self.avoid_industrial)],
-            t,
-            cx,
-            |this: &mut LoopsView, i, _, cx| {
-                this.avoid_industrial = i == 1;
-                this.settle(cx);
-            },
-        );
-        let lit = segmented("loops-lit", vec![(tr("Any light", "Éclairage égal").into(), !self.lit), (tr("Lit ways", "Voies éclairées").into(), self.lit)], t, cx, |this: &mut LoopsView, i, _, cx| {
-            this.lit = i == 1;
+        let industrial = check("loops-industrial", tr("Industrial areas", "Zones industrielles"), self.avoid_industrial, t).on_click(cx.listener(|this, _, _, cx| {
+            this.avoid_industrial = !this.avoid_industrial;
             this.settle(cx);
-        });
+        }));
+        let lit = check("loops-lit", tr("Unlit ways", "Voies non éclairées"), self.lit, t).on_click(cx.listener(|this, _, _, cx| {
+            this.lit = !this.lit;
+            this.settle(cx);
+        }));
         let zones = self.zones.len();
         let summary = match self.avoided() {
             a if a.is_empty() => tr("nothing", "rien").to_string(),
@@ -1618,8 +1714,38 @@ impl LoopsView {
                 .gap(px(8.))
                 .child(button("loops-again", tr("Other loops", "Autres boucles"), false, t).on_click(cx.listener(|this, _, _, cx| this.propose(true, cx))))
                 .child(button("loops-reverse", tr("Other way round", "Sens inverse"), false, t).debug_selector(|| "loops-reverse".into()).on_click(cx.listener(|this, _, _, cx| this.reverse(cx))))
-                .child(button("loops-export", tr("Save as GPX", "Enregistrer en GPX"), false, t).on_click(cx.listener(|this, _, _, cx| this.export(cx)))),
+                .child(button("loops-export", tr("Export as GPX", "Exporter en GPX"), false, t).on_click(cx.listener(|this, _, _, cx| this.export(cx)))),
         )
+    }
+
+    /// Where one's outings start most often in the region, the three busiest.
+    fn usual_starts(&self, cx: &App) -> Vec<([f64; 2], usize)> {
+        let d = self.data.read(cx);
+        let region = d.loops.region;
+        crate::logic::loops::usual_starts(d.derived.values().map(|x| x.line.as_slice()), 12).into_iter().filter(|(p, _)| region.holds(p[0], p[1])).take(3).collect()
+    }
+
+    /// Before a start: where one's outings start most often, to start from there in a click.
+    fn usual(&mut self, cx: &mut Context<Self>) -> Div {
+        let t = self.snap.theme;
+        let starts = self.usual_starts(cx);
+        let hint = div().text_size(px(12.)).text_color(t.soft);
+        if starts.is_empty() {
+            return div().child(hint.child(tr("Click on the map to set the start.", "Clique sur la carte pour poser le départ.")));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(hint.child(tr("Click on the map to set the start, or start where you usually do:", "Clique sur la carte pour poser le départ, ou pars d'où tu pars d'habitude :")))
+            .child(div().flex().flex_wrap().gap(px(8.)).children(starts.into_iter().enumerate().map(|(i, (p, n))| {
+                let label = trf(format!("{n} outing{} from here", if n > 1 { "s" } else { "" }), format!("{n} sortie{} d'ici", if n > 1 { "s" } else { "" }));
+                button(("loops-usual", i), label, false, t).debug_selector(move || format!("loops-usual-{i}")).on_click(cx.listener(move |this, _, _, cx| {
+                    this.remember(cx);
+                    this.start = Some((p[0], p[1]));
+                    this.propose(false, cx);
+                }))
+            })))
     }
 
     /// The name field and the buttons that keep the chosen loop.
@@ -1629,16 +1755,17 @@ impl LoopsView {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .child(Input::new(&self.name).small())
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap(px(8.))
-                    .child(button("loops-keep", tr("Keep", "Garder"), true, t).debug_selector(|| "loops-keep".into()).on_click(cx.listener(|this, _, _, cx| this.keep(false, cx))))
-                    .when(self.opened.is_some(), |d| {
-                        d.child(button("loops-copy", tr("Keep a copy", "Garder une copie"), false, t).debug_selector(|| "loops-copy".into()).on_click(cx.listener(|this, _, _, cx| this.keep(true, cx))))
-                    }),
+                    .child(div().flex_1().min_w(px(0.)).child(Input::new(&self.name).small()))
+                    .child(button("loops-keep", tr("Keep", "Garder"), true, t).debug_selector(|| "loops-keep".into()).on_click(cx.listener(|this, _, _, cx| this.keep(false, cx)))),
             )
+            .when(self.opened.is_some(), |d| {
+                d.child(div().child(button("loops-copy", tr("Keep a copy", "Garder une copie"), false, t).debug_selector(|| "loops-copy".into()).on_click(cx.listener(|this, _, _, cx| this.keep(true, cx)))))
+            })
     }
 
     /// The routes kept: a click opens one, the cross takes it away.

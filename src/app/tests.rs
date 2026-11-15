@@ -431,6 +431,45 @@ fn a_loop_is_chosen_on_the_map(cx: &mut TestAppContext) {
     assert_eq!(shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[k].line.clone()), found[k].line);
 }
 
+/// Before a start, the spots one's outings start from are offered; one click starts there.
+/// Undo and redo have their buttons; a setting that is on or off is a box to tick.
+#[gpui::test]
+fn the_loop_starts_where_one_usually_does(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    cx.update(bind_keys);
+    cx.update(init_fonts);
+    let home = [43.70f32, 7.25 + (1000.0 / (111_195.0 * 0.7230)) as f32];
+    let acts: Vec<_> = (0..3).map(|i| outing(1000 - i, (25 - i) as u32, "running")).collect();
+    let derived = acts.iter().map(|a| (a.activity_id, crate::logic::fit::Derived { line: vec![home, [43.71, 7.26]], ..Default::default() })).collect();
+    let (shell, cx) = cx.add_window_view(move |window, cx| {
+        let data = cx.new(|_| Data::with_tracks(Theme::for_appearance(window.appearance()), acts, derived));
+        Shell::with_data(data, window, cx)
+    });
+    cx.run_until_parked();
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| d.loops.graph = Some(std::sync::Arc::new(crate::logic::graph::tests::town()))));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| l.type_km("6", window, cx)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("loops-undo").is_none() && cx.debug_bounds("loops-usual-1").is_none());
+    click(cx, "loops-usual-0");
+    let start = shell.read_with(cx, |s, cx| s.loops.read(cx).start()).expect("a start");
+    assert!(crate::logic::fit::metres([start.0, start.1], [home[0] as f64, home[1] as f64]) < 1.0);
+    assert!(!shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.is_empty()));
+    // Undone by its button, done again by the other.
+    click(cx, "loops-undo");
+    assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()).is_none());
+    click(cx, "loops-redo");
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()), Some(start));
+    // A box ticked: the setting is kept once the pause is over.
+    click(cx, "loops-settings");
+    click(cx, "loops-paved");
+    cx.executor().advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.data.read(cx).settings.get("loops.paved").cloned()), Some("1".into()));
+}
+
 /// The chosen loop in 3D: the relief awaited, then the ground; a drag turns it, shift-drag moves
 /// it, the wheel comes closer, the pointer over the line shows where on the profile; 2D again.
 #[gpui::test]

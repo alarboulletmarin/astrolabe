@@ -130,7 +130,7 @@ pub fn segmented<V: 'static>(
 }
 
 /// Bref's button: 1 px border, radius 6, 13 px. `primary` fills it with the accent.
-pub fn button(id: &'static str, label: &'static str, primary: bool, t: Theme) -> Stateful<Div> {
+pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, primary: bool, t: Theme) -> Stateful<Div> {
     div()
         .id(id)
         .flex_none()
@@ -148,7 +148,7 @@ pub fn button(id: &'static str, label: &'static str, primary: bool, t: Theme) ->
                 .hover(|d| d.bg(blend(t.text, t.accent, 0.12)))
         })
         .when(!primary, |d| d.border_color(t.border).text_color(t.text).hover(|d| d.bg(t.panel)))
-        .child(label)
+        .child(label.into())
 }
 
 /// Side padding of a page: the content takes the whole width, with Bref's margins.

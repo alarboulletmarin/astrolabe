@@ -137,6 +137,23 @@ impl Loop {
     }
 }
 
+// ponytail: fixed 200 m cells, a spot on a cell edge splits in two; cluster if it shows.
+/// Where one's outings start most often: the `n` busiest spots (about 200 m across), each with
+/// its mean position (lat, lon) and how many outings start there, busiest first.
+pub fn usual_starts<'a>(lines: impl Iterator<Item = &'a [[f32; 2]]>, n: usize) -> Vec<([f64; 2], usize)> {
+    const CELL: f64 = 0.002;
+    let mut cells: std::collections::HashMap<(i32, i32), (f64, f64, usize)> = std::collections::HashMap::new();
+    for p in lines.filter_map(|l| l.first()).filter(|p| p[0].is_finite() && p[1].is_finite()) {
+        let (lat, lon) = (p[0] as f64, p[1] as f64);
+        let c = cells.entry(((lat / CELL).floor() as i32, (lon / CELL).floor() as i32)).or_default();
+        (c.0, c.1, c.2) = (c.0 + lat, c.1 + lon, c.2 + 1);
+    }
+    let mut out: Vec<([f64; 2], usize, (i32, i32))> = cells.into_iter().map(|(k, (a, b, m))| ([a / m as f64, b / m as f64], m, k)).collect();
+    // Busiest first; ties in a fixed order.
+    out.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
+    out.into_iter().take(n).map(|(p, m, _)| (p, m)).collect()
+}
+
 /// A loop kept under a name, with what made it: it opens again as it was, and can be changed.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Route {
@@ -602,6 +619,28 @@ mod tests {
     fn req(target: Target, seed: u64) -> Request {
         // On the south street, 100 m from the corner.
         Request { lat: 43.70, lon: 7.25 + 100.0 / (111_195.0 * 0.7230), target, prefs: Prefs::default(), climb: None, seed, count: 3, via: Vec::new(), places: Places::default() }
+    }
+
+    #[test]
+    fn usual_starts_are_the_busiest_spots() {
+        assert!(usual_starts(std::iter::empty(), 3).is_empty());
+        let home = [43.7001f32, 7.2501];
+        let lines: Vec<Vec<[f32; 2]>> = vec![
+            vec![home, [43.71, 7.26]],
+            vec![[43.7003, 7.2502]],
+            vec![[43.7002, 7.2503]],
+            vec![[44.0, 7.0]],
+            vec![[44.0001, 7.0001], [44.1, 7.1]],
+            vec![[45.0, 6.0]],
+            vec![],
+            vec![[f32::NAN, 7.0]],
+        ];
+        let s = usual_starts(lines.iter().map(Vec::as_slice), 2);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].1, 3);
+        assert!((s[0].0[0] - 43.7002).abs() < 1e-4 && (s[0].0[1] - 7.2502).abs() < 1e-4, "{s:?}");
+        assert_eq!(s[1].1, 2);
+        assert_eq!(usual_starts(lines.iter().map(Vec::as_slice), 10).len(), 3);
     }
 
     #[test]
