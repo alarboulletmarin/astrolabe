@@ -25,7 +25,7 @@ use std::time::Duration;
 /// Height of the strip at the top of the window that moves it; the pages start lower.
 const HEADER: f32 = 36.0;
 
-actions!(astrolabe, [SelectNext, SelectPrev, OpenSelected, Back, GoBack, GoForward, Older, Newer, CalPrev, CalNext, CalToday, OpenLoops, LoopNext, LoopPrev, LoopsAgain, LoopExport, LoopUndo, LoopRedo]);
+actions!(astrolabe, [SelectNext, SelectPrev, OpenSelected, Back, GoBack, GoForward, Older, Newer, CalPrev, CalNext, CalToday, OpenLoops, LoopNext, LoopPrev, LoopsAgain, LoopExport, LoopUndo, LoopRedo, LoopFly]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -46,6 +46,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", LoopPrev, Some("Loops")),
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-n" } else { "ctrl-n" }, LoopsAgain, Some("Loops")),
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-s" } else { "ctrl-s" }, LoopExport, Some("Loops")),
+        // Pauses a flight over the loop; without one the key goes on to whoever wants it.
+        KeyBinding::new("space", LoopFly, Some("Loops")),
         // In a field, the field's own undo comes first: its context is nearer.
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-z" } else { "ctrl-z" }, LoopUndo, Some("Loops")),
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-shift-z" } else { "ctrl-shift-z" }, LoopRedo, Some("Loops")),
@@ -439,6 +441,11 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &LoopRedo, _, cx| this.loops.update(cx, |l, cx| l.undo(false, cx))))
             .on_action(cx.listener(|this, _: &LoopsAgain, _, cx| this.loops.update(cx, |l, cx| l.propose(true, cx))))
             .on_action(cx.listener(|this, _: &LoopExport, _, cx| this.loops.update(cx, |l, cx| l.export(cx))))
+            .on_action(cx.listener(|this, _: &LoopFly, _, cx| {
+                if !this.loops.update(cx, |l, cx| l.fly_pause(cx)) {
+                    cx.propagate();
+                }
+            }))
             .on_action(cx.listener(|this, _: &Older, _, cx| this.activity.update(cx, |a, cx| a.step(true, cx))))
             .on_action(cx.listener(|this, _: &Newer, _, cx| this.activity.update(cx, |a, cx| a.step(false, cx))))
             .child(self.rail(cx))

@@ -452,7 +452,7 @@ pub type Reader<'a> = dyn FnMut(u32, &mut dyn FnMut(&str, Vec<u8>) -> Result<(),
 
 /// One pass over the extract: blobs are inflated and decoded by `threads` workers, each with its
 /// own state. Also returns the file's header.
-fn pass<S: Send>(
+pub(crate) fn pass<S: Send>(
     read: &mut Reader,
     n: u32,
     threads: usize,
@@ -517,7 +517,7 @@ fn pass<S: Send>(
 
 /// The index of `id` in the sorted `ids`, searching forward from `cursor` (where the last one was
 /// found): positions come sorted within a block, so most searches are a step or two.
-fn gallop(ids: &[i64], cursor: &mut usize, id: i64) -> Option<usize> {
+pub(crate) fn gallop(ids: &[i64], cursor: &mut usize, id: i64) -> Option<usize> {
     let len = ids.len();
     if *cursor >= len || ids[*cursor] > id {
         *cursor = 0;

@@ -182,10 +182,20 @@ pub struct Block {
     /// The node refs of closed ways tagged as an industrial area (see `is_industrial_area`).
     // ponytail: multipolygon relations are not read, so an area drawn as one is missed.
     pub areas: Vec<Vec<i64>>,
+    /// The node refs of closed ways tagged as a building, with its height in metres (see
+    /// `building_height`); read only when asked for (`block_of`).
+    // ponytail: multipolygon relations are not read, so a building with a courtyard drawn as
+    // one is missed; `building:part` is not read either: one height per footprint.
+    pub buildings: Vec<(Vec<i64>, f32)>,
 }
 
 /// Reads an `OSMData` block (inflated). Positions only if `nodes`, ways only if `ways`.
 pub fn block(b: &[u8], nodes: bool, ways: bool) -> Result<Block, String> {
+    block_of(b, nodes, ways, false)
+}
+
+/// As `block`, and the buildings if `buildings`.
+pub fn block_of(b: &[u8], nodes: bool, ways: bool, buildings: bool) -> Result<Block, String> {
     let mut strings: Vec<&[u8]> = Vec::new();
     let mut groups = Vec::new();
     let (mut gran, mut lat_off, mut lon_off) = (100i64, 0i64, 0i64);
@@ -251,7 +261,7 @@ pub fn block(b: &[u8], nodes: bool, ways: bool) -> Result<Block, String> {
                         out.nodes.push((id, coord(lat_off, lat), coord(lon_off, lon)));
                     }
                 }
-                (3, 2) if ways => {
+                (3, 2) if ways || buildings => {
                     let (mut id, mut keys, mut vals, mut refs) = (0i64, Vec::new(), Vec::new(), Vec::new());
                     let mut w = Pb::new(p.bytes()?);
                     while w.more() {
@@ -277,10 +287,18 @@ pub fn block(b: &[u8], nodes: bool, ways: bool) -> Result<Block, String> {
                     for (k, v) in keys.iter().zip(&vals) {
                         tags.push((text(*k)?, text(*v)?));
                     }
-                    if refs.len() >= 4 && refs.first() == refs.last() && is_industrial_area(&tags) {
+                    let closed = refs.len() >= 4 && refs.first() == refs.last();
+                    if buildings
+                        && closed
+                        && let Some(h) = building_height(&tags)
+                    {
+                        out.buildings.push((refs.clone(), h));
+                    }
+                    if ways && closed && is_industrial_area(&tags) {
                         out.areas.push(refs.clone());
                     }
-                    if refs.len() >= 2
+                    if ways
+                        && refs.len() >= 2
                         && let Some(class) = classify(&tags)
                     {
                         out.ways.push(Way { id, class, refs });
@@ -485,9 +503,52 @@ fn is_industrial_area(tags: &[(&[u8], &[u8])]) -> bool {
     tags.iter().any(|(k, v)| *k == b"landuse" && matches!(*v, b"industrial" | b"railway" | b"quarry"))
 }
 
+/// The height in metres of a way tagged as a building (`None` when it is not one): its `height`,
+/// else 3 m for each of its `building:levels`, else 8 m; between 2 and 400 m.
+pub fn building_height(tags: &[(&[u8], &[u8])]) -> Option<f32> {
+    let tag = |k: &[u8]| tags.iter().find(|(key, _)| *key == k).map(|(_, v)| *v);
+    if matches!(tag(b"building"), None | Some(b"no")) {
+        return None;
+    }
+    // "12", "12.5", "12 m", "12,5m": the number at the start.
+    let number = |v: &[u8]| {
+        let s = std::str::from_utf8(v).ok()?.trim().replace(',', ".");
+        let end = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+        s[..end].parse::<f32>().ok().filter(|n| n.is_finite() && *n > 0.0)
+    };
+    let h = tag(b"height").and_then(number).or_else(|| tag(b"building:levels").and_then(number).map(|l| l * 3.0)).unwrap_or(8.0);
+    Some(h.clamp(2.0, 400.0))
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn buildings_have_a_height() {
+        let h = |tags: &[(&str, &str)]| building_height(&tags.iter().map(|(k, v)| (k.as_bytes(), v.as_bytes())).collect::<Vec<_>>());
+        assert_eq!(h(&[("building", "yes")]), Some(8.0));
+        assert_eq!(h(&[("building", "house"), ("height", "12.5")]), Some(12.5));
+        assert_eq!(h(&[("building", "yes"), ("height", " 21 m")]), Some(21.0));
+        assert_eq!(h(&[("building", "yes"), ("height", "7,5m")]), Some(7.5));
+        assert_eq!(h(&[("building", "yes"), ("building:levels", "5")]), Some(15.0));
+        // The height wins over the levels; nonsense falls back, extremes are held.
+        assert_eq!(h(&[("building", "yes"), ("building:levels", "5"), ("height", "20")]), Some(20.0));
+        assert_eq!(h(&[("building", "yes"), ("height", "tall"), ("building:levels", "x")]), Some(8.0));
+        assert_eq!(h(&[("building", "yes"), ("height", "0")]), Some(8.0));
+        assert_eq!(h(&[("building", "yes"), ("height", "-4")]), Some(8.0));
+        assert_eq!(h(&[("building", "yes"), ("height", "9999")]), Some(400.0));
+        assert_eq!(h(&[("building", "yes"), ("height", "0.5")]), Some(2.0));
+        assert_eq!(h(&[("building", "no")]), None);
+        assert_eq!(h(&[("highway", "path"), ("height", "3")]), None);
+        // Read from a block only when asked for, and only closed ways.
+        let b = block_with(&[], &[(1, &[("building", "yes"), ("building:levels", "2")], &[1, 2, 3, 1]), (2, &[("building", "yes")], &[1, 2, 3]), (3, &[("highway", "path")], &[1, 2])]);
+        assert!(block(&b, false, true).unwrap().buildings.is_empty());
+        let got = block_of(&b, false, false, true).unwrap();
+        assert_eq!(got.buildings, vec![(vec![1, 2, 3, 1], 6.0)]);
+        assert!(got.ways.is_empty(), "the ways were not asked for");
+        assert_eq!(block_of(&b, false, true, true).unwrap().ways.len(), 1);
+    }
 
     /// A minimal protobuf writer, to make blocks the tests can read.
     #[derive(Default)]

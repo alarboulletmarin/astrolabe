@@ -1,7 +1,8 @@
 //! OpenStreetMap extracts: downloaded once from Geofabrik (streamed to disk, never held in
 //! memory), then read back frame by frame for each pass of the graph build.
 
-use super::store::{extract_path, write_atomic_from};
+use super::store::{cache_dir, extract_path, extract_size, write_atomic, write_atomic_from};
+use crate::logic::buildings::{self, Building};
 use super::{agent, service_error};
 use crate::lang::tr;
 use crate::logic::osm::{MAX_HEADER, blob_header};
@@ -52,6 +53,32 @@ pub fn download(base: &str, region: &Region, done: &AtomicU64, total: &AtomicU64
 /// bytes read.
 pub fn read_extract(region: &str, done: &AtomicU64, f: &mut dyn FnMut(&str, Vec<u8>) -> Result<(), String>) -> Result<(), String> {
     read_frames(&extract_path(region), done, f)
+}
+
+/// The buildings of `tiles` (x, y at `buildings::ZOOM`) of a region: from the cache, else read
+/// from the extract (two passes over it, on `threads` workers) and kept, tile by tile, empty ones
+/// too, so the extract is read once for a place. The cache is the extract's own: another
+/// download, another folder.
+pub fn buildings(region: &str, tiles: &[(u32, u32)], threads: usize) -> Result<std::collections::HashMap<(u32, u32), Vec<Building>>, String> {
+    let size = extract_size(region).ok_or("no extract")?;
+    let path = |t: &(u32, u32)| cache_dir().join("buildings").join(format!("{region}-{size}")).join(format!("{}/{}", t.0, t.1));
+    let mut out = std::collections::HashMap::new();
+    let mut missing = Vec::new();
+    for t in tiles {
+        match std::fs::read(path(t)).ok().and_then(|b| buildings::decode(&b)) {
+            Some(b) => drop(out.insert(*t, b)),
+            None => missing.push(*t),
+        }
+    }
+    if !missing.is_empty() {
+        let done = AtomicU64::new(0);
+        let mut read = |_: u32, f: &mut dyn FnMut(&str, Vec<u8>) -> Result<(), String>| read_extract(region, &done, f);
+        for (t, b) in buildings::read(&mut read, &missing, threads, &AtomicBool::new(false))? {
+            write_atomic(&path(&t), &buildings::encode(&b), false).ok();
+            out.insert(t, b);
+        }
+    }
+    Ok(out)
 }
 
 fn read_frames(path: &std::path::Path, done: &AtomicU64, f: &mut dyn FnMut(&str, Vec<u8>) -> Result<(), String>) -> Result<(), String> {

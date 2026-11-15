@@ -557,6 +557,65 @@ fn the_loop_is_seen_in_3d(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(p, None, Modifiers::none());
     cx.run_until_parked();
     assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).hover()).is_some());
+    // Space without a flight is nobody's: nothing starts.
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).flying()), None);
+    // Flying over the loop, in 3D: the eye follows the line and the mark goes along the profile.
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
+        l.show_3d(true);
+        l.fly(cx);
+    }));
+    let state = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| (s.loops.read(cx).hover(), s.loops.read(cx).flying(), s.loops.read(cx).camera().map(|c| c.target)));
+    // A few steps of the flight's clock (each draws a picture: kept short).
+    let wait = |cx: &mut gpui::VisualTestContext, steps: u64| {
+        for _ in 0..steps {
+            cx.executor().advance_clock(std::time::Duration::from_millis(34));
+            cx.run_until_parked();
+        }
+    };
+    wait(cx, 2);
+    let a = state(cx);
+    assert_eq!(a.1, Some(true));
+    wait(cx, 8);
+    let b = state(cx);
+    assert!(b.0 >= a.0 && b.2 != a.2 && b.1 == Some(true), "{a:?} {b:?}");
+    assert!(cam(cx).dist < 1000.0, "close to the ground");
+    // Space pauses; the clock goes on, the flight does not. Space again: it goes on.
+    cx.simulate_keystrokes("space");
+    wait(cx, 4);
+    let c = state(cx);
+    assert!(c.1 == Some(false) && c.2 == b.2 && c.0 == b.0, "{b:?} {c:?}");
+    cx.simulate_keystrokes("space");
+    wait(cx, 4);
+    let d = state(cx);
+    assert!(d.1 == Some(true) && d.2 != c.2, "{c:?} {d:?}");
+    // Taking the ground in hand pauses it too.
+    cx.simulate_mouse_down(mid, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(mid, MouseButton::Left, Modifiers::none());
+    wait(cx, 2);
+    assert_eq!(state(cx).1, Some(false));
+    // Near the end: it stops on the last point, and stays there; started again, from the start.
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| l.fly_seek(30.0, cx)));
+    cx.simulate_keystrokes("space");
+    wait(cx, 30);
+    let end = state(cx);
+    assert_eq!((end.0, end.1), (Some(line.len() - 1), Some(false)));
+    wait(cx, 3);
+    assert_eq!(state(cx), end);
+    cx.simulate_keystrokes("space");
+    wait(cx, 2);
+    let again = state(cx);
+    assert!(again.1 == Some(true) && again.0 < Some(line.len() / 2), "{again:?}");
+    // Back on the map the flight stops.
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
+        l.show_3d(false);
+        cx.notify();
+    }));
+    wait(cx, 2);
+    let off = state(cx);
+    wait(cx, 3);
+    assert_eq!(state(cx).2, off.2);
 }
 
 /// A loop kept under a name: listed, written to disk, opened again as it was, changed and kept

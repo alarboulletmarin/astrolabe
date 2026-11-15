@@ -6,20 +6,23 @@ use crate::lang::tr;
 use crate::logic::loops::Loop;
 use crate::logic::map::world;
 use crate::logic::slope;
-use crate::logic::terrain::{self, Camera, Terrain, Texture};
+use crate::logic::buildings::{self, Building};
+use crate::logic::terrain::{self, Camera, Face, Shade, Terrain, Texture};
 use crate::ui::render_image;
 use gpui_kit::*;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-/// Heights drawn half again as high: the slopes read better a little steeper.
-const EXAGGERATION: f32 = 1.5;
-/// Most vertices of the ground: about 16 ms for a picture of 1200 × 800.
-const CELLS: usize = 300 * 300;
+/// Heights drawn a fifth higher: the slopes read better a little steeper, and no more is
+/// needed now that the light follows every fold.
+const EXAGGERATION: f32 = 1.2;
+/// Most vertices of the ground: about 26 ms for a picture of 1200 × 800.
+const CELLS: usize = 500 * 500;
 /// Radians turned per pixel dragged.
 const TURN: f64 = 0.006;
-/// Zoom of the tiles at the most.
-const MAX_ZOOM: u8 = 12;
+/// Zoom of the elevation tiles at the most: about 14 m a pixel here, finer than what they were
+/// made from (about 30 m).
+const MAX_ZOOM: u8 = 13;
 /// Share of the ground, from each edge, that fades into the page: no cut sides.
 const FADE: f32 = 0.16;
 /// The map laid on the ground is at least this many pixels along its longer side (and less
@@ -27,9 +30,88 @@ const FADE: f32 = 0.16;
 const MAP_PIXELS: f64 = 1024.0;
 /// The loop fills this share of the free area's width, or of its height.
 const FILL: f64 = 0.8;
-/// The map's tiles are faint, made to lie under a track; on the ground their darks are
-/// deepened this much, so that roads, water and woods read from afar.
-const CONTRAST: f32 = 1.6;
+
+/// Buildings stand within this many metres of the loop.
+const BESIDE: f64 = 400.0;
+/// They are drawn once the eye is this close to what it looks at, in metres, and then within
+/// that distance of it: from further away they are specks, and too many.
+const BUILDINGS_FROM: f64 = 3000.0;
+
+/// The buildings beside the loop, as blocks ready to draw.
+struct Blocks {
+    faces: Vec<Face>,
+    /// Each block: where it stands (local metres) and its faces in `faces`.
+    at: Vec<([f32; 2], std::ops::Range<usize>)>,
+}
+
+impl Blocks {
+    /// The blocks of `tiles` that stand beside `line`, on the ground `t`; walls and roofs in
+    /// these colours (the picture's byte order).
+    fn beside(line: &[[f64; 2]], tiles: &[Arc<Vec<Building>>], t: &Terrain, wall: [u8; 3], roof: [u8; 3]) -> Blocks {
+        // The cells (of `BESIDE` metres) the line goes through.
+        let cell = |p: [f64; 2]| ((p[0] / BESIDE).floor() as i32, (p[1] / BESIDE).floor() as i32);
+        let along: std::collections::HashSet<(i32, i32)> = line.iter().map(|p| cell(t.local(p[0], p[1]))).collect();
+        let mut out = Blocks { faces: Vec::new(), at: Vec::new() };
+        for b in tiles.iter().flat_map(|t| t.iter()) {
+            let ring: Vec<[f64; 2]> = b.ring.iter().map(|p| t.local(p[0] as f64 / 1e7, p[1] as f64 / 1e7)).collect();
+            let Some(first) = ring.first() else { continue };
+            let (cx, cy) = cell(*first);
+            if !(-1..=1).any(|dx| (-1..=1).any(|dy| along.contains(&(cx + dx, cy + dy)))) {
+                continue;
+            }
+            // From the lowest ground under it (no gap on a slope) to its height over the highest;
+            // heights are drawn higher with the ground's, a building's own is not.
+            let (lo, hi) = ring.iter().map(|p| t.height_at(p[0], p[1])).fold((f64::MAX, f64::MIN), |(lo, hi), h| (lo.min(h), hi.max(h)));
+            let flat: Vec<[f32; 2]> = ring.iter().map(|p| [p[0] as f32, p[1] as f32]).collect();
+            let faces = terrain::extrude(&flat, lo as f32, hi as f32 + b.height / EXAGGERATION, wall, roof);
+            if !faces.is_empty() {
+                out.at.push(([first[0] as f32, first[1] as f32], out.faces.len()..out.faces.len() + faces.len()));
+                out.faces.extend(faces);
+            }
+        }
+        out
+    }
+
+    /// The faces to draw for an eye: none from afar, those around what it looks at from close.
+    fn seen(&self, cam: &Camera) -> Vec<Face> {
+        if cam.dist > BUILDINGS_FROM {
+            return Vec::new();
+        }
+        let (x, y, r2) = (cam.target[0] as f32, cam.target[1] as f32, (cam.dist * cam.dist) as f32);
+        self.at.iter().filter(|(p, _)| (p[0] - x).powi(2) + (p[1] - y).powi(2) <= r2).flat_map(|(_, r)| &self.faces[r.clone()]).copied().collect()
+    }
+}
+
+/// Flying over the loop: the eye this far from the point it follows, this high over the horizon,
+/// a picture every `FLY_TICK`; the whole loop in about a minute, within these speeds (m/s).
+const FLY_DIST: f64 = 900.0;
+const FLY_PITCH: f64 = 0.5;
+const FLY_TICK: std::time::Duration = std::time::Duration::from_millis(33);
+const FLY_SPEED: (f64, f64) = (60.0, 300.0);
+/// The eye looks this many metres ahead along the line, and turns to it at this rate (per second).
+const FLY_AHEAD: f64 = 200.0;
+const FLY_TURN: f64 = 2.5;
+
+/// A flight over the loop: how far along it (metres), and whether it goes on.
+struct Fly {
+    at: f64,
+    playing: bool,
+    /// Which run of the clock moves it: a flight started again leaves the old clock behind.
+    run: u64,
+}
+
+/// Where a flight is `at` metres along a line (`along`: metres from the start at each point):
+/// the point before it and the share of the way to the next one.
+fn fly_at(along: &[f32], at: f64) -> (usize, f64) {
+    let i = along.partition_point(|a| (*a as f64) <= at).saturating_sub(1).min(along.len().saturating_sub(2));
+    let (a, b) = (along.get(i).copied().unwrap_or(0.0) as f64, along.get(i + 1).copied().unwrap_or(0.0) as f64);
+    (i, if b > a { ((at - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 })
+}
+
+/// The shortest turn from one heading to another, radians within ±π.
+fn turn(from: f64, to: f64) -> f64 {
+    (to - from + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+}
 
 pub(super) struct Scene {
     /// The loop and theme it was made for.
@@ -37,16 +119,29 @@ pub(super) struct Scene {
     terrain: Arc<Terrain>,
     /// The ground's box, `[south, west, north, east]`.
     bbox: [f64; 4],
-    /// Grey by altitude until the map's tiles are all there, then the map (`draped`).
+    /// The light on the ground, from the elevation tiles at their full resolution.
+    shade: Arc<Shade>,
+    /// Grey by altitude until the map's tiles are all there, then the map (`draped`); lit.
     texture: Arc<Texture>,
     draped: bool,
+    /// The buildings beside the loop, once read (`None` until then, and in the tests).
+    blocks: Option<Arc<Blocks>>,
+    blocks_busy: bool,
     pub(super) cam: Camera,
     image: Option<Arc<RenderImage>>,
+    /// The eye and the size `image` was drawn with. While the pointer moves the ground the picture
+    /// on screen is a drawing late; what is laid over it is placed with these, not with `cam`.
+    shown: Option<(Camera, usize, usize)>,
     busy: bool,
     drawn: Option<u64>,
     /// Where the pointer was at the last move of a drag, and whether it turns the ground
     /// (otherwise it moves it).
     drag: Option<(Point<Pixels>, bool)>,
+    /// The view's size the loop was framed for, and whether the eye was moved by hand since:
+    /// until then, a view that changes size (a window being laid out, resized) is framed again.
+    framed: (f64, f64),
+    moved: bool,
+    fly: Option<Fly>,
 }
 
 /// The box of a loop, `[south, west, north, east]`.
@@ -65,15 +160,14 @@ fn span(bbox: [f64; 4]) -> (f64, f64) {
 }
 
 /// The ground around a loop's box: the loop's country on every side (half the box's longer side,
-/// at least 1.5 km; its edges fade away), and the tile zoom whose pixels are about as fine as
-/// the ground's cells.
+/// at least 1.5 km; its edges fade away), and the zoom of its elevation tiles: as fine as the
+/// map's, which is finer than the ground's cells (the light is worked out tile pixel by tile
+/// pixel), within what the tiles are worth.
 fn around([s, w, n, e]: [f64; 4]) -> ([f64; 4], u8) {
     let (long, cos) = span([s, w, n, e]);
     let m = (long / 2.0).max(1500.0) / 110_540.0;
     let bbox = [s - m, w - m / cos, n + m, e + m / cos];
-    let cell = span(bbox).0 / (CELLS as f64).sqrt();
-    let z = (156_543.0 * cos / cell).log2().ceil().clamp(8.0, MAX_ZOOM as f64) as u8;
-    (bbox, z)
+    (bbox, map_zoom(bbox).min(MAX_ZOOM))
 }
 
 /// The zoom of the map tiles laid on the ground.
@@ -112,29 +206,38 @@ fn bytes(c: Hsla) -> [u8; 3] {
 impl Scene {
     /// The ground of a loop from the elevation tiles, the loop seen whole in what the panel leaves
     /// of a view of `size` (see `frame`); `None` while a tile is missing.
-    pub(super) fn of(l: &Loop, key: u64, dark: bool, size: (f64, f64), tile: &mut dyn FnMut(u8, u32, u32) -> Option<Arc<Vec<f32>>>) -> Option<Scene> {
-        let inner = bounds(&l.line)?;
+    pub(super) fn of(line: &[[f64; 2]], key: u64, dark: bool, size: (f64, f64), tile: &mut dyn FnMut(u8, u32, u32) -> Option<Arc<Vec<f32>>>) -> Option<Scene> {
+        let inner = bounds(line)?;
         let (bbox, z) = around(inner);
         // Every tile asked for at once, so that they come together; the scene waits for them all.
         let got: Vec<_> = tiles(bbox, z).into_iter().map(|(x, y)| ((x, y), tile(z, x, y))).collect();
         let needed: std::collections::HashMap<(u32, u32), Arc<Vec<f32>>> = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<_>>()?;
         let t = Terrain::from_tiles(bbox, CELLS, z, &|x, y| needed.get(&(x, y)).cloned())?;
         let (lo, hi) = t.heights.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-        let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE };
+        let shade = Shade::from_tiles(bbox, z, EXAGGERATION, &|x, y| needed.get(&(x, y)).cloned())?;
+        let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE }.lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, terrain: Arc::new(t), bbox, texture: Arc::new(texture), draped: false, cam, image: None, busy: false, drawn: None, drag: None };
-        s.frame(l, size);
+        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
+        s.frame(line, size);
         Some(s)
     }
 
+    /// Frames the loop again for a view that changed size, unless the eye was moved by hand.
+    fn follow_size(&mut self, line: &[[f64; 2]], size: (f64, f64)) {
+        if !self.moved && self.framed != size && size.0 >= 8.0 && size.1 >= 8.0 {
+            self.framed = size;
+            self.frame(line, size);
+        }
+    }
+
     /// Puts the eye so that the loop, rather than the whole ground (which runs out of the view),
-    /// fills what the panel leaves of a view of `size`.
-    fn frame(&mut self, l: &Loop, size: (f64, f64)) {
+    /// is in the middle of what the panel leaves of a view of `size`, and fills it.
+    fn frame(&mut self, line: &[[f64; 2]], size: (f64, f64)) {
         let (w, h) = (size.0.max(PANEL * 2.0), size.1.max(200.0));
         let (left, free) = (PANEL + 28.0, w - PANEL - 28.0);
-        let pts: Vec<[f64; 3]> = l.line.iter().map(|p| self.place(*p)).collect();
+        let pts: Vec<[f64; 3]> = line.iter().map(|p| self.place(*p)).collect();
         // Each round measures the loop on screen, then backs off and slides to fit; a few settle.
-        for _ in 0..8 {
+        for _ in 0..12 {
             let seen = pts.iter().filter_map(|p| terrain::project(&self.terrain, &self.cam, EXAGGERATION, *p, w as usize, h as usize));
             let (x0, y0, x1, y1) = seen.fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, (x, y)| (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y)));
             if x0 > x1 {
@@ -150,15 +253,41 @@ impl Scene {
         self.cam.lift(&self.terrain, EXAGGERATION);
     }
 
+    /// Puts the eye over the loop `at` metres along it, looking the way it goes; `dt` seconds
+    /// have passed since the last time (the eye turns at its own pace, not with every bend).
+    /// Returns the point of the line it is at.
+    fn fly_to(&mut self, l: &Loop, at: f64, dt: f64) -> usize {
+        let on = |at: f64| {
+            let (i, f) = fly_at(&l.along, at);
+            let (a, b) = (self.place(l.line[i]), self.place(l.line[(i + 1).min(l.line.len() - 1)]));
+            [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * f)
+        };
+        let total = l.along.last().copied().unwrap_or(0.0) as f64;
+        let here = on(at);
+        // Ahead; at the very end, the way it came.
+        let (from, to) = if at + FLY_AHEAD <= total { (here, on(at + FLY_AHEAD)) } else { (on((total - FLY_AHEAD).max(0.0)), on(total)) };
+        self.cam.target = here;
+        if (to[0] - from[0]).hypot(to[1] - from[1]) > 1.0 {
+            let heading = (to[0] - from[0]).atan2(to[1] - from[1]);
+            self.cam.orbit(turn(self.cam.yaw, heading) * (dt * FLY_TURN).min(1.0), 0.0);
+        }
+        self.cam.lift(&self.terrain, EXAGGERATION);
+        self.moved = true;
+        fly_at(&l.along, at).0
+    }
+
     /// Where a point of the loop is on the ground, local metres and altitude.
     fn place(&self, p: [f64; 2]) -> [f64; 3] {
         let q = self.terrain.local(p[0], p[1]);
         [q[0], q[1], self.terrain.height_at(q[0], q[1])]
     }
 
-    /// Screen position of a point of the loop in a `w` × `h` view.
+    /// Screen position of a point of the loop in a `w` × `h` view, on the picture as it is
+    /// shown there (stretched to the view if it was drawn for another size).
     fn screen(&self, p: [f64; 2], w: f64, h: f64) -> Option<(f32, f32)> {
-        terrain::project(&self.terrain, &self.cam, EXAGGERATION, self.place(p), w as usize, h as usize)
+        let (cam, pw, ph) = self.shown.unwrap_or((self.cam, w as usize, h as usize));
+        let (x, y) = terrain::project(&self.terrain, &cam, EXAGGERATION, self.place(p), pw, ph)?;
+        Some((x * w as f32 / pw.max(1) as f32, y * h as f32 / ph.max(1) as f32))
     }
 }
 
@@ -180,28 +309,48 @@ impl LoopsView {
         }
         let data = self.data.clone();
         let mut tile = |z: u8, x: u32, y: u32| data.update(cx, |d, cx| d.relief_tile((z, x, y), cx));
-        if let Some(s) = Scene::of(l, key, self.snap.theme.dark, size, &mut tile) {
+        if let Some(s) = Scene::of(&l.line, key, self.snap.theme.dark, size, &mut tile) {
             self.scene = Some(s);
         }
     }
 
-    /// Lays the map on the ground once all its tiles are there (the 2D map's, in the theme).
-    /// Until then, and offline, the ground stays grey.
+    /// Lays the map on the ground, in its colours, once all its tiles are there. Until then, and
+    /// offline, the ground stays grey.
     fn ensure_drape(&mut self, cx: &mut Context<Self>) {
         let Some(s) = self.scene.as_mut().filter(|s| !s.draped) else { return };
         let z = map_zoom(s.bbox);
         // Every tile asked for at once, so that they come together.
-        let got: Vec<_> = tiles(s.bbox, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.tile((z, x, y), cx)))).collect();
-        let Some(have) = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<std::collections::HashMap<(u32, u32), Arc<RenderImage>>>>() else { return };
-        // ponytail: resampled on the main thread, about 10 ms once per loop; in the background if it shows.
-        if let Some(mut t) = Texture::from_tiles(s.bbox, z, FADE, &|x, y| have.get(&(x, y)).and_then(|i| i.as_bytes(0))) {
-            let bg = bytes(self.snap.theme.bg).map(|v| v as f32);
-            for p in &mut t.px {
-                *p = [0, 1, 2].map(|k| (bg[k] + (p[k] as f32 - bg[k]) * CONTRAST).clamp(0.0, 255.0) as u8);
-            }
-            s.texture = Arc::new(t);
+        let got: Vec<_> = tiles(s.bbox, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
+        let Some(have) = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<std::collections::HashMap<(u32, u32), Arc<Vec<u8>>>>>() else { return };
+        // ponytail: resampled and lit on the main thread, once per loop; in the background if it shows.
+        if let Some(t) = Texture::from_tiles(s.bbox, z, FADE, &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) {
+            s.texture = Arc::new(t.lit(&s.shade));
             s.draped = true;
         }
+    }
+
+    /// Stands the buildings beside the loop on the ground, once they are read (from the cache or
+    /// the region's extract); they are made into blocks in the background.
+    fn ensure_blocks(&mut self, l: &Loop, cx: &mut Context<Self>) {
+        let t = self.snap.theme;
+        let Some(s) = self.scene.as_mut().filter(|s| s.blocks.is_none() && !s.blocks_busy) else { return };
+        let Some(tiles) = self.data.update(cx, |d, cx| d.buildings(&buildings::tiles_along(&l.line, BESIDE), cx)) else { return };
+        s.blocks_busy = true;
+        // Walls and roofs: the page's neutrals, a roof lighter than its walls.
+        let (wall, roof) = (bytes(crate::ui::theme::blend(t.dim, t.bg, if t.dark { 0.45 } else { 0.35 })), bytes(crate::ui::theme::blend(t.dim, t.bg, if t.dark { 0.7 } else { 0.12 })));
+        let (line, terrain, key) = (l.line.clone(), s.terrain.clone(), s.key);
+        cx.spawn(async move |this, cx| {
+            let blocks = cx.background_executor().spawn(async move { Blocks::beside(&line, &tiles, &terrain, wall, roof) }).await;
+            this.update(cx, |v, cx| {
+                if let Some(s) = v.scene.as_mut().filter(|s| s.key == key) {
+                    s.blocks = Some(Arc::new(blocks));
+                    s.blocks_busy = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Draws the scene again in the background when the eye, the line or the size changed, at
@@ -229,7 +378,7 @@ impl LoopsView {
         let key = {
             let mut hsh = std::collections::hash_map::DefaultHasher::new();
             let c = s.cam;
-            (c.target.map(f64::to_bits), c.yaw.to_bits(), c.pitch.to_bits(), c.dist.to_bits(), w, h, s.key, s.draped).hash(&mut hsh);
+            (c.target.map(f64::to_bits), c.yaw.to_bits(), c.pitch.to_bits(), c.dist.to_bits(), w, h, s.key, s.draped, s.blocks.is_some()).hash(&mut hsh);
             line.iter().for_each(|(_, c)| c.hash(&mut hsh));
             hsh.finish()
         };
@@ -237,12 +386,13 @@ impl LoopsView {
             return;
         }
         s.busy = true;
-        let (terrain, texture, cam) = (s.terrain.clone(), s.texture.clone(), s.cam);
+        let (terrain, texture, blocks, cam) = (s.terrain.clone(), s.texture.clone(), s.blocks.clone(), s.cam);
         cx.spawn(async move |this, cx| {
             let img = cx
                 .background_executor()
                 .spawn(async move {
-                    let px = terrain::render(&terrain, &texture, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], true);
+                    let solids = blocks.map(|b| b.seen(&cam)).unwrap_or_default();
+                    let px = terrain::render(&terrain, &texture, &solids, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], true);
                     render_image(w as u32, h as u32, px).map(Arc::new)
                 })
                 .await;
@@ -252,6 +402,7 @@ impl LoopsView {
                     s.drawn = Some(key);
                     if img.is_some() {
                         s.image = img;
+                        s.shown = Some((cam, w, h));
                     }
                 }
                 cx.notify();
@@ -259,6 +410,69 @@ impl LoopsView {
             .ok();
         })
         .detach();
+    }
+
+    /// Starts flying over the chosen loop, pauses, or goes on; from the start again once at the end.
+    pub fn fly(&mut self, cx: &mut Context<Self>) {
+        let found = self.snap_found(cx);
+        let (Some(l), Some(s)) = (found.get(self.selected), self.scene.as_mut()) else { return };
+        let total = l.along.last().copied().unwrap_or(0.0) as f64;
+        if l.line.len() < 2 || l.along.len() != l.line.len() || total <= 0.0 {
+            return;
+        }
+        let run = s.fly.as_ref().map_or(0, |f| f.run) + 1;
+        match s.fly.as_mut() {
+            Some(f) if f.playing => f.playing = false,
+            Some(f) if f.at < total => *f = Fly { at: f.at, playing: true, run },
+            _ => {
+                // Close to the ground, looking along the line from its first step.
+                s.cam.dist = FLY_DIST.max(s.cam.min_dist);
+                s.cam.pitch = FLY_PITCH;
+                s.fly = Some(Fly { at: 0.0, playing: true, run });
+                s.fly_to(l, 0.0, 1.0);
+            }
+        }
+        cx.notify();
+        if !s.fly.as_ref().is_some_and(|f| f.playing) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(FLY_TICK).await;
+                if !this.update(cx, |v, cx| v.fly_on(run, cx)).unwrap_or(false) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Space: pauses the flight or goes on. `false` when there is no flight (the key is not ours).
+    pub fn fly_pause(&mut self, cx: &mut Context<Self>) -> bool {
+        let flying = self.three_d && self.scene.as_ref().is_some_and(|s| s.fly.is_some());
+        if flying {
+            self.fly(cx);
+        }
+        flying
+    }
+
+    /// One step of the flight's clock `run`; `false` once it is over, paused or replaced.
+    fn fly_on(&mut self, run: u64, cx: &mut Context<Self>) -> bool {
+        let found = self.snap_found(cx);
+        let (Some(l), Some(s)) = (found.get(self.selected), self.scene.as_mut()) else { return false };
+        let Some(f) = s.fly.as_mut().filter(|f| f.playing && f.run == run && self.three_d) else { return false };
+        let total = l.along.last().copied().unwrap_or(0.0) as f64;
+        let dt = FLY_TICK.as_secs_f64();
+        f.at = (f.at + (total / 60.0).clamp(FLY_SPEED.0, FLY_SPEED.1) * dt).min(total);
+        // At the end it stops there.
+        f.playing = f.at < total;
+        let (at, on) = (f.at, f.playing);
+        self.hover = Some(s.fly_to(l, at, dt).min(l.line.len() - 1));
+        if !on {
+            self.hover = Some(l.line.len() - 1);
+        }
+        cx.notify();
+        on
     }
 
     /// The chosen loop in 3D, filling the page: drag to move over the ground, right-drag or
@@ -270,7 +484,11 @@ impl LoopsView {
         let b = bounds.get();
         let dims = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
         self.ensure_scene(l, dims, cx);
+        if let Some(s) = self.scene.as_mut() {
+            s.follow_size(&l.line, dims);
+        }
         self.ensure_drape(cx);
+        self.ensure_blocks(l, cx);
         self.ensure_picture(l, dims, cx);
         let cell = bounds.clone();
         let base = div().id("loops-3d").absolute().size_full().bg(t.bg).child(canvas(move |b, _, _| cell.set(b), |_, _, _, _| {}).absolute().size_full());
@@ -306,6 +524,35 @@ impl LoopsView {
                 tr("Drag: move · right button or Shift: turn · wheel: zoom", "Glisser : se déplacer · bouton droit ou Maj : tourner · molette : zoomer"),
                 (t.bg, t.dim),
             )))
+            .child({
+                let (label, tip) = match s.fly.as_ref() {
+                    Some(f) if f.playing => (tr("Pause", "Pause"), tr("Space: pause", "Espace : mettre en pause")),
+                    Some(f) if f.at > 0.0 && f.at < l.along.last().copied().unwrap_or(0.0) as f64 => (tr("Resume", "Reprendre"), tr("Space: go on", "Espace : reprendre")),
+                    _ => (tr("Fly over", "Survoler"), tr("Follow the loop from above", "Suivre la boucle vue d'en haut")),
+                };
+                div().absolute().bottom(px(34.)).left(px(PANEL as f32 + 44.0)).child(
+                    crate::ui::button("loops-fly", label, false, t)
+                        .bg(t.bg)
+                        .tooltip_show_delay(crate::ui::TIP_DELAY)
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+                        // The button's own: the view under it must not take the press for a drag.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| this.fly(cx))),
+                )
+            })
+            // The ground carries the map's tiles: their makers are named, as on the map.
+            .child(
+                div()
+                    .id("loops-3d-credit")
+                    .absolute()
+                    .bottom(px(30.))
+                    .right(px(14.))
+                    .text_size(px(11.))
+                    .text_color(t.dim)
+                    .cursor_pointer()
+                    .on_click(|_, _, cx| cx.open_url("https://www.openstreetmap.org/copyright"))
+                    .child(tr("© OpenStreetMap contributors", "© les contributeurs d'OpenStreetMap")),
+            )
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab_3d(e, e.modifiers.shift, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab_3d(e, true, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.move_3d(e, cx)))
@@ -314,6 +561,7 @@ impl LoopsView {
             .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
                 let dy = (e.delta.pixel_delta(px(20.)).y / px(1.)) as f64;
                 if let Some(s) = this.scene.as_mut() {
+                    s.moved = true;
                     s.cam.zoom(2f64.powf(-dy / 240.0));
                     s.cam.lift(&s.terrain, EXAGGERATION);
                     cx.notify();
@@ -325,6 +573,10 @@ impl LoopsView {
     fn grab_3d(&mut self, e: &MouseDownEvent, turn: bool, cx: &mut Context<Self>) {
         if let Some(s) = self.scene.as_mut() {
             s.drag = Some((e.position, turn));
+            // Taking the ground in hand pauses the flight.
+            if let Some(f) = s.fly.as_mut() {
+                f.playing = false;
+            }
             cx.notify();
         }
     }
@@ -351,8 +603,11 @@ impl LoopsView {
                     s.cam.pan_screen(&s.terrain, EXAGGERATION, dx, dy, size.1);
                 }
                 s.drag = Some((e.position, turn));
+                s.moved = true;
                 cx.notify();
             }
+            // In flight the mark on the profile is the flight's, not the pointer's.
+            None if s.fly.as_ref().is_some_and(|f| f.playing) => s.drag = None,
             None => {
                 s.drag = None;
                 // The point of the line nearest the pointer, if near enough.
@@ -387,7 +642,7 @@ impl LoopsView {
         let l = &found[self.selected];
         let b = self.plots.get("loops-3d").get();
         let key = self.scene_key(l);
-        self.scene = Scene::of(l, key, false, ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64), tile);
+        self.scene = Scene::of(&l.line, key, false, ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64), tile);
     }
 
     #[cfg(test)]
@@ -404,6 +659,21 @@ impl LoopsView {
         Some(point(b.origin.x + px(x), b.origin.y + px(y)))
     }
 
+    /// Whether a flight is going on (`None`: there is none).
+    #[cfg(test)]
+    pub fn flying(&self) -> Option<bool> {
+        self.scene.as_ref().and_then(|s| s.fly.as_ref()).map(|f| f.playing)
+    }
+
+    /// Puts a flight this many metres before the end of the chosen loop, for the tests.
+    #[cfg(test)]
+    pub fn fly_seek(&mut self, before_end: f64, cx: &App) {
+        let total = self.snap_found(cx).get(self.selected).and_then(|l| l.along.last().copied()).unwrap_or(0.0) as f64;
+        if let Some(f) = self.scene.as_mut().and_then(|s| s.fly.as_mut()) {
+            f.at = (total - before_end).max(0.0);
+        }
+    }
+
     #[cfg(test)]
     pub fn show_3d(&mut self, on: bool) {
         self.three_d = on;
@@ -412,7 +682,137 @@ impl LoopsView {
 
 #[cfg(test)]
 mod tests {
-    use super::{around, bounds, map_zoom, span, tiles, tint, world};
+    use super::{Scene, around, bounds, map_zoom, span, tiles, tint, world};
+    use std::sync::Arc;
+
+    #[test]
+    fn buildings_stand_beside_the_loop_and_show_from_close() {
+        use super::{BUILDINGS_FROM, Blocks, EXAGGERATION};
+        use crate::logic::buildings::Building;
+        let line = [[43.70, 7.25], [43.72, 7.27], [43.71, 7.29]];
+        let mut slope = |_: u8, _: u32, _: u32| Some(Arc::new((0..256 * 256).map(|i| 300.0 - (i / 256) as f32).collect::<Vec<f32>>()));
+        let s = Scene::of(&line, 0, false, (1200.0, 800.0), &mut slope).unwrap();
+        // A house of 10 m by the start, 9 m high; one a kilometre from the line; a way of two points.
+        let house = |lat: f64, lon: f64| Building { ring: [[0.0, 0.0], [0.0001, 0.0], [0.0001, 0.00012], [0.0, 0.00012]].iter().map(|d| [((lat + d[0]) * 1e7) as i32, ((lon + d[1]) * 1e7) as i32]).collect(), height: 9.0 };
+        let tiles = [Arc::new(vec![house(43.7001, 7.2502), house(43.70, 7.2650), Building { ring: vec![[437_000_000, 72_500_000], [437_000_100, 72_500_000]], height: 9.0 }]), Arc::new(vec![])];
+        let b = Blocks::beside(&line, &tiles, &s.terrain, [100; 3], [200; 3]);
+        assert_eq!(b.at.len(), 1, "only the house by the line");
+        assert_eq!(b.faces.len(), 10);
+        // It stands on the ground: from the lowest ground under it to 9 m (drawn as the ground's
+        // heights are) over the highest.
+        let at = b.at[0].0;
+        let ground = s.terrain.height_at(at[0] as f64, at[1] as f64) as f32;
+        let (lo, hi) = b.faces.iter().flat_map(|f| f.p).fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])));
+        assert!((lo - ground).abs() < 12.0 && lo <= ground + 0.01, "{lo} {ground}");
+        assert!(hi - lo >= 9.0 / EXAGGERATION && hi - lo < 9.0 / EXAGGERATION + 15.0, "{lo} {hi}");
+        // Seen from close when the eye looks near it; not from afar, nor when it looks elsewhere.
+        let mut cam = s.cam;
+        cam.target = [at[0] as f64, at[1] as f64, ground as f64];
+        cam.dist = 800.0;
+        assert_eq!(b.seen(&cam).len(), 10);
+        cam.dist = BUILDINGS_FROM + 1.0;
+        assert!(b.seen(&cam).is_empty());
+        cam.dist = 800.0;
+        cam.target[0] += 900.0;
+        assert!(b.seen(&cam).is_empty());
+        assert!(Blocks::beside(&line, &[], &s.terrain, [0; 3], [0; 3]).seen(&s.cam).is_empty());
+    }
+
+    #[test]
+    fn a_flight_knows_where_it_is_and_which_way_to_turn() {
+        use super::{fly_at, turn};
+        let along = [0.0, 100.0, 100.0, 250.0];
+        assert_eq!(fly_at(&along, 0.0), (0, 0.0));
+        assert_eq!(fly_at(&along, 50.0), (0, 0.5));
+        // Two points at the same place: the one after them.
+        assert_eq!(fly_at(&along, 100.0), (2, 0.0));
+        assert_eq!(fly_at(&along, 175.0), (2, 0.5));
+        // The end, beyond it, before the start, a line of one point or none: no step out of it.
+        assert_eq!(fly_at(&along, 250.0), (2, 1.0));
+        assert_eq!(fly_at(&along, 1.0e9), (2, 1.0));
+        assert_eq!(fly_at(&along, -5.0), (0, 0.0));
+        assert_eq!(fly_at(&[0.0], 10.0), (0, 0.0));
+        assert_eq!(fly_at(&[], 10.0), (0, 0.0));
+        // The short way round, through north too.
+        let deg = |d: f64| d.to_radians();
+        assert!((turn(deg(350.0), deg(10.0)) - deg(20.0)).abs() < 1e-9);
+        assert!((turn(deg(10.0), deg(350.0)) + deg(20.0)).abs() < 1e-9);
+        assert!((turn(deg(90.0), deg(90.0))).abs() < 1e-9);
+        assert!((turn(0.0, deg(179.0)) - deg(179.0)).abs() < 1e-9);
+    }
+
+    /// The loop's box on screen, in a view of `size`.
+    fn on_screen(s: &Scene, line: &[[f64; 2]], size: (f64, f64)) -> (f32, f32, f32, f32) {
+        line.iter().map(|p| s.screen(*p, size.0, size.1).unwrap()).fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, (x, y)| (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y)))
+    }
+
+    #[test]
+    fn the_loop_is_in_the_middle_of_the_free_area_and_fills_it() {
+        use super::PANEL;
+        let mut hills = |_: u8, _: u32, _: u32| Some(Arc::new((0..256 * 256).map(|i| 200.0 + 150.0 * ((i % 256) as f32 / 30.0).sin() + (i / 256) as f32).collect::<Vec<f32>>()));
+        // A loop wider than high, one higher than wide, a long thin one, a tiny one.
+        let ring = |lat: f64, lon: f64, dlat: f64, dlon: f64| (0..60).map(|k| { let a = k as f64 / 60.0 * std::f64::consts::TAU; [lat + dlat * a.sin(), lon + dlon * a.cos()] }).collect::<Vec<_>>();
+        let loops = [ring(43.71, 7.27, 0.01, 0.06), ring(43.71, 7.27, 0.05, 0.01), ring(43.71, 7.27, 0.0005, 0.08), ring(43.71, 7.27, 0.001, 0.001)];
+        for line in &loops {
+            for size in [(1200.0, 800.0), (2400.0, 1300.0), (900.0, 1000.0), (760.0, 480.0)] {
+                let s = Scene::of(line, 0, false, size, &mut hills).unwrap();
+                let (x0, y0, x1, y1) = on_screen(&s, line, size);
+                let (left, free) = ((PANEL + 28.0) as f32, (size.0 - PANEL - 28.0) as f32);
+                let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+                let what = format!("{:?} in {size:?}: {x0} {y0} {x1} {y1}", line[1]);
+                assert!((cx - (left + free / 2.0)).abs() < free * 0.03 && (cy - size.1 as f32 / 2.0).abs() < size.1 as f32 * 0.03, "centred: {what}");
+                // Whole in the free area, and large: 80 % of its width or of its height.
+                assert!(x0 >= left && x1 <= size.0 as f32 && y0 >= 0.0 && y1 <= size.1 as f32, "inside: {what}");
+                let fill = ((x1 - x0) / free).max((y1 - y0) / size.1 as f32);
+                assert!((0.74..=0.86).contains(&fill), "fills {fill}: {what}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_view_that_changes_size_is_framed_again_until_the_eye_is_moved() {
+        let line = [[43.70, 7.25], [43.72, 7.27], [43.71, 7.29]];
+        let mut flat = |_: u8, _: u32, _: u32| Some(Arc::new(vec![100.0f32; 256 * 256]));
+        // Made while the window was still small, as when it opens.
+        let mut s = Scene::of(&line, 0, false, (700.0, 400.0), &mut flat).unwrap();
+        let big = (1600.0, 1000.0);
+        let centre = |s: &Scene| { let b = on_screen(s, &line, big); ((b.0 + b.2) / 2.0, (b.1 + b.3) / 2.0) };
+        let want = ((super::PANEL as f32 + 28.0 + 1600.0) / 2.0, 500.0);
+        assert!((centre(&s).0 - want.0).abs() > 60.0, "framed for the small view, off in the large one");
+        s.follow_size(&line, big);
+        let c = centre(&s);
+        assert!((c.0 - want.0).abs() < 40.0 && (c.1 - want.1).abs() < 30.0, "{c:?} {want:?}");
+        // Not laid out: nothing changes. Moved by hand: the eye is left where it was put.
+        let cam = s.cam;
+        s.follow_size(&line, (0.0, 0.0));
+        assert_eq!(format!("{:?}", s.cam), format!("{cam:?}"));
+        s.moved = true;
+        s.follow_size(&line, (900.0, 700.0));
+        assert_eq!(format!("{:?}", s.cam), format!("{cam:?}"));
+    }
+
+    #[test]
+    fn marks_stay_on_the_picture_shown_while_the_eye_moves() {
+        let line = [[43.70, 7.25], [43.72, 7.27], [43.71, 7.29]];
+        let mut flat = |_: u8, _: u32, _: u32| Some(Arc::new(vec![100.0f32; 256 * 256]));
+        let mut s = Scene::of(&line, 0, false, (1200.0, 800.0), &mut flat).unwrap();
+        let at = |s: &Scene| s.screen(line[0], 1200.0, 800.0).unwrap();
+        // A picture drawn with this eye is on screen.
+        let before = at(&s);
+        s.shown = Some((s.cam, 1200, 800));
+        // The eye turns and moves; the next picture is still being drawn: the mark has not moved.
+        s.cam.orbit(0.4, 0.1);
+        s.cam.pan_screen(&s.terrain, super::EXAGGERATION, 90.0, 40.0, 800.0);
+        assert_eq!(at(&s), before);
+        // The new picture comes: the mark follows it.
+        s.shown = Some((s.cam, 1200, 800));
+        let after = at(&s);
+        assert!((after.0 - before.0).abs() > 20.0, "{before:?} {after:?}");
+        // A picture drawn at another size is stretched to the view, and the mark with it.
+        s.shown = Some((s.cam, 600, 400));
+        let half = at(&s);
+        assert!((half.0 - after.0).abs() < 1.0 && (half.1 - after.1).abs() < 1.0, "{after:?} {half:?}");
+    }
 
     #[test]
     fn the_box_and_its_tiles_cover_the_loop() {
@@ -423,18 +823,23 @@ mod tests {
         let m = 1600.0 / 110_540.0;
         assert!((bbox[0] - (43.70 - m)).abs() < 2e-4 && (bbox[2] - (43.72 + m)).abs() < 2e-4, "{bbox:?}");
         assert!(bbox[1] < 7.25 - m && bbox[3] > 7.29 + m, "{bbox:?}");
-        // Cells of about 20 m: tiles of zoom 12.
-        assert_eq!(z, 12);
+        // A small box: the finest elevation tiles.
+        assert_eq!(z, 13);
         let t = tiles(bbox, z);
         let (x, y) = world(43.71, 7.27, z as f64);
         assert!(t.contains(&((x / 256.0) as u32, (y / 256.0) as u32)));
-        assert!(t.len() <= 9, "{t:?}");
+        assert!(t.len() <= 16, "{t:?}");
         // A single point still has a box of 3 km; no line, none.
         let (b, _) = around(bounds(&[[43.7, 7.25]]).unwrap());
         assert!((span(b).0 - 3000.0).abs() < 30.0, "{b:?}");
         assert!(bounds(&[]).is_none());
         // A long loop takes coarser tiles.
         assert!(around([43.5, 7.0, 43.9, 7.5]).1 < 12);
+        // Never more elevation tiles than the map's own.
+        for inner in [[43.7, 7.25, 43.7, 7.25], [43.0, 6.0, 44.0, 7.9], [68.0, 15.0, 68.4, 16.0]] {
+            let (b, z) = around(inner);
+            assert!(z <= map_zoom(b) && tiles(b, z).len() <= 100, "{inner:?}");
+        }
     }
 
     #[test]
