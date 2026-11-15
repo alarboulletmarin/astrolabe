@@ -34,6 +34,42 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Handle {
     Start,
+    /// A point asked for, before the loops (index in `pins`).
+    Pin(usize),
+    /// A point of the loop chosen (index in its waypoints, as in `draft`).
+    Point(usize),
+}
+
+/// What undo puts back.
+#[derive(Clone)]
+struct Step {
+    start: Option<(f64, f64)>,
+    pins: Vec<(f64, f64)>,
+    found: Arc<Vec<Loop>>,
+    selected: usize,
+}
+
+/// How far a pointer is from a line on screen, and the index of the line's point nearest to it.
+fn from_line(line: &[(f32, f32)], (x, y): (f32, f32)) -> Option<(f32, usize)> {
+    let mut best: Option<(f32, usize)> = None;
+    for (i, w) in line.windows(2).enumerate() {
+        let ((ax, ay), (bx, by)) = (w[0], w[1]);
+        let (dx, dy) = (bx - ax, by - ay);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 { (((x - ax) * dx + (y - ay) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+        let d = (ax + t * dx - x).hypot(ay + t * dy - y);
+        if best.is_none_or(|b| d < b.0) {
+            best = Some((d, if t < 0.5 { i } else { i + 1 }));
+        }
+    }
+    best
+}
+
+/// Where a point taken on a loop's line at `at` (an index of its line) goes among its waypoints:
+/// after those the line reaches before it.
+fn insert_at(line: &[[f64; 2]], waypoints: &[[f64; 2]], at: usize) -> usize {
+    let index = |p: [f64; 2]| line.iter().enumerate().map(|(i, q)| (crate::logic::fit::metres(*q, p), i)).fold((f64::MAX, 0), |a, b| if b.0 < a.0 { b } else { a }).1;
+    waypoints.iter().filter(|w| index(**w) < at).count()
 }
 
 #[derive(Default)]
@@ -70,6 +106,14 @@ pub struct LoopsView {
     drag: Option<Handle>,
     /// Bumped by each setting changed: only the last one's pause plans.
     pending: u64,
+    /// Points the loops must pass by, (lat, lon).
+    pins: Vec<(f64, f64)>,
+    /// The chosen loop's waypoints as they are being moved, until it is routed again.
+    draft: Option<Vec<[f64; 2]>>,
+    /// Where the pointer took a point (barely moved, it was a click), and what was there before.
+    grabbed_at: Option<(Point<Pixels>, Step)>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -123,6 +167,11 @@ impl LoopsView {
             bad_input: None,
             drag: None,
             pending: 0,
+            pins: Vec::new(),
+            draft: None,
+            grabbed_at: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
             _subscriptions: subs,
         }
     }
@@ -143,8 +192,8 @@ impl LoopsView {
             Target::Range(a.min(b), a.max(b))
         };
         let climb = value(&self.climb).trim().replace(',', ".").parse::<f64>().ok().filter(|v| *v > 0.0);
-        let prefs = Prefs { trail: [0.0, 0.5, 1.0][self.trail], avoid_paved: self.avoid_paved };
-        Ok(Request { lat, lon, target, prefs, climb, seed: self.seed, count: COUNT })
+        let prefs = self.prefs();
+        Ok(Request { lat, lon, target, prefs, climb, seed: self.seed, count: COUNT, via: self.pins.iter().map(|p| [p.0, p.1]).collect() })
     }
 
     /// Plans with the panel's settings; `again`: other loops (a new seed).
@@ -200,6 +249,10 @@ impl LoopsView {
         .detach();
     }
 
+    fn prefs(&self) -> Prefs {
+        Prefs { trail: [0.0, 0.5, 1.0][self.trail], avoid_paved: self.avoid_paved }
+    }
+
     /// Where a position is on the map, in pixels from its top left corner.
     fn on_map(&self, lat: f64, lon: f64) -> (f32, f32) {
         let s = self.map.bounds.get().size;
@@ -213,17 +266,92 @@ impl LoopsView {
         self.map.view.position(((p.x - b.origin.x) / px(1.)) as f64, ((p.y - b.origin.y) / px(1.)) as f64, (b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64)
     }
 
-    /// The point of the map under the pointer that can be dragged, if any.
-    fn handle_at(&self, p: Point<Pixels>) -> Option<Handle> {
+    /// The chosen loop's waypoints: as being moved, or as routed.
+    fn points(&self, cx: &App) -> Vec<[f64; 2]> {
+        self.draft.clone().unwrap_or_else(|| self.snap_found(cx).get(self.selected).map(|l| l.waypoints.clone()).unwrap_or_default())
+    }
+
+    /// The point of the map under the pointer that can be moved: the chosen loop's points first,
+    /// then the points asked for, then the start.
+    fn handle_at(&self, p: Point<Pixels>, cx: &App) -> Option<Handle> {
         let b = self.map.bounds.get();
-        let (x, y) = (((p.x - b.origin.x) / px(1.)), ((p.y - b.origin.y) / px(1.)));
-        let near = |(hx, hy): (f32, f32)| (hx - x).hypot(hy - y) <= GRAB;
-        self.start.filter(|s| near(self.on_map(s.0, s.1))).map(|_| Handle::Start)
+        let at = (((p.x - b.origin.x) / px(1.)), ((p.y - b.origin.y) / px(1.)));
+        let near = |q: [f64; 2]| {
+            let (hx, hy) = self.on_map(q[0], q[1]);
+            (hx - at.0).hypot(hy - at.1) <= GRAB
+        };
+        if let Some(i) = self.points(cx).iter().position(|q| near(*q)) {
+            return Some(Handle::Point(i));
+        }
+        if let Some(i) = self.pins.iter().position(|q| near([q.0, q.1])) {
+            return Some(Handle::Pin(i));
+        }
+        self.start.filter(|s| near([s.0, s.1])).map(|_| Handle::Start)
+    }
+
+    /// Where the chosen loop's line passes under the pointer: the index of its point there.
+    fn line_at(&self, p: Point<Pixels>, cx: &App) -> Option<usize> {
+        let found = self.snap_found(cx);
+        let l = found.get(self.selected)?;
+        let b = self.map.bounds.get();
+        let at = (((p.x - b.origin.x) / px(1.)), ((p.y - b.origin.y) / px(1.)));
+        let line: Vec<(f32, f32)> = l.line.iter().map(|q| self.on_map(q[0], q[1])).collect();
+        from_line(&line, at).filter(|(d, _)| *d <= GRAB / 2.0 + 2.0).map(|(_, i)| i)
+    }
+
+    fn step_now(&self, cx: &App) -> Step {
+        Step { start: self.start, pins: self.pins.clone(), found: self.snap_found(cx), selected: self.selected }
+    }
+
+    /// Keeps what is there, for undo, before a change.
+    fn remember(&mut self, cx: &App) {
+        let step = self.step_now(cx);
+        self.undo.push(step);
+        // ponytail: the last 100 changes; nobody undoes further.
+        if self.undo.len() > 100 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    fn restore(&mut self, s: Step, cx: &mut Context<Self>) {
+        self.start = s.start;
+        self.pins = s.pins;
+        self.selected = s.selected;
+        self.draft = None;
+        self.drag = None;
+        self.hover = None;
+        self.data.update(cx, |d, cx| d.set_found(s.found, cx));
+        cx.notify();
+    }
+
+    /// Undoes the last change of the start, the points or a loop (`back`), or does it again.
+    pub fn undo(&mut self, back: bool, cx: &mut Context<Self>) {
+        let Some(s) = (if back { self.undo.pop() } else { self.redo.pop() }) else { return };
+        let now = self.step_now(cx);
+        if back { self.redo.push(now) } else { self.undo.push(now) }
+        self.restore(s, cx);
     }
 
     fn grab(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
-        if let Some(h) = self.handle_at(e.position) {
+        let before = self.step_now(cx);
+        let mut h = self.handle_at(e.position, cx);
+        // On the chosen loop's line: a new point there, to drag.
+        if h.is_none()
+            && let Some(at) = self.line_at(e.position, cx)
+        {
+            let found = self.snap_found(cx);
+            let l = &found[self.selected];
+            let mut points = self.points(cx);
+            let i = insert_at(&l.line, &points, at);
+            let p = self.under(e.position);
+            points.insert(i, [p.0, p.1]);
+            self.draft = Some(points);
+            h = Some(Handle::Point(i));
+        }
+        if let Some(h) = h {
             self.drag = Some(h);
+            self.grabbed_at = Some((e.position, before));
             cx.stop_propagation();
             cx.notify();
         }
@@ -233,11 +361,20 @@ impl LoopsView {
         let Some(h) = self.drag else { return };
         if e.pressed_button != Some(MouseButton::Left) {
             self.drag = None;
+            self.draft = None;
             return;
         }
         let at = self.under(e.position);
         match h {
             Handle::Start => self.start = Some(at),
+            Handle::Pin(i) => self.pins[i] = at,
+            Handle::Point(i) => {
+                let mut points = self.points(cx);
+                if let Some(p) = points.get_mut(i) {
+                    *p = [at.0, at.1];
+                }
+                self.draft = Some(points);
+            }
         }
         cx.stop_propagation();
         cx.notify();
@@ -245,20 +382,102 @@ impl LoopsView {
 
     fn drop_at(&mut self, e: &MouseUpEvent, cx: &mut Context<Self>) {
         let Some(h) = self.drag.take() else { return };
+        cx.stop_propagation();
+        let Some((from, before)) = self.grabbed_at.take() else { return };
+        if ((e.position.x - from.x) / px(1.)).abs() + ((e.position.y - from.y) / px(1.)).abs() < 4.0 {
+            // A click on a point: nothing moves.
+            self.start = before.start;
+            self.pins = before.pins;
+            self.draft = None;
+            cx.notify();
+            return;
+        }
+        self.undo.push(before);
+        self.redo.clear();
         let at = self.under(e.position);
         match h {
             Handle::Start => {
                 self.start = Some(at);
                 self.propose(false, cx);
             }
+            Handle::Pin(i) => {
+                self.pins[i] = at;
+                self.propose(false, cx);
+            }
+            Handle::Point(i) => self.edit(Some(i), cx),
         }
-        cx.stop_propagation();
+    }
+
+    /// Routes the chosen loop again through the draft's points; `moved`: the point that moved, if
+    /// a point asked for, follows it.
+    fn edit(&mut self, moved: Option<usize>, cx: &mut Context<Self>) {
+        let (Some(points), Some(start)) = (self.draft.clone(), self.start) else { return };
+        let found = self.snap_found(cx);
+        let Some(l) = found.get(self.selected) else { return };
+        // A point asked for that was moved: the one it was, moved with it.
+        if let Some(i) = moved
+            && l.pinned.get(i) == Some(&true)
+            && let Some(old) = l.waypoints.get(i)
+            && let Some(pin) = self.pins.iter_mut().min_by(|a, b| crate::logic::fit::metres(*old, [a.0, a.1]).total_cmp(&crate::logic::fit::metres(*old, [b.0, b.1])))
+            && crate::logic::fit::metres(*old, [pin.0, pin.1]) < 300.0
+        {
+            *pin = (points[i][0], points[i][1]);
+        }
+        let (prefs, i) = (self.prefs(), self.selected);
+        self.data.update(cx, |d, cx| d.reroute(i, [start.0, start.1], points, prefs, cx));
+        cx.notify();
+    }
+
+    /// A right click: takes away the point of the loop or the point asked for under the pointer.
+    fn take_away(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        match self.handle_at(e.position, cx) {
+            Some(Handle::Point(i)) => {
+                cx.stop_propagation();
+                let mut points = self.points(cx);
+                if points.len() < 2 {
+                    return;
+                }
+                self.remember(cx);
+                let gone = points.remove(i);
+                let found = self.snap_found(cx);
+                let pinned = found.get(self.selected).is_some_and(|l| l.pinned.get(i) == Some(&true));
+                self.draft = Some(points);
+                self.edit(None, cx);
+                if pinned && let Some(k) = self.pins.iter().position(|p| crate::logic::fit::metres(gone, [p.0, p.1]) < 300.0) {
+                    self.pins.remove(k);
+                }
+            }
+            Some(Handle::Pin(i)) => {
+                cx.stop_propagation();
+                self.remember(cx);
+                self.pins.remove(i);
+                self.propose(false, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// A click on the map, the start set: a point the loops must pass by.
+    fn pin(&mut self, at: (f64, f64), cx: &mut Context<Self>) {
+        self.remember(cx);
+        self.pins.push(at);
+        self.propose(false, cx);
+    }
+
+    /// Forgets the points asked for, and plans without them.
+    fn unpin(&mut self, cx: &mut Context<Self>) {
+        self.remember(cx);
+        self.pins.clear();
+        self.propose(false, cx);
     }
 
     /// Forgets the start and the loops, to begin again elsewhere.
     fn clear(&mut self, cx: &mut Context<Self>) {
+        self.remember(cx);
         self.start = None;
+        self.pins.clear();
         self.drag = None;
+        self.draft = None;
         self.bad_input = None;
         self.data.update(cx, |d, cx| d.clear_loops(cx));
         cx.notify();
@@ -300,6 +519,11 @@ impl LoopsView {
     #[cfg(test)]
     pub fn focus_km(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.km.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    #[cfg(test)]
+    pub fn pins(&self) -> Vec<(f64, f64)> {
+        self.pins.clone()
     }
 
     #[cfg(test)]
@@ -412,14 +636,22 @@ impl Render for LoopsView {
 
         let b = self.map.bounds.get();
         let (w, h) = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
-        // The first click sets the start; then the start is dragged.
-        if let Some((sx, sy)) = self.map.click.take()
-            && self.start.is_none()
-        {
-            self.start = Some(self.map.view.position(sx, sy, w, h));
-            if self.data.read(cx).loops.graph.is_some() {
-                self.propose(false, cx);
+        // The first click sets the start; the next ones, points to pass by.
+        if let Some((sx, sy)) = self.map.click.take() {
+            let at = self.map.view.position(sx, sy, w, h);
+            if self.start.is_none() {
+                self.remember(cx);
+                self.start = Some(at);
+                if self.data.read(cx).loops.graph.is_some() {
+                    self.propose(false, cx);
+                }
+            } else {
+                self.pin(at, cx);
             }
+        }
+        // The loop moved by hand is routed: its own points show again.
+        if self.drag.is_none() && !self.data.read(cx).loops.editing {
+            self.draft = None;
         }
         self.ensure_relief((w, h), cx);
 
@@ -434,6 +666,11 @@ impl Render for LoopsView {
         // Loops of the last settings, while those of the new ones are looked for: faded.
         let fade = if self.data.read(cx).loops.planning { 0.45 } else { 1.0 };
         let start = self.start;
+        let pins = self.pins.clone();
+        let points = self.points(cx);
+        let pinned: Vec<bool> = chosen.map(|l| l.pinned.clone()).unwrap_or_default();
+        // Being moved: straight lines from point to point, until routed.
+        let draft = self.draft.clone().zip(start).map(|(d, s)| std::iter::once([s.0, s.1]).chain(d).chain(std::iter::once([s.0, s.1])).collect::<Vec<_>>());
         let hover = chosen.zip(self.hover).and_then(|(l, i)| l.line.get(i).copied());
         let (accent, ink, bg) = (t.accent, t.text, t.bg);
         let bounds = self.map.bounds.clone();
@@ -461,6 +698,26 @@ impl Render for LoopsView {
                 let dot = |p: Point<Pixels>, r: f32, c: Hsla, window: &mut Window| {
                     window.paint_quad(fill(Bounds::new(point(p.x - px(r), p.y - px(r)), size(px(2. * r), px(2. * r))), c).corner_radii(px(r)));
                 };
+                if let Some(d) = &draft {
+                    let mut path = PathBuilder::stroke(px(1.5));
+                    path.move_to(at(d[0]));
+                    d[1..].iter().for_each(|p| path.line_to(at(*p)));
+                    if let Ok(p) = path.build() {
+                        window.paint_path(p, ink.opacity(0.6));
+                    }
+                }
+                // The loop's points: white, ringed; those asked for, filled with the accent.
+                for (i, p) in points.iter().enumerate() {
+                    dot(at(*p), 6.0, ink, window);
+                    dot(at(*p), 4.5, if pinned.get(i) == Some(&true) && draft.is_none() { accent } else { bg }, window);
+                }
+                for p in &pins {
+                    let q = at([p.0, p.1]);
+                    let r = px(6.);
+                    window.paint_quad(fill(Bounds::new(point(q.x - r, q.y - r), size(r * 2., r * 2.)), bg).corner_radii(px(2.)));
+                    let r = px(4.5);
+                    window.paint_quad(fill(Bounds::new(point(q.x - r, q.y - r), size(r * 2., r * 2.)), accent).corner_radii(px(1.5)));
+                }
                 if let Some((lat, lon)) = start {
                     dot(at([lat, lon]), 8.0, bg, window);
                     dot(at([lat, lon]), 6.0, ink, window);
@@ -482,6 +739,7 @@ impl Render for LoopsView {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab(e, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.move_to(e, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, cx| this.drop_at(e, cx)))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, _, cx| this.take_away(e, cx)))
             .into_any_element();
 
         div()
@@ -515,7 +773,7 @@ impl LoopsView {
         let ready = l.graph.is_some();
         let job = d.loops_line();
         let running = job.is_some();
-        let (has_extract, error, planning, plan_error) = (l.extract.is_some(), l.error.clone(), l.planning, l.plan_error.clone());
+        let (has_extract, error, planning, plan_error, editing) = (l.extract.is_some(), l.error.clone(), l.planning, l.plan_error.clone(), l.editing);
         let built = l.graph.as_ref().map(|g| g.meta.source_time);
         let small = |text: String, color: Hsla| div().text_size(px(12.)).text_color(color).child(text);
 
@@ -551,22 +809,40 @@ impl LoopsView {
             if let Some(e) = self.bad_input.clone() {
                 body = body.child(small(e, t.bad()));
             }
-            if planning {
-                body = body.child(small(tr("Looking for loops…", "Recherche de boucles…").into(), t.soft));
+            if planning || editing {
+                body = body.child(small(if planning { tr("Looking for loops…", "Recherche de boucles…") } else { tr("Routing the loop…", "Calcul du tracé…") }.into(), t.soft));
             } else if let Some(e) = plan_error {
                 body = body.child(small(e, t.bad()));
             }
             if self.start.is_none() {
                 body = body.child(small(tr("Click on the map to set the start.", "Clique sur la carte pour poser le départ.").into(), t.soft));
             } else {
+                body = body.child(small(
+                    tr(
+                        "Click: a point to pass by. Drag a point or the line to change the loop; right click: take a point away.",
+                        "Clic : un point de passage. Glisse un point ou le tracé pour changer la boucle ; clic droit : retirer un point.",
+                    )
+                    .into(),
+                    t.soft,
+                ));
+                let n = self.pins.len();
                 body = body.child(
                     div()
                         .flex()
-                        .items_center()
-                        .justify_between()
+                        .flex_wrap()
                         .gap(px(8.))
-                        .child(small(tr("Drag the start to move it.", "Glisse le départ pour le déplacer.").into(), t.soft))
-                        .child(button("loops-clear", tr("New start", "Nouveau départ"), false, t).debug_selector(|| "loops-clear".into()).on_click(cx.listener(|this, _, _, cx| this.clear(cx)))),
+                        .child(button("loops-clear", tr("New start", "Nouveau départ"), false, t).debug_selector(|| "loops-clear".into()).on_click(cx.listener(|this, _, _, cx| this.clear(cx))))
+                        .when(n > 0, |d| {
+                            d.child(
+                                button(
+                                    "loops-unpin",
+                                    if n > 1 { tr("Take the points away", "Retirer les points") } else { tr("Take the point away", "Retirer le point") },
+                                    false,
+                                    t,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.unpin(cx))),
+                            )
+                        }),
                 );
             }
             if !found.is_empty() {

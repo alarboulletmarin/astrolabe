@@ -23,6 +23,8 @@ const NUDGE_OPTIONS: usize = 6;
 const REUSE: f32 = 4.0;
 /// Two loops sharing more than this share of the shorter one: only the better is kept.
 pub const OVERLAP: f32 = 0.3;
+/// The same, for loops that must pass by points.
+const VIA_OVERLAP: f32 = 0.6;
 /// A loop that runs more than this share of its length twice is not proposed.
 pub const MAX_BACK: f32 = 0.3;
 
@@ -66,7 +68,7 @@ impl Target {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Request {
     pub lat: f64,
     pub lon: f64,
@@ -77,6 +79,8 @@ pub struct Request {
     pub seed: u64,
     /// How many loops to propose.
     pub count: usize,
+    /// Points the loops must pass by, (lat, lon), in any order.
+    pub via: Vec<[f64; 2]>,
 }
 
 /// A proposed loop.
@@ -99,6 +103,10 @@ pub struct Loop {
     pub seed: u64,
     /// Lower is better.
     pub score: f64,
+    /// The points it goes through between the start and back, (lat, lon), and which of them
+    /// were asked for (the others were drawn to make the length).
+    pub waypoints: Vec<[f64; 2]>,
+    pub pinned: Vec<bool>,
     /// The graph's edges it uses, with the length used on each, for comparing loops.
     edges: Vec<(u32, f32)>,
 }
@@ -143,20 +151,25 @@ fn attempt_seed(seed: u64, i: usize) -> u64 {
 /// the one drawn from the request's own seed (so a loop's seed gives that loop back), then the
 /// best of the others. Attempts run on `threads` threads; the result doesn't depend on how many.
 pub fn plan(g: &Graph, req: &Request, threads: usize) -> Result<Vec<Loop>, NoLoop> {
-    let radius = req.target.longest() / 2.0 + 100.0;
+    // Far enough for the loop, and for the points it must pass by.
+    let far = req.via.iter().map(|p| crate::logic::fit::metres([req.lat, req.lon], *p)).fold(0.0, f64::max);
+    let radius = (req.target.longest() / 2.0).max(far * 1.15) + 100.0;
     let local = Local::around(g, req.lat, req.lon, radius, &req.prefs).map_err(|NoStart::TooFar| NoLoop::NoPath)?;
     if local.stretches.is_empty() {
         return Err(NoLoop::NoPath);
     }
+    let via = snap_all(&local, &req.via);
+    // Loops through the same points share their ways: they may share more.
+    let most_shared = if via.is_empty() { OVERLAP } else { VIA_OVERLAP };
     let attempts = (req.count * 2).max(4);
     let threads = threads.clamp(1, attempts);
     let mut found: Vec<(usize, Loop)> = std::thread::scope(|s| {
-        let local = &local;
+        let (local, via) = (&local, &via);
         let workers: Vec<_> = (0..threads)
             .map(|t| {
                 s.spawn(move || {
                     let mut search = Search::new(local.len());
-                    (t..attempts).step_by(threads).filter_map(|i| attempt(local, req, attempt_seed(req.seed, i), &mut search).map(|l| (i, l))).collect::<Vec<_>>()
+                    (t..attempts).step_by(threads).filter_map(|i| attempt(local, req, via, attempt_seed(req.seed, i), &mut search).map(|l| (i, l))).collect::<Vec<_>>()
                 })
             })
             .collect();
@@ -175,7 +188,7 @@ pub fn plan(g: &Graph, req: &Request, threads: usize) -> Result<Vec<Loop>, NoLoo
         if l.back > MAX_BACK {
             continue;
         }
-        if kept.iter().all(|k| overlap(k, &l) <= OVERLAP) {
+        if kept.iter().all(|k| overlap(k, &l) <= most_shared) {
             kept.push(l);
         }
         if kept.len() == req.count {
@@ -183,6 +196,33 @@ pub fn plan(g: &Graph, req: &Request, threads: usize) -> Result<Vec<Loop>, NoLoo
         }
     }
     if kept.is_empty() { Err(NoLoop::NoLoop) } else { Ok(kept) }
+}
+
+/// The nodes nearest to positions, in order, a node next to itself once.
+fn snap_all(l: &Local, points: &[[f64; 2]]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for p in points {
+        let (x, y) = l.xy(p[0], p[1]);
+        if let Some(v) = l.nearest(x, y)
+            && out.last() != Some(&v)
+        {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// The loop from `start` through `points` in their order and back, each leg avoiding what the
+/// others took: a loop the user shaped.
+pub fn through(g: &Graph, start: [f64; 2], points: &[[f64; 2]], prefs: &Prefs) -> Result<Loop, NoLoop> {
+    let far = points.iter().map(|p| crate::logic::fit::metres(start, *p)).fold(0.0, f64::max);
+    let local = Local::around(g, start[0], start[1], far * 1.3 + 1000.0, prefs).map_err(|NoStart::TooFar| NoLoop::NoPath)?;
+    let w = snap_all(&local, points);
+    let pinned = vec![true; w.len()];
+    let mut search = Search::new(local.len());
+    let t = route_all(&local, &w, &pinned, &mut search).ok_or(NoLoop::NoLoop)?;
+    let req = Request { lat: start[0], lon: start[1], target: Target::Exact(t.dist), prefs: *prefs, climb: None, seed: 0, count: 1, via: Vec::new() };
+    Ok(measure(&local, &req, 0, &t))
 }
 
 /// The share of the shorter loop that the other also runs.
@@ -206,6 +246,8 @@ pub fn overlap(a: &Loop, b: &Loop) -> f32 {
 /// One loop: its waypoints' places, then the routes through them.
 struct Try {
     waypoints: Vec<u32>,
+    /// Waypoints asked for: never moved.
+    pinned: Vec<bool>,
     /// Start → first waypoint, …, last waypoint → start, as routed.
     legs: Vec<Vec<u32>>,
     /// The legs joined, spurs cut.
@@ -213,10 +255,21 @@ struct Try {
     dist: f64,
 }
 
-fn attempt(l: &Local, req: &Request, seed: u64, search: &mut Search) -> Option<Loop> {
+fn attempt(l: &Local, req: &Request, via: &[u32], seed: u64, search: &mut Search) -> Option<Loop> {
     let mut rng = Rng::new(seed);
-    let n = 2 + (rng.next() % 3) as usize;
-    let bearing = rng.unit() * 2.0 * PI;
+    // Points to pass by already shape the loop: fewer drawn, toward them.
+    let n = if via.is_empty() { 2 + (rng.next() % 3) as usize } else { (rng.next() % 3) as usize };
+    let bearing = if via.is_empty() {
+        rng.unit() * 2.0 * PI
+    } else {
+        let (sx, sy) = via.iter().fold((0.0, 0.0), |(a, b), &v| {
+            let (x, y) = (l.x[v as usize] as f64, l.y[v as usize] as f64);
+            let r = x.hypot(y).max(1.0);
+            (a + x / r, b + y / r)
+        });
+        sy.atan2(sx) + (rng.unit() - 0.5) * PI * 0.6
+    };
+    let clockwise = !via.is_empty() && rng.next() & 1 == 1;
     // The polygon: the start and `n` waypoints on a circle through the start, jittered.
     let sides = (n + 1) as f64;
     let shape: Vec<(f64, f64)> = (1..=n)
@@ -227,12 +280,29 @@ fn attempt(l: &Local, req: &Request, seed: u64, search: &mut Search) -> Option<L
         .collect();
     let aim = req.target.aim();
     let perimeter = 2.0 * sides * (PI / sides).sin();
-    let place = |scale: f64| -> Vec<u32> {
+    let place = |scale: f64| -> (Vec<u32>, Vec<bool>) {
         let r = aim / (DETOUR * perimeter) * scale;
         let (cx, cy) = (r * bearing.cos(), r * bearing.sin());
         let mut w: Vec<u32> = shape.iter().filter_map(|(a, k)| l.nearest((cx + r * k * a.cos()) as f32, (cy + r * k * a.sin()) as f32)).collect();
         w.dedup();
-        w
+        if via.is_empty() {
+            let pinned = vec![false; w.len()];
+            return (w, pinned);
+        }
+        // With the points asked for, in turn around their middle, from the start's side.
+        let mut all: Vec<(u32, bool)> = w.into_iter().filter(|v| !via.contains(v)).map(|v| (v, false)).chain(via.iter().map(|v| (*v, true))).collect();
+        let mut seen = std::collections::HashSet::new();
+        all.retain(|(v, _)| seen.insert(*v));
+        let k = (all.len() + 1) as f64;
+        let mx = all.iter().map(|(v, _)| l.x[*v as usize] as f64).sum::<f64>() / k;
+        let my = all.iter().map(|(v, _)| l.y[*v as usize] as f64).sum::<f64>() / k;
+        let from = (-my).atan2(-mx);
+        let turn = |v: u32| ((l.y[v as usize] as f64 - my).atan2(l.x[v as usize] as f64 - mx) - from).rem_euclid(2.0 * PI);
+        all.sort_by(|a, b| turn(a.0).total_cmp(&turn(b.0)));
+        if clockwise {
+            all.reverse();
+        }
+        all.into_iter().unzip()
     };
     let mut best: Option<Try> = None;
     let keep = |t: Try, best: &mut Option<Try>| {
@@ -244,9 +314,10 @@ fn attempt(l: &Local, req: &Request, seed: u64, search: &mut Search) -> Option<L
     // Resize by secant steps on the scale, from what each try measured.
     let (mut s0, mut d0) = (1.0, None::<f64>);
     let mut scale = 1.0;
-    for _ in 0..RESIZES {
-        let w = place(scale);
-        let Some(t) = route_all(l, &w, search) else {
+    // Nothing drawn: the points asked for make the loop, whatever its length.
+    for _ in 0..if n == 0 { 1 } else { RESIZES } {
+        let (w, pinned) = place(scale);
+        let Some(t) = route_all(l, &w, &pinned, search) else {
             scale *= 0.8;
             continue;
         };
@@ -266,7 +337,7 @@ fn attempt(l: &Local, req: &Request, seed: u64, search: &mut Search) -> Option<L
     let mut best = best?;
     // Exact mode: move one waypoint at a time to a nearby node, while it brings the length
     // closer; the routes stay loops, never an out-and-back added for length.
-    if matches!(req.target, Target::Exact(_)) {
+    if matches!(req.target, Target::Exact(_)) && n > 0 {
         // First coarse: a waypoint slid along its line from the start by half what is missing
         // (a loop through it gains or loses about twice the slide).
         for k in 0..2 * best.waypoints.len() {
@@ -274,6 +345,9 @@ fn attempt(l: &Local, req: &Request, seed: u64, search: &mut Search) -> Option<L
                 break;
             }
             let i = k % best.waypoints.len();
+            if best.pinned[i] {
+                continue;
+            }
             let w = best.waypoints[i] as usize;
             let (x, y) = (l.x[w] as f64, l.y[w] as f64);
             let r = x.hypot(y).max(1.0);
@@ -296,6 +370,10 @@ fn attempt(l: &Local, req: &Request, seed: u64, search: &mut Search) -> Option<L
                 break;
             }
             let i = k % n;
+            if best.pinned[i] {
+                stuck += 1;
+                continue;
+            }
             // Too short: try the nodes farther from the start first; too long, the nearer.
             let longer = best.dist < aim;
             let far = |v: u32| l.x[v as usize].hypot(l.y[v as usize]);
@@ -335,7 +413,7 @@ fn neighbours(l: &Local, v: u32) -> Vec<u32> {
 }
 
 /// Start → waypoints → start, each leg avoiding what the previous ones took.
-fn route_all(l: &Local, waypoints: &[u32], search: &mut Search) -> Option<Try> {
+fn route_all(l: &Local, waypoints: &[u32], pinned: &[bool], search: &mut Search) -> Option<Try> {
     let mut used = vec![0u8; l.stretches.len()];
     let mut legs = Vec::with_capacity(waypoints.len() + 1);
     let stops: Vec<u32> = std::iter::once(0).chain(waypoints.iter().copied()).chain(std::iter::once(0)).collect();
@@ -344,7 +422,7 @@ fn route_all(l: &Local, waypoints: &[u32], search: &mut Search) -> Option<Try> {
         take(&mut used, &leg, 1);
         legs.push(leg);
     }
-    join(l, waypoints.to_vec(), legs)
+    join(l, waypoints.to_vec(), pinned.to_vec(), legs)
 }
 
 /// A leg from `a` to `b`, what was already taken costing more.
@@ -377,11 +455,11 @@ fn nudge(l: &Local, t: &Try, i: usize, v: u32, search: &mut Search) -> Option<Tr
     legs[i + 1] = leg(l, v, after, &used, search)?;
     let mut waypoints = t.waypoints.clone();
     waypoints[i] = v;
-    join(l, waypoints, legs)
+    join(l, waypoints, t.pinned.clone(), legs)
 }
 
 /// The legs as one loop: in by a stretch and straight back out by it is cut, again and again.
-fn join(l: &Local, waypoints: Vec<u32>, legs: Vec<Vec<u32>>) -> Option<Try> {
+fn join(l: &Local, waypoints: Vec<u32>, pinned: Vec<bool>, legs: Vec<Vec<u32>>) -> Option<Try> {
     let mut arcs: Vec<u32> = Vec::with_capacity(legs.iter().map(Vec::len).sum());
     for &a in legs.iter().flatten() {
         if arcs.last().is_some_and(|p| p >> 1 == a >> 1 && p & 1 != a & 1) {
@@ -394,7 +472,7 @@ fn join(l: &Local, waypoints: Vec<u32>, legs: Vec<Vec<u32>>) -> Option<Try> {
         return None;
     }
     let dist = arcs.iter().map(|a| l.stretches[(a >> 1) as usize].len as f64).sum();
-    Some(Try { waypoints, legs, arcs, dist })
+    Some(Try { waypoints, pinned, legs, arcs, dist })
 }
 
 /// What a loop is like: its line, length, climb, surfaces, the share run twice, its score.
@@ -447,7 +525,8 @@ fn measure(l: &Local, req: &Request, seed: u64, t: &Try) -> Loop {
     if let Some(c) = req.climb {
         score += (up - c).abs() / c.max(100.0);
     }
-    Loop { line, eles, along, dist: t.dist, up, down, trail, paved, back, seed, score, edges: edges.into_iter().collect() }
+    let waypoints = t.waypoints.iter().map(|v| l.position(*v)).collect();
+    Loop { line, eles, along, dist: t.dist, up, down, trail, paved, back, seed, score, waypoints, pinned: t.pinned.clone(), edges: edges.into_iter().collect() }
 }
 
 #[cfg(test)]
@@ -457,7 +536,7 @@ mod tests {
 
     fn req(target: Target, seed: u64) -> Request {
         // On the south street, 100 m from the corner.
-        Request { lat: 43.70, lon: 7.25 + 100.0 / (111_195.0 * 0.7230), target, prefs: Prefs::default(), climb: None, seed, count: 3 }
+        Request { lat: 43.70, lon: 7.25 + 100.0 / (111_195.0 * 0.7230), target, prefs: Prefs::default(), climb: None, seed, count: 3, via: Vec::new() }
     }
 
     #[test]
@@ -488,7 +567,7 @@ mod tests {
         let many = plan(&g, &r, 8).unwrap();
         assert_eq!(one, many);
         // A loop's own seed gives it first.
-        let again = plan(&g, &Request { seed: one[1].seed, ..r }, 2).unwrap();
+        let again = plan(&g, &Request { seed: one[1].seed, ..r.clone() }, 2).unwrap();
         assert_eq!(again[0].line, one[1].line);
         assert_ne!(plan(&g, &Request { seed: 43, ..r }, 2).unwrap()[0].line, one[0].line);
     }
@@ -513,6 +592,58 @@ mod tests {
         // From the island, 500 m of path: no loop of 5 km.
         let island = Request { lat: 43.70 + 200.0 / 111_195.0, lon: 7.25 + 4000.0 / (111_195.0 * 0.7230), ..req(Target::Exact(5000.0), 1) };
         assert_eq!(plan(&g, &island, 2).err(), Some(NoLoop::NoLoop));
+    }
+
+    /// (lat, lon) `east` and `north` metres from the town's south-west corner.
+    fn at(east: f64, north: f64) -> [f64; 2] {
+        [43.70 + north / 111_195.0, 7.25 + east / (111_195.0 * 0.7230)]
+    }
+
+    /// How near a line comes to a position, and where.
+    fn closest(line: &[[f64; 2]], p: [f64; 2]) -> (f64, usize) {
+        line.iter().enumerate().map(|(i, q)| (crate::logic::fit::metres(*q, p), i)).fold((f64::MAX, 0), |a, b| if b.0 < a.0 { b } else { a })
+    }
+
+    #[test]
+    fn loops_pass_by_the_points_asked() {
+        let g = town();
+        for (via, km) in [(vec![at(1500.0, 1500.0)], 7000.0), (vec![at(2000.0, 500.0), at(500.0, 2000.0)], 8000.0)] {
+            let loops = plan(&g, &Request { via: via.clone(), ..req(Target::Exact(km), 3) }, 4).unwrap();
+            assert!(!loops.is_empty());
+            assert!(loops.iter().any(|l| Target::Exact(km).holds(l.dist)), "{km}: {:?}", loops.iter().map(|l| l.dist).collect::<Vec<_>>());
+            for l in &loops {
+                for p in &via {
+                    assert!(closest(&l.line, *p).0 < 30.0, "{p:?} off the loop");
+                    assert!(l.waypoints.iter().zip(&l.pinned).any(|(w, pin)| *pin && crate::logic::fit::metres(*w, *p) < 30.0));
+                }
+                assert_eq!(l.waypoints.len(), l.pinned.len());
+            }
+        }
+        // A point farther than the loop can reach: the loop goes there anyway, longer.
+        let far = plan(&g, &Request { via: vec![at(2900.0, 2900.0)], ..req(Target::Exact(3000.0), 3) }, 4).unwrap();
+        assert!(far[0].dist > 9000.0 && closest(&far[0].line, at(2900.0, 2900.0)).0 < 150.0, "{}", far[0].dist);
+    }
+
+    #[test]
+    fn a_shaped_loop_follows_its_points_in_order() {
+        let g = town();
+        let start = req(Target::Exact(1.0), 0);
+        let start = [start.lat, start.lon];
+        let (a, b) = (at(1500.0, 1000.0), at(500.0, 2000.0));
+        let l = through(&g, start, &[a, b], &Prefs::default()).unwrap();
+        let ((da, ia), (db, ib)) = (closest(&l.line, a), closest(&l.line, b));
+        assert!(da < 30.0 && db < 30.0 && ia < ib, "{da} {db} {ia} {ib}");
+        assert!(crate::logic::fit::metres(l.line[0], *l.line.last().unwrap()) < 1.0);
+        assert!(l.pinned.iter().all(|p| *p) && l.waypoints.len() == 2);
+        // The other way round: through b first.
+        let r = through(&g, start, &[b, a], &Prefs::default()).unwrap();
+        assert!(closest(&r.line, b).1 < closest(&r.line, a).1);
+        // One point: there and back by another way where there is one.
+        let one = through(&g, start, &[a], &Prefs::default()).unwrap();
+        assert!(one.back < 0.5, "{}", one.back);
+        // No point: no loop; two points on the same node count once.
+        assert_eq!(through(&g, start, &[], &Prefs::default()).err(), Some(NoLoop::NoLoop));
+        assert_eq!(through(&g, start, &[a, a], &Prefs::default()).unwrap().waypoints.len(), 1);
     }
 
     #[test]
@@ -544,7 +675,7 @@ mod tests {
             let lat = 43.7034 + r * a.sin() / 111_195.0;
             let lon = 7.2663 + r * a.cos() / (111_195.0 * 43.7034f64.to_radians().cos());
             let km = 5.0 + rng.unit() * 35.0;
-            let req = Request { lat, lon, target: Target::Exact(km * 1000.0), prefs: Prefs::default(), climb: None, seed: rng.next(), count: 5 };
+            let req = Request { lat, lon, target: Target::Exact(km * 1000.0), prefs: Prefs::default(), climb: None, seed: rng.next(), count: 5, via: Vec::new() };
             let t = Instant::now();
             let res = plan(&g, &req, threads);
             let ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -604,7 +735,7 @@ mod tests {
         let (mut times, mut fit) = (Vec::new(), 0);
         for _ in 0..60 {
             let km = 5.0 + rng.unit() * 35.0;
-            let req = Request { lat: 43.68 + rng.unit() * 0.01, lon: 7.25 + rng.unit() * 0.01, target: Target::Exact(km * 1000.0), prefs: Prefs::default(), climb: None, seed: rng.next(), count: 5 };
+            let req = Request { lat: 43.68 + rng.unit() * 0.01, lon: 7.25 + rng.unit() * 0.01, target: Target::Exact(km * 1000.0), prefs: Prefs::default(), climb: None, seed: rng.next(), count: 5, via: Vec::new() };
             let t = Instant::now();
             let res = plan(&g, &req, threads);
             times.push((km, t.elapsed().as_secs_f64() * 1000.0));

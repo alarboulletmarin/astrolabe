@@ -8,6 +8,7 @@ use crate::logic::elevation::{self, Dem};
 use crate::logic::graph::{self, CANCELLED, Graph};
 use crate::logic::loops::{self, Loop, NoLoop, Request};
 use crate::logic::regions::{self, Region};
+use crate::logic::route::Prefs;
 use crate::platform::{self, store};
 use gpui_kit::*;
 use std::collections::HashMap;
@@ -57,6 +58,8 @@ pub struct Loops {
     pub planning: bool,
     pub plan_error: Option<String>,
     plan_round: u64,
+    /// A loop being routed again through points moved by hand.
+    pub editing: bool,
     /// Geofabrik's and the elevation tiles' addresses (local stand-ins in the tests).
     pub osm_base: String,
     pub elevation_base: String,
@@ -78,6 +81,7 @@ impl Default for Loops {
             planning: false,
             plan_error: None,
             plan_round: 0,
+            editing: false,
             osm_base: platform::osm::GEOFABRIK.into(),
             elevation_base: platform::elevation::TERRARIUM.into(),
             relief: HashMap::new(),
@@ -333,12 +337,50 @@ impl Data {
 
     /// Forgets the loops (and the answer to a planning still under way).
     pub fn clear_loops(&mut self, cx: &mut Context<Self>) {
+        self.set_found(Arc::default(), cx);
+        self.loops.generation += 1;
+    }
+
+    /// Puts back loops as they were (undoing), the answer to any work under way dropped.
+    pub fn set_found(&mut self, found: Arc<Vec<Loop>>, cx: &mut Context<Self>) {
         self.loops.plan_round += 1;
         self.loops.planning = false;
+        self.loops.editing = false;
         self.loops.plan_error = None;
-        self.loops.found = Arc::default();
-        self.loops.generation += 1;
+        self.loops.found = found;
         cx.notify();
+    }
+
+    /// Routes loop `i` again from `start` through `points`, in their order, off the UI thread.
+    pub fn reroute(&mut self, i: usize, start: [f64; 2], points: Vec<[f64; 2]>, prefs: Prefs, cx: &mut Context<Self>) {
+        let Some(g) = self.loops.graph.clone() else { return };
+        self.loops.plan_round += 1;
+        let round = self.loops.plan_round;
+        self.loops.editing = true;
+        self.loops.planning = false;
+        self.loops.plan_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = cx.background_executor().spawn(async move { loops::through(&g, start, &points, &prefs) }).await;
+            this.update(cx, |d, cx| {
+                if d.loops.plan_round != round {
+                    return;
+                }
+                d.loops.editing = false;
+                match res {
+                    Ok(l) if i < d.loops.found.len() => {
+                        let mut found = (*d.loops.found).clone();
+                        found[i] = l;
+                        d.loops.found = Arc::new(found);
+                    }
+                    Ok(_) => {}
+                    Err(_) => d.loops.plan_error = Some(tr("No path through these points.", "Pas de chemin par ces points.").into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Writes a loop as GPX where the user chose.

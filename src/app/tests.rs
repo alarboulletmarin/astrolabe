@@ -209,11 +209,15 @@ fn the_start_is_dragged_and_a_new_distance_plans_again(cx: &mut TestAppContext) 
     let set = shell.read_with(cx, |s, cx| s.loops.read(cx).start()).unwrap();
     // The map fitted the loops: the start is somewhere else on screen now.
     let at = screen(cx, set.0, set.1);
-    // Another click, off the start: the start stays.
+    // Another click, off the start: the start stays, a point to pass by is set; undone.
     cx.simulate_click(gpui::point(at.x + gpui::px(60.), at.y - gpui::px(60.)), Modifiers::none());
     cx.run_until_parked();
     assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()), Some(set));
-    assert_eq!(generation(cx), first);
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().len()), 1);
+    cx.simulate_keystrokes(&format!("{mod_key}-z"));
+    cx.run_until_parked();
+    assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().is_empty()));
+    let at = screen(cx, set.0, set.1);
     // Dragged 500 m east along the street: loops from there.
     let to = screen(cx, lat, lon_at(1500.0));
     cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
@@ -246,6 +250,103 @@ fn the_start_is_dragged_and_a_new_distance_plans_again(cx: &mut TestAppContext) 
     cx.run_until_parked();
     assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()).is_some());
     assert!(!shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.is_empty()));
+}
+
+/// Points on the Loops page: a click asks the loops to pass by a point; undo and redo; a point
+/// of the loop dragged, one taken away by a right click, one made by dragging the line.
+#[gpui::test]
+fn the_loop_is_shaped_by_hand(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let (shell, cx) = start(cx, 3);
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| d.loops.graph = Some(std::sync::Arc::new(crate::logic::graph::tests::town()))));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    let at = |east: f64, north: f64| [43.70 + north / 111_195.0, 7.25 + east / (111_195.0 * 0.7230)];
+    let s0 = at(1000.0, 0.0);
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| {
+        l.look_at(43.70 + 1500.0 / 111_195.0, s0[1], 14.0);
+        l.type_km("7", window, cx);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let screen = |cx: &mut gpui::VisualTestContext, p: [f64; 2]| shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(p[0], p[1]));
+    let found = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.clone());
+    let selected = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.loops.read(cx).selected());
+    let near = |line: &[[f64; 2]], p: [f64; 2]| line.iter().map(|q| crate::logic::fit::metres(*q, p)).fold(f64::MAX, f64::min);
+    let p = screen(cx, s0);
+    cx.simulate_click(p, Modifiers::none());
+    cx.run_until_parked();
+    let first = found(cx);
+    assert!(!first.is_empty());
+    // A point to pass by: every loop goes there.
+    let via = at(1500.0, 1500.0);
+    let p = screen(cx, via);
+    cx.simulate_click(p, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().len()), 1);
+    let with = found(cx);
+    assert!(!with.is_empty() && with.iter().all(|l| near(&l.line, via) < 40.0), "{:?}", with.iter().map(|l| near(&l.line, via)).collect::<Vec<_>>());
+    // Undone: no point, the loops of before; done again.
+    cx.simulate_keystrokes(&format!("{mod_key}-z"));
+    cx.run_until_parked();
+    assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().is_empty()));
+    assert_eq!(found(cx)[0].line, first[0].line);
+    cx.simulate_keystrokes(&format!("{mod_key}-shift-z"));
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().len()), 1);
+    assert_eq!(found(cx)[0].line, with[0].line);
+    // The whole town in sight, right of the panel (each new set of loops is fitted).
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
+        l.look_at(43.70 + 1500.0 / 111_195.0, 7.25 + 500.0 / (111_195.0 * 0.7230), 14.0);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    // A point of the loop dragged elsewhere: the loop goes there now, the others stay.
+    let i = selected(cx);
+    let l = found(cx)[i].clone();
+    let k = l.pinned.iter().position(|p| !p).unwrap_or(0);
+    let (from, to) = (screen(cx, l.waypoints[k]), at(2500.0, 2500.0));
+    let to_px = screen(cx, to);
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point((from.x + to_px.x) / 2., (from.y + to_px.y) / 2.), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(to_px, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(to_px, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let moved = found(cx)[i].clone();
+    assert!(near(&moved.line, to) < 40.0 && near(&moved.line, via) < 40.0, "{} {}", near(&moved.line, to), near(&moved.line, via));
+    assert_eq!(moved.waypoints.len(), l.waypoints.len());
+    assert!(moved.pinned.iter().all(|p| *p), "a loop shaped by hand keeps all its points");
+    assert_eq!(found(cx).len(), with.len());
+    // A right click takes a point away.
+    let n = moved.waypoints.len();
+    let p = screen(cx, moved.waypoints[k]);
+    cx.simulate_mouse_down(p, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(p, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(found(cx)[i].waypoints.len(), n - 1);
+    assert!(near(&found(cx)[i].line, via) < 40.0, "the point asked for stays");
+    // Dragging the line makes a point there.
+    let l = found(cx)[i].clone();
+    let mid = l.line[l.line.len() / 3];
+    // Somewhere on a street, away from the loop: on a loop of the first set.
+    let goal = first.iter().flat_map(|f| f.line.iter().copied()).max_by(|a, b| near(&l.line, *a).total_cmp(&near(&l.line, *b))).unwrap();
+    let (from, to) = (screen(cx, mid), screen(cx, goal));
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(10.), from.y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(found(cx)[i].waypoints.len(), n);
+    assert!(near(&l.line, goal) > 200.0);
+    assert!(near(&found(cx)[i].line, goal) < 40.0, "{}", near(&found(cx)[i].line, goal));
+    // A click on a point moves nothing.
+    let before = found(cx)[i].clone();
+    let p = screen(cx, before.waypoints[0]);
+    cx.simulate_click(p, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(found(cx)[i].line, before.line);
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().len()), 1);
 }
 
 /// A record row opens on its ten best, a click on one opens its outing, and a second click on the row closes it.

@@ -80,6 +80,9 @@ pub struct Local<'g> {
     pub arcs: Vec<u32>,
     pub stretches: Vec<Stretch>,
     grid: NodeGrid,
+    /// Where the start fell (lat, lon), and metres per degree east and north there.
+    pub start: [f64; 2],
+    k: (f64, f64),
 }
 
 /// Where the start was put, and how far it was from what was asked.
@@ -205,7 +208,7 @@ impl<'g> Local<'g> {
             fill[s.b as usize] += 1;
         }
         let grid = NodeGrid::new(&x, &y);
-        Ok(Local { graph: g, x, y, first, arcs, stretches, grid })
+        Ok(Local { graph: g, x, y, first, arcs, stretches, grid, start, k: (kx, ky) })
     }
 
     pub fn len(&self) -> usize {
@@ -220,6 +223,16 @@ impl<'g> Local<'g> {
     pub fn head(&self, arc: u32) -> (u32, u32) {
         let s = &self.stretches[(arc >> 1) as usize];
         (arc >> 1, if arc & 1 == 0 { s.b } else { s.a })
+    }
+
+    /// A position in metres east and north of the start.
+    pub fn xy(&self, lat: f64, lon: f64) -> (f32, f32) {
+        (((lon - self.start[1]) * self.k.0) as f32, ((lat - self.start[0]) * self.k.1) as f32)
+    }
+
+    /// The position of a local node, (lat, lon).
+    pub fn position(&self, v: u32) -> [f64; 2] {
+        [self.start[0] + self.y[v as usize] as f64 / self.k.1, self.start[1] + self.x[v as usize] as f64 / self.k.0]
     }
 
     /// The local node nearest to (x, y) metres, other than the start.

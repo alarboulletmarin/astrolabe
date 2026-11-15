@@ -383,6 +383,7 @@ fn a_region_is_downloaded_once_and_planned_offline(cx: &mut TestAppContext) {
         climb: None,
         seed: 5,
         count: 3,
+        via: Vec::new(),
     };
     data.update(cx, |d, cx| d.plan_loops(req, cx));
     settle(cx);
