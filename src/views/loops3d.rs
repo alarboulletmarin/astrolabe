@@ -106,6 +106,10 @@ pub(super) struct Scene {
     /// Where the pointer was at the last move of a drag, and whether it turns the ground
     /// (otherwise it moves it).
     drag: Option<(Point<Pixels>, bool)>,
+    /// The view's size the loop was framed for, and whether the eye was moved by hand since:
+    /// until then, a view that changes size (a window being laid out, resized) is framed again.
+    framed: (f64, f64),
+    moved: bool,
 }
 
 /// The box of a loop, `[south, west, north, east]`.
@@ -181,19 +185,27 @@ impl Scene {
         let shade = Shade::from_tiles(bbox, z, EXAGGERATION, &|x, y| needed.get(&(x, y)).cloned())?;
         let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE }.lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None };
+        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false };
         s.frame(line, size);
         Some(s)
     }
 
+    /// Frames the loop again for a view that changed size, unless the eye was moved by hand.
+    fn follow_size(&mut self, line: &[[f64; 2]], size: (f64, f64)) {
+        if !self.moved && self.framed != size && size.0 >= 8.0 && size.1 >= 8.0 {
+            self.framed = size;
+            self.frame(line, size);
+        }
+    }
+
     /// Puts the eye so that the loop, rather than the whole ground (which runs out of the view),
-    /// fills what the panel leaves of a view of `size`.
+    /// is in the middle of what the panel leaves of a view of `size`, and fills it.
     fn frame(&mut self, line: &[[f64; 2]], size: (f64, f64)) {
         let (w, h) = (size.0.max(PANEL * 2.0), size.1.max(200.0));
         let (left, free) = (PANEL + 28.0, w - PANEL - 28.0);
         let pts: Vec<[f64; 3]> = line.iter().map(|p| self.place(*p)).collect();
         // Each round measures the loop on screen, then backs off and slides to fit; a few settle.
-        for _ in 0..8 {
+        for _ in 0..12 {
             let seen = pts.iter().filter_map(|p| terrain::project(&self.terrain, &self.cam, EXAGGERATION, *p, w as usize, h as usize));
             let (x0, y0, x1, y1) = seen.fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, (x, y)| (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y)));
             if x0 > x1 {
@@ -354,6 +366,9 @@ impl LoopsView {
         let b = bounds.get();
         let dims = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
         self.ensure_scene(l, dims, cx);
+        if let Some(s) = self.scene.as_mut() {
+            s.follow_size(&l.line, dims);
+        }
         self.ensure_drape(cx);
         self.ensure_blocks(l, cx);
         self.ensure_picture(l, dims, cx);
@@ -399,6 +414,7 @@ impl LoopsView {
             .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
                 let dy = (e.delta.pixel_delta(px(20.)).y / px(1.)) as f64;
                 if let Some(s) = this.scene.as_mut() {
+                    s.moved = true;
                     s.cam.zoom(2f64.powf(-dy / 240.0));
                     s.cam.lift(&s.terrain, EXAGGERATION);
                     cx.notify();
@@ -436,6 +452,7 @@ impl LoopsView {
                     s.cam.pan_screen(&s.terrain, EXAGGERATION, dx, dy, size.1);
                 }
                 s.drag = Some((e.position, turn));
+                s.moved = true;
                 cx.notify();
             }
             None => {
@@ -531,6 +548,56 @@ mod tests {
         cam.target[0] += 900.0;
         assert!(b.seen(&cam).is_empty());
         assert!(Blocks::beside(&line, &[], &s.terrain, [0; 3], [0; 3]).seen(&s.cam).is_empty());
+    }
+
+    /// The loop's box on screen, in a view of `size`.
+    fn on_screen(s: &Scene, line: &[[f64; 2]], size: (f64, f64)) -> (f32, f32, f32, f32) {
+        line.iter().map(|p| s.screen(*p, size.0, size.1).unwrap()).fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |b, (x, y)| (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y)))
+    }
+
+    #[test]
+    fn the_loop_is_in_the_middle_of_the_free_area_and_fills_it() {
+        use super::PANEL;
+        let mut hills = |_: u8, _: u32, _: u32| Some(Arc::new((0..256 * 256).map(|i| 200.0 + 150.0 * ((i % 256) as f32 / 30.0).sin() + (i / 256) as f32).collect::<Vec<f32>>()));
+        // A loop wider than high, one higher than wide, a long thin one, a tiny one.
+        let ring = |lat: f64, lon: f64, dlat: f64, dlon: f64| (0..60).map(|k| { let a = k as f64 / 60.0 * std::f64::consts::TAU; [lat + dlat * a.sin(), lon + dlon * a.cos()] }).collect::<Vec<_>>();
+        let loops = [ring(43.71, 7.27, 0.01, 0.06), ring(43.71, 7.27, 0.05, 0.01), ring(43.71, 7.27, 0.0005, 0.08), ring(43.71, 7.27, 0.001, 0.001)];
+        for line in &loops {
+            for size in [(1200.0, 800.0), (2400.0, 1300.0), (900.0, 1000.0), (760.0, 480.0)] {
+                let s = Scene::of(line, 0, false, size, &mut hills).unwrap();
+                let (x0, y0, x1, y1) = on_screen(&s, line, size);
+                let (left, free) = ((PANEL + 28.0) as f32, (size.0 - PANEL - 28.0) as f32);
+                let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+                let what = format!("{:?} in {size:?}: {x0} {y0} {x1} {y1}", line[1]);
+                assert!((cx - (left + free / 2.0)).abs() < free * 0.03 && (cy - size.1 as f32 / 2.0).abs() < size.1 as f32 * 0.03, "centred: {what}");
+                // Whole in the free area, and large: 80 % of its width or of its height.
+                assert!(x0 >= left && x1 <= size.0 as f32 && y0 >= 0.0 && y1 <= size.1 as f32, "inside: {what}");
+                let fill = ((x1 - x0) / free).max((y1 - y0) / size.1 as f32);
+                assert!((0.74..=0.86).contains(&fill), "fills {fill}: {what}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_view_that_changes_size_is_framed_again_until_the_eye_is_moved() {
+        let line = [[43.70, 7.25], [43.72, 7.27], [43.71, 7.29]];
+        let mut flat = |_: u8, _: u32, _: u32| Some(Arc::new(vec![100.0f32; 256 * 256]));
+        // Made while the window was still small, as when it opens.
+        let mut s = Scene::of(&line, 0, false, (700.0, 400.0), &mut flat).unwrap();
+        let big = (1600.0, 1000.0);
+        let centre = |s: &Scene| { let b = on_screen(s, &line, big); ((b.0 + b.2) / 2.0, (b.1 + b.3) / 2.0) };
+        let want = ((super::PANEL as f32 + 28.0 + 1600.0) / 2.0, 500.0);
+        assert!((centre(&s).0 - want.0).abs() > 60.0, "framed for the small view, off in the large one");
+        s.follow_size(&line, big);
+        let c = centre(&s);
+        assert!((c.0 - want.0).abs() < 40.0 && (c.1 - want.1).abs() < 30.0, "{c:?} {want:?}");
+        // Not laid out: nothing changes. Moved by hand: the eye is left where it was put.
+        let cam = s.cam;
+        s.follow_size(&line, (0.0, 0.0));
+        assert_eq!(format!("{:?}", s.cam), format!("{cam:?}"));
+        s.moved = true;
+        s.follow_size(&line, (900.0, 700.0));
+        assert_eq!(format!("{:?}", s.cam), format!("{cam:?}"));
     }
 
     #[test]
