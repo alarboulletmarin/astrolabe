@@ -6,20 +6,22 @@ use crate::lang::tr;
 use crate::logic::loops::Loop;
 use crate::logic::map::world;
 use crate::logic::slope;
-use crate::logic::terrain::{self, Camera, Terrain, Texture};
+use crate::logic::terrain::{self, Camera, Shade, Terrain, Texture};
 use crate::ui::render_image;
 use gpui_kit::*;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-/// Heights drawn half again as high: the slopes read better a little steeper.
-const EXAGGERATION: f32 = 1.5;
-/// Most vertices of the ground: about 16 ms for a picture of 1200 × 800.
-const CELLS: usize = 300 * 300;
+/// Heights drawn a fifth higher: the slopes read better a little steeper, and no more is
+/// needed now that the light follows every fold.
+const EXAGGERATION: f32 = 1.2;
+/// Most vertices of the ground: about 26 ms for a picture of 1200 × 800.
+const CELLS: usize = 500 * 500;
 /// Radians turned per pixel dragged.
 const TURN: f64 = 0.006;
-/// Zoom of the tiles at the most.
-const MAX_ZOOM: u8 = 12;
+/// Zoom of the elevation tiles at the most: about 14 m a pixel here, finer than what they were
+/// made from (about 30 m).
+const MAX_ZOOM: u8 = 13;
 /// Share of the ground, from each edge, that fades into the page: no cut sides.
 const FADE: f32 = 0.16;
 /// The map laid on the ground is at least this many pixels along its longer side (and less
@@ -34,7 +36,9 @@ pub(super) struct Scene {
     terrain: Arc<Terrain>,
     /// The ground's box, `[south, west, north, east]`.
     bbox: [f64; 4],
-    /// Grey by altitude until the map's tiles are all there, then the map (`draped`).
+    /// The light on the ground, from the elevation tiles at their full resolution.
+    shade: Arc<Shade>,
+    /// Grey by altitude until the map's tiles are all there, then the map (`draped`); lit.
     texture: Arc<Texture>,
     draped: bool,
     pub(super) cam: Camera,
@@ -65,15 +69,14 @@ fn span(bbox: [f64; 4]) -> (f64, f64) {
 }
 
 /// The ground around a loop's box: the loop's country on every side (half the box's longer side,
-/// at least 1.5 km; its edges fade away), and the tile zoom whose pixels are about as fine as
-/// the ground's cells.
+/// at least 1.5 km; its edges fade away), and the zoom of its elevation tiles: as fine as the
+/// map's, which is finer than the ground's cells (the light is worked out tile pixel by tile
+/// pixel), within what the tiles are worth.
 fn around([s, w, n, e]: [f64; 4]) -> ([f64; 4], u8) {
     let (long, cos) = span([s, w, n, e]);
     let m = (long / 2.0).max(1500.0) / 110_540.0;
     let bbox = [s - m, w - m / cos, n + m, e + m / cos];
-    let cell = span(bbox).0 / (CELLS as f64).sqrt();
-    let z = (156_543.0 * cos / cell).log2().ceil().clamp(8.0, MAX_ZOOM as f64) as u8;
-    (bbox, z)
+    (bbox, map_zoom(bbox).min(MAX_ZOOM))
 }
 
 /// The zoom of the map tiles laid on the ground.
@@ -120,9 +123,10 @@ impl Scene {
         let needed: std::collections::HashMap<(u32, u32), Arc<Vec<f32>>> = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<_>>()?;
         let t = Terrain::from_tiles(bbox, CELLS, z, &|x, y| needed.get(&(x, y)).cloned())?;
         let (lo, hi) = t.heights.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-        let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE };
+        let shade = Shade::from_tiles(bbox, z, EXAGGERATION, &|x, y| needed.get(&(x, y)).cloned())?;
+        let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE }.lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, terrain: Arc::new(t), bbox, texture: Arc::new(texture), draped: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None };
+        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None };
         s.frame(line, size);
         Some(s)
     }
@@ -196,9 +200,9 @@ impl LoopsView {
         // Every tile asked for at once, so that they come together.
         let got: Vec<_> = tiles(s.bbox, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
         let Some(have) = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<std::collections::HashMap<(u32, u32), Arc<Vec<u8>>>>>() else { return };
-        // ponytail: resampled on the main thread, about 10 ms once per loop; in the background if it shows.
+        // ponytail: resampled and lit on the main thread, once per loop; in the background if it shows.
         if let Some(t) = Texture::from_tiles(s.bbox, z, FADE, &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) {
-            s.texture = Arc::new(t);
+            s.texture = Arc::new(t.lit(&s.shade));
             s.draped = true;
         }
     }
@@ -447,18 +451,23 @@ mod tests {
         let m = 1600.0 / 110_540.0;
         assert!((bbox[0] - (43.70 - m)).abs() < 2e-4 && (bbox[2] - (43.72 + m)).abs() < 2e-4, "{bbox:?}");
         assert!(bbox[1] < 7.25 - m && bbox[3] > 7.29 + m, "{bbox:?}");
-        // Cells of about 20 m: tiles of zoom 12.
-        assert_eq!(z, 12);
+        // A small box: the finest elevation tiles.
+        assert_eq!(z, 13);
         let t = tiles(bbox, z);
         let (x, y) = world(43.71, 7.27, z as f64);
         assert!(t.contains(&((x / 256.0) as u32, (y / 256.0) as u32)));
-        assert!(t.len() <= 9, "{t:?}");
+        assert!(t.len() <= 16, "{t:?}");
         // A single point still has a box of 3 km; no line, none.
         let (b, _) = around(bounds(&[[43.7, 7.25]]).unwrap());
         assert!((span(b).0 - 3000.0).abs() < 30.0, "{b:?}");
         assert!(bounds(&[]).is_none());
         // A long loop takes coarser tiles.
         assert!(around([43.5, 7.0, 43.9, 7.5]).1 < 12);
+        // Never more elevation tiles than the map's own.
+        for inner in [[43.7, 7.25, 43.7, 7.25], [43.0, 6.0, 44.0, 7.9], [68.0, 15.0, 68.4, 16.0]] {
+            let (b, z) = around(inner);
+            assert!(z <= map_zoom(b) && tiles(b, z).len() <= 100, "{inner:?}");
+        }
     }
 
     #[test]
