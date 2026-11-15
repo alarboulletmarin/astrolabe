@@ -8,6 +8,7 @@ use crate::logic::activity::{fmt_km, fmt_m, group};
 use crate::logic::loops::{Loop, Request, Route, Target};
 use crate::logic::map::{self, View};
 use crate::logic::relief;
+use crate::logic::slope;
 use crate::logic::route::{Places, Prefs, Zone};
 use crate::ui::chart::{Series, line_chart, nearest, range};
 use crate::ui::theme::blend;
@@ -130,6 +131,12 @@ pub struct LoopsView {
     placing_zone: bool,
     /// The avoid settings unfolded.
     avoid_open: bool,
+    /// The chosen loop drawn in the colours of its grade.
+    show_slope: bool,
+    /// The climb pointed at in the list.
+    climb_hover: Option<usize>,
+    /// The chosen loop's stretches by grade, and which loop they are of.
+    runs: Option<(u64, Arc<Vec<(usize, usize, u8)>>)>,
     seed: u64,
     selected: usize,
     /// The point of the profile pointed at.
@@ -199,6 +206,9 @@ impl LoopsView {
             zones: read_zones(&get("loops.zones", "")),
             placing_zone: false,
             avoid_open: false,
+            show_slope: get("loops.slope", "1") == "1",
+            runs: None,
+            climb_hover: None,
             data,
             map: MapState::new(),
             start: None,
@@ -434,7 +444,17 @@ impl LoopsView {
     }
 
     fn move_to(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
-        let Some(h) = self.drag else { return };
+        let Some(h) = self.drag else {
+            // Over the chosen loop: its point shows on the profile.
+            if e.pressed_button.is_none() {
+                let hover = self.line_at(e.position, cx);
+                if hover != self.hover {
+                    self.hover = hover;
+                    cx.notify();
+                }
+            }
+            return;
+        };
         if e.pressed_button != Some(MouseButton::Left) {
             self.drag = None;
             self.draft = None;
@@ -662,6 +682,11 @@ impl LoopsView {
     }
 
     #[cfg(test)]
+    pub fn hover(&self) -> Option<usize> {
+        self.hover
+    }
+
+    #[cfg(test)]
     pub fn zones(&self) -> Vec<Zone> {
         self.zones.clone()
     }
@@ -825,6 +850,19 @@ impl Render for LoopsView {
         let draft = self.draft.clone().zip(start).map(|(d, s)| std::iter::once([s.0, s.1]).chain(d).chain(std::iter::once([s.0, s.1])).collect::<Vec<_>>());
         let hover = chosen.zip(self.hover).and_then(|(l, i)| l.line.get(i).copied());
         let (accent, ink, bg) = (t.accent, t.text, t.bg);
+        // The chosen loop's grade, by class, and the climb pointed at.
+        let classes: Option<Arc<Vec<(usize, usize, u8)>>> = match chosen.filter(|_| self.show_slope) {
+            Some(l) => {
+                let key = l.line.len() as u64 ^ l.dist.to_bits() ^ l.up.to_bits().rotate_left(17);
+                if self.runs.as_ref().is_none_or(|r| r.0 != key) {
+                    self.runs = Some((key, Arc::new(slope::runs(&l.along, &l.eles))));
+                }
+                self.runs.as_ref().map(|r| r.1.clone())
+            }
+            None => None,
+        };
+        let ramp = slope_ramp(&t);
+        let climb = chosen.zip(self.climb_hover).and_then(|(l, i)| slope::climbs(&l.along, &l.eles).get(i).map(|c| l.line[c.from..=c.to].to_vec()));
         let bounds = self.map.bounds.clone();
         let drawing = canvas(
             |_, _, _| {},
@@ -840,11 +878,39 @@ impl Render for LoopsView {
                     if line.len() < 2 {
                         continue;
                     }
-                    let mut path = PathBuilder::stroke(px(if *on { 4. } else { 2.5 }));
+                    if *on && let Some(classes) = &classes {
+                        // The whole line in the palest colour (no gaps where runs meet), then
+                        // runs of one class, each its colour.
+                        let mut path = line_path(4.5);
+                        path.move_to(at(line[0]));
+                        line[1..].iter().for_each(|p| path.line_to(at(*p)));
+                        if let Ok(p) = path.build() {
+                            window.paint_path(p, ramp[0].opacity(fade));
+                        }
+                        for (i, j, k) in classes.iter().copied().filter(|r| r.2 > 0) {
+                            let mut path = line_path(4.5);
+                            path.move_to(at(line[i]));
+                            line[i + 1..=j.min(line.len() - 1)].iter().for_each(|p| path.line_to(at(*p)));
+                            if let Ok(p) = path.build() {
+                                window.paint_path(p, ramp[k as usize].opacity(fade));
+                            }
+                        }
+                        continue;
+                    }
+                    let mut path = line_path(if *on { 4. } else { 2.5 });
                     path.move_to(at(line[0]));
                     line[1..].iter().for_each(|p| path.line_to(at(*p)));
                     if let Ok(p) = path.build() {
                         window.paint_path(p, if *on { accent.opacity(fade) } else { ink.opacity(0.4 * fade) });
+                    }
+                }
+                // The climb pointed at in the list: a dark band over it.
+                if let Some(c) = climb.as_ref().filter(|c| c.len() > 1) {
+                    let mut path = line_path(8.);
+                    path.move_to(at(c[0]));
+                    c[1..].iter().for_each(|p| path.line_to(at(*p)));
+                    if let Ok(p) = path.build() {
+                        window.paint_path(p, ink.opacity(0.45));
                     }
                 }
                 let dot = |p: Point<Pixels>, r: f32, c: Hsla, window: &mut Window| {
@@ -922,7 +988,44 @@ impl Render for LoopsView {
                         this.relief.drawn = None;
                     })),
             )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(14.0f32.max(crate::ui::top() - 14.0) + 80.0))
+                    .right(px(14.))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(6.))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(div().bg(t.bg).rounded(px(8.)).shadow_sm().child(segmented(
+                        "loops-slope",
+                        vec![(tr("Grade", "Pente").into(), self.show_slope), (tr("Plain", "Uni").into(), !self.show_slope)],
+                        t,
+                        cx,
+                        |this: &mut LoopsView, i, _, cx| {
+                            this.show_slope = i == 0;
+                            let v = if this.show_slope { "1" } else { "0" };
+                            this.data.update(cx, |d, cx| d.set_setting("loops.slope", v.to_string(), cx));
+                        },
+                    )))
+                    .when(self.show_slope && chosen.is_some(), |d| d.child(slope_legend(&t))),
+            )
     }
+}
+
+/// The colours of the grade classes (`slope::class`): the accent, from pale to dark.
+fn slope_ramp(t: &crate::ui::theme::Theme) -> [Hsla; 5] {
+    [blend(t.accent, t.bg, 0.3), blend(t.accent, t.bg, 0.55), blend(t.accent, t.bg, 0.8), t.accent, blend(t.text, t.accent, 0.55)]
+}
+
+/// What the colours of the grade say.
+fn slope_legend(t: &crate::ui::theme::Theme) -> Div {
+    let ramp = slope_ramp(t);
+    let labels = ["< 3 %", "3–6", "6–10", "10–15", "> 15 %"];
+    div().flex().items_center().gap(px(6.)).px(px(8.)).py(px(5.)).bg(t.bg).rounded(px(8.)).shadow_sm().children(ramp.iter().zip(labels).map(|(c, l)| {
+        div().flex().items_center().gap(px(3.)).child(div().w(px(12.)).h(px(4.)).rounded(px(2.)).bg(*c)).child(div().text_size(px(11.)).text_color(t.soft).child(l))
+    }))
 }
 
 impl LoopsView {
@@ -1007,7 +1110,7 @@ impl LoopsView {
                 );
             }
             if !found.is_empty() {
-                body = body.child(self.list(found, cx)).child(self.keeper(cx)).child(self.profile(found, cx));
+                body = body.child(self.list(found, cx)).child(self.keeper(cx)).child(self.profile(found, cx)).child(self.climbs(found, cx));
             }
             body = body.child(self.routes(cx));
             if let Some(time) = built.filter(|t| *t > 0)
@@ -1299,6 +1402,44 @@ impl LoopsView {
             .children(rows)
     }
 
+    /// The chosen loop's climbs; one pointed at is outlined on the map and the profile.
+    fn climbs(&mut self, found: &Arc<Vec<Loop>>, cx: &mut Context<Self>) -> Div {
+        let t = self.snap.theme;
+        let Some(l) = found.get(self.selected) else { return div() };
+        let climbs = slope::climbs(&l.along, &l.eles);
+        if climbs.is_empty() {
+            return div();
+        }
+        let pct = |g: f32| format!("{:.0}{}", (g * 100.0).round() + 0.0, crate::lang::pct());
+        let rows = climbs.iter().enumerate().map(|(i, c)| {
+            let on = self.climb_hover == Some(i);
+            div()
+                .id(("climb", i))
+                .flex()
+                .justify_between()
+                .gap(px(8.))
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .when(on, |d| d.bg(t.border))
+                .on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                    this.climb_hover = if *over { Some(i) } else { this.climb_hover.filter(|k| *k != i) };
+                    cx.notify();
+                }))
+                .child(num(decimal(format!("km {:.1}", l.along[c.from] / 1000.0))).text_size(px(12.)).text_color(t.soft))
+                .child(num(format!("{} · +{} · {} ({} max)", fmt_km(c.dist as f64), fmt_m(c.gain as f64), pct(c.grade), pct(c.steepest))).text_size(px(12.)))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(div().text_size(px(12.)).text_color(t.soft).child(trf(
+                format!("{} climb{}", climbs.len(), if climbs.len() > 1 { "s" } else { "" }),
+                format!("{} montée{}", climbs.len(), if climbs.len() > 1 { "s" } else { "" }),
+            )))
+            .children(rows)
+    }
+
     fn profile(&mut self, found: &Arc<Vec<Loop>>, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
         let Some(l) = found.get(self.selected) else { return div() };
@@ -1369,4 +1510,10 @@ mod tests {
         assert_eq!(read_km("abc"), None);
         assert_eq!(read_km("1e9"), None);
     }
+}
+
+/// A stroke for a line on the map, bevelled at its turns: a mitre on a tight hairpin (or on the
+/// altitudes' noise) would shoot a spike far out of the line.
+fn line_path(width: f32) -> PathBuilder {
+    PathBuilder::stroke(px(width)).with_style(PathStyle::Stroke(StrokeOptions::default().with_line_width(width).with_miter_limit(1.0)))
 }

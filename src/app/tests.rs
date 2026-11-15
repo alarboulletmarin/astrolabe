@@ -340,6 +340,18 @@ fn the_loop_is_shaped_by_hand(cx: &mut TestAppContext) {
     assert_eq!(found(cx)[i].waypoints.len(), n);
     assert!(near(&l.line, goal) > 200.0);
     assert!(near(&found(cx)[i].line, goal) < 40.0, "{}", near(&found(cx)[i].line, goal));
+    // The pointer over the loop shows where on the profile; off it, nothing.
+    let l = found(cx)[i].clone();
+    let k = l.line.len() / 2;
+    let p = screen(cx, l.line[k]);
+    cx.simulate_mouse_move(p, None, Modifiers::none());
+    cx.run_until_parked();
+    let h = shell.read_with(cx, |s, cx| s.loops.read(cx).hover()).expect("a point of the profile");
+    assert!(crate::logic::fit::metres(l.line[h], l.line[k]) < 30.0);
+    let off = screen(cx, at(-2000.0, -2000.0));
+    cx.simulate_mouse_move(off, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).hover()), None);
     // A click on a point moves nothing.
     let before = found(cx)[i].clone();
     let p = screen(cx, before.waypoints[0]);

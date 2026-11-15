@@ -19,5 +19,6 @@ pub mod records;
 pub mod regions;
 pub mod relief;
 pub mod route;
+pub mod slope;
 pub mod sync;
 pub mod system;
