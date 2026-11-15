@@ -181,6 +181,73 @@ fn a_click_on_the_map_plans_loops_and_one_is_saved_as_gpx(cx: &mut TestAppContex
     assert_ne!(shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[0].seed), first);
 }
 
+/// The Loops page after the first click: a second click doesn't move the start, dragging it
+/// does and plans from there, and a distance typed plans again once the typing stops.
+#[gpui::test]
+fn the_start_is_dragged_and_a_new_distance_plans_again(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let (shell, cx) = start(cx, 3);
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| d.loops.graph = Some(std::sync::Arc::new(crate::logic::graph::tests::town()))));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    let lon_at = |m: f64| 7.25 + m / (111_195.0 * 0.7230);
+    let (lat, lon) = (43.70, lon_at(1000.0));
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| {
+        l.look_at(lat, lon, 15.0);
+        l.type_km("5", window, cx);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let screen = |cx: &mut gpui::VisualTestContext, la: f64, lo: f64| shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(la, lo));
+    let at = screen(cx, lat, lon);
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    let generation = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.data.read(cx).loops.generation);
+    let first = generation(cx);
+    assert!(first > 0 && shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.len()) >= 2);
+    let set = shell.read_with(cx, |s, cx| s.loops.read(cx).start()).unwrap();
+    // The map fitted the loops: the start is somewhere else on screen now.
+    let at = screen(cx, set.0, set.1);
+    // Another click, off the start: the start stays.
+    cx.simulate_click(gpui::point(at.x + gpui::px(60.), at.y - gpui::px(60.)), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()), Some(set));
+    assert_eq!(generation(cx), first);
+    // Dragged 500 m east along the street: loops from there.
+    let to = screen(cx, lat, lon_at(1500.0));
+    cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point((at.x + to.x) / 2., at.y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let (la, lo) = shell.read_with(cx, |s, cx| s.loops.read(cx).start()).unwrap();
+    assert!(crate::logic::fit::metres([la, lo], [lat, lon_at(1500.0)]) < 30.0, "{la} {lo}");
+    assert!(generation(cx) > first);
+    let begins = shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[0].line[0]);
+    assert!(crate::logic::fit::metres(begins, [lat, lon_at(1500.0)]) < 40.0, "{begins:?}");
+    // A distance typed: nothing until the typing stops, then loops of that length.
+    let before = generation(cx);
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| l.focus_km(window, cx)));
+    cx.simulate_keystrokes("backspace 7");
+    cx.run_until_parked();
+    assert_eq!(generation(cx), before);
+    cx.executor().advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    assert!(generation(cx) > before);
+    let d = shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[0].dist);
+    assert!((d - 7000.0).abs() < 7000.0 * 0.05, "{d}");
+    // A new start: none, no loops, and the next click sets it again.
+    click(cx, "loops-clear");
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()), None);
+    assert!(shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.is_empty()));
+    let at = screen(cx, lat, lon);
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()).is_some());
+    assert!(!shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.is_empty()));
+}
+
 /// A record row opens on its ten best, a click on one opens its outing, and a second click on the row closes it.
 #[gpui::test]
 fn a_record_row_unfolds_its_ranking(cx: &mut TestAppContext) {

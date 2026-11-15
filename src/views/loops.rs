@@ -21,7 +21,20 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 /// How many loops are proposed at once.
-const COUNT: usize = 5;
+const COUNT: usize = 3;
+/// The panel's width, over the map.
+const PANEL: f64 = 340.0;
+/// How near the pointer must come to a point on the map to take it, in pixels.
+const GRAB: f32 = 12.0;
+/// A setting changed: the loops are planned again after this pause, so a few quick changes plan
+/// once.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// What the pointer is moving on the map.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Handle {
+    Start,
+}
 
 #[derive(Default)]
 struct Relief {
@@ -53,6 +66,10 @@ pub struct LoopsView {
     plots: Plots,
     /// What the input asked that can't be read.
     bad_input: Option<String>,
+    /// The point being dragged on the map.
+    drag: Option<Handle>,
+    /// Bumped by each setting changed: only the last one's pause plans.
+    pending: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -78,8 +95,10 @@ impl LoopsView {
         })];
         for i in [&km, &min_km, &max_km, &climb] {
             subs.push(cx.subscribe(i, |this, _, e: &InputEvent, cx| {
-                if matches!(e, InputEvent::PressEnter { .. }) {
-                    this.propose(false, cx);
+                match e {
+                    InputEvent::PressEnter { .. } => this.propose(false, cx),
+                    InputEvent::Change => this.settle(cx),
+                    _ => {}
                 }
             }));
         }
@@ -102,6 +121,8 @@ impl LoopsView {
             relief: Relief::default(),
             plots: Plots::default(),
             bad_input: None,
+            drag: None,
+            pending: 0,
             _subscriptions: subs,
         }
     }
@@ -160,6 +181,89 @@ impl LoopsView {
         cx.notify();
     }
 
+    /// Plans again once the settings have stopped changing, if there is a start and a network.
+    fn settle(&mut self, cx: &mut Context<Self>) {
+        self.pending += 1;
+        if self.start.is_none() || self.data.read(cx).loops.graph.is_none() {
+            return;
+        }
+        let n = self.pending;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SETTLE).await;
+            this.update(cx, |v, cx| {
+                if v.pending == n {
+                    v.propose(false, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Where a position is on the map, in pixels from its top left corner.
+    fn on_map(&self, lat: f64, lon: f64) -> (f32, f32) {
+        let s = self.map.bounds.get().size;
+        let (x, y) = self.map.view.screen(lat, lon, (s.width / px(1.)) as f64, (s.height / px(1.)) as f64);
+        (x as f32, y as f32)
+    }
+
+    /// The position under a point of the window.
+    fn under(&self, p: Point<Pixels>) -> (f64, f64) {
+        let b = self.map.bounds.get();
+        self.map.view.position(((p.x - b.origin.x) / px(1.)) as f64, ((p.y - b.origin.y) / px(1.)) as f64, (b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64)
+    }
+
+    /// The point of the map under the pointer that can be dragged, if any.
+    fn handle_at(&self, p: Point<Pixels>) -> Option<Handle> {
+        let b = self.map.bounds.get();
+        let (x, y) = (((p.x - b.origin.x) / px(1.)), ((p.y - b.origin.y) / px(1.)));
+        let near = |(hx, hy): (f32, f32)| (hx - x).hypot(hy - y) <= GRAB;
+        self.start.filter(|s| near(self.on_map(s.0, s.1))).map(|_| Handle::Start)
+    }
+
+    fn grab(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        if let Some(h) = self.handle_at(e.position) {
+            self.drag = Some(h);
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    fn move_to(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(h) = self.drag else { return };
+        if e.pressed_button != Some(MouseButton::Left) {
+            self.drag = None;
+            return;
+        }
+        let at = self.under(e.position);
+        match h {
+            Handle::Start => self.start = Some(at),
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn drop_at(&mut self, e: &MouseUpEvent, cx: &mut Context<Self>) {
+        let Some(h) = self.drag.take() else { return };
+        let at = self.under(e.position);
+        match h {
+            Handle::Start => {
+                self.start = Some(at);
+                self.propose(false, cx);
+            }
+        }
+        cx.stop_propagation();
+    }
+
+    /// Forgets the start and the loops, to begin again elsewhere.
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        self.start = None;
+        self.drag = None;
+        self.bad_input = None;
+        self.data.update(cx, |d, cx| d.clear_loops(cx));
+        cx.notify();
+    }
+
     /// Selects the next (or previous) loop proposed.
     pub fn step(&mut self, by: i32, cx: &mut Context<Self>) {
         let n = self.snap_found(cx).len();
@@ -190,6 +294,17 @@ impl LoopsView {
     pub fn type_km(&mut self, km: &str, window: &mut Window, cx: &mut Context<Self>) {
         let km = km.to_string();
         self.km.update(cx, |s, cx| s.set_value(km, window, cx));
+    }
+
+    /// Puts the cursor at the end of the km field, as a click in it would.
+    #[cfg(test)]
+    pub fn focus_km(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.km.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    #[cfg(test)]
+    pub fn start(&self) -> Option<(f64, f64)> {
+        self.start
     }
 
     #[cfg(test)]
@@ -278,17 +393,29 @@ impl Render for LoopsView {
             self.selected = 0;
         }
         let region = self.data.read(cx).loops.region;
-        // The region at first; then the loops proposed, as each is chosen.
+        // The region at first; then each new set of loops, all of them in sight.
         let chosen = found.get(self.selected);
-        let (subject, bbox) = match chosen {
-            Some(l) => (l.seed ^ (l.dist as u64), map::bbox(std::iter::once(l.line.iter().map(|p| [p[0] as f32, p[1] as f32]).collect::<Vec<_>>().as_slice()), 0.0)),
-            None => (0, Some(region.bbox)),
+        let generation = self.data.read(cx).loops.generation;
+        let bbox = if found.is_empty() {
+            Some(region.bbox)
+        } else {
+            let lines: Vec<Vec<[f32; 2]>> = found.iter().map(|l| l.line.iter().map(|p| [p[0] as f32, p[1] as f32]).collect()).collect();
+            map::bbox(lines.iter().map(Vec::as_slice), 0.0)
         };
-        self.map.fit(subject, bbox, false);
+        // The panel covers the map's left: the loops are fitted in the rest.
+        let width = (self.map.bounds.get().size.width / px(1.)) as f64;
+        let bbox = bbox.map(|[s, w, n, e]| {
+            let free = (width - PANEL - 28.0).max(width * 0.3);
+            [s, w - (e - w) * (width - free) / free, n, e]
+        });
+        self.map.fit(generation, bbox, false);
 
         let b = self.map.bounds.get();
         let (w, h) = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
-        if let Some((sx, sy)) = self.map.click.take() {
+        // The first click sets the start; then the start is dragged.
+        if let Some((sx, sy)) = self.map.click.take()
+            && self.start.is_none()
+        {
             self.start = Some(self.map.view.position(sx, sy, w, h));
             if self.data.read(cx).loops.graph.is_some() {
                 self.propose(false, cx);
@@ -304,9 +431,11 @@ impl Render for LoopsView {
             img(raster.clone()).absolute().left(px(left as f32)).top(px(top as f32)).w(px((s0.0 * k) as f32)).h(px((s0.1 * k) as f32)).into_any_element()
         });
         let lines: Vec<(Vec<[f64; 2]>, bool)> = found.iter().enumerate().map(|(i, l)| (l.line.clone(), i == self.selected)).collect();
+        // Loops of the last settings, while those of the new ones are looked for: faded.
+        let fade = if self.data.read(cx).loops.planning { 0.45 } else { 1.0 };
         let start = self.start;
         let hover = chosen.zip(self.hover).and_then(|(l, i)| l.line.get(i).copied());
-        let (accent, soft, ink, bg) = (t.accent, t.soft, t.text, t.bg);
+        let (accent, ink, bg) = (t.accent, t.text, t.bg);
         let bounds = self.map.bounds.clone();
         let drawing = canvas(
             |_, _, _| {},
@@ -322,11 +451,11 @@ impl Render for LoopsView {
                     if line.len() < 2 {
                         continue;
                     }
-                    let mut path = PathBuilder::stroke(px(if *on { 4. } else { 2. }));
+                    let mut path = PathBuilder::stroke(px(if *on { 4. } else { 2.5 }));
                     path.move_to(at(line[0]));
                     line[1..].iter().for_each(|p| path.line_to(at(*p)));
                     if let Ok(p) = path.build() {
-                        window.paint_path(p, if *on { accent } else { soft.opacity(0.7) });
+                        window.paint_path(p, if *on { accent.opacity(fade) } else { ink.opacity(0.4 * fade) });
                     }
                 }
                 let dot = |p: Point<Pixels>, r: f32, c: Hsla, window: &mut Window| {
@@ -345,13 +474,35 @@ impl Render for LoopsView {
         .absolute()
         .size_full()
         .into_any_element();
-        let overlay = div().absolute().size_full().children(shade).child(drawing).into_any_element();
+        let overlay = div()
+            .absolute()
+            .size_full()
+            .children(shade)
+            .child(drawing)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab(e, cx)))
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.move_to(e, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, cx| this.drop_at(e, cx)))
+            .into_any_element();
 
         div()
             .size_full()
             .relative()
             .child(map_widget(&self.map, |v: &mut LoopsView| &mut v.map, &self.data, "loops-map", Some(overlay), bbox, false, cx))
             .child(self.panel(&found, cx))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(14.0f32.max(crate::ui::top() - 14.0) + 40.0))
+                    .right(px(14.))
+                    .bg(t.bg)
+                    .rounded(px(8.))
+                    .shadow_sm()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(segmented("loops-relief", vec![(tr("Relief", "Relief").into(), self.show_relief), (tr("Flat", "Plate").into(), !self.show_relief)], t, cx, |this: &mut LoopsView, i, _, _| {
+                        this.show_relief = i == 0;
+                        this.relief.drawn = None;
+                    })),
+            )
     }
 }
 
@@ -404,8 +555,19 @@ impl LoopsView {
                 body = body.child(small(tr("Looking for loops…", "Recherche de boucles…").into(), t.soft));
             } else if let Some(e) = plan_error {
                 body = body.child(small(e, t.bad()));
-            } else if self.start.is_none() {
+            }
+            if self.start.is_none() {
                 body = body.child(small(tr("Click on the map to set the start.", "Clique sur la carte pour poser le départ.").into(), t.soft));
+            } else {
+                body = body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .child(small(tr("Drag the start to move it.", "Glisse le départ pour le déplacer.").into(), t.soft))
+                        .child(button("loops-clear", tr("New start", "Nouveau départ"), false, t).debug_selector(|| "loops-clear".into()).on_click(cx.listener(|this, _, _, cx| this.clear(cx)))),
+                );
             }
             if !found.is_empty() {
                 body = body.child(self.list(found, cx)).child(self.profile(found, cx));
@@ -431,7 +593,7 @@ impl LoopsView {
             .absolute()
             .top(px(14.0f32.max(crate::ui::top() - 14.0)))
             .left(px(14.))
-            .w(px(340.))
+            .w(px(PANEL as f32))
             .max_h(relative(0.92))
             .overflow_y_scroll()
             .bg(blend(t.bg, t.panel, 0.94))
@@ -451,20 +613,23 @@ impl LoopsView {
     fn settings(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
         let label = |s: &'static str| div().text_size(px(12.)).text_color(t.soft).child(s);
-        let mode = segmented("loops-mode", vec![(tr("Exact", "Exacte").into(), self.exact), (tr("Range", "Fourchette").into(), !self.exact)], t, cx, |this: &mut LoopsView, i, _, _| this.exact = i == 0);
+        let mode = segmented("loops-mode", vec![(tr("Exact", "Exacte").into(), self.exact), (tr("Range", "Fourchette").into(), !self.exact)], t, cx, |this: &mut LoopsView, i, _, cx| {
+            this.exact = i == 0;
+            this.settle(cx);
+        });
         let trail = segmented(
             "loops-trail",
             vec![(tr("Streets", "Routes").into(), self.trail == 0), (tr("Either", "Égal").into(), self.trail == 1), (tr("Trails", "Sentiers").into(), self.trail == 2)],
             t,
             cx,
-            |this: &mut LoopsView, i, _, _| this.trail = i,
+            |this: &mut LoopsView, i, _, cx| {
+                this.trail = i;
+                this.settle(cx);
+            },
         );
-        let paved = segmented("loops-paved", vec![(tr("Asphalt allowed", "Bitume permis").into(), !self.avoid_paved), (tr("Avoid asphalt", "Éviter le bitume").into(), self.avoid_paved)], t, cx, |this: &mut LoopsView, i, _, _| {
-            this.avoid_paved = i == 1
-        });
-        let relief = segmented("loops-relief", vec![(tr("Relief", "Relief").into(), self.show_relief), (tr("Flat map", "Carte plate").into(), !self.show_relief)], t, cx, |this: &mut LoopsView, i, _, _| {
-            this.show_relief = i == 0;
-            this.relief.drawn = None;
+        let paved = segmented("loops-paved", vec![(tr("Asphalt allowed", "Bitume permis").into(), !self.avoid_paved), (tr("Avoid asphalt", "Éviter le bitume").into(), self.avoid_paved)], t, cx, |this: &mut LoopsView, i, _, cx| {
+            this.avoid_paved = i == 1;
+            this.settle(cx);
         });
         let field = |i: &Entity<InputState>| div().w(px(80.)).child(Input::new(i).small());
         let distance = if self.exact {
@@ -479,27 +644,37 @@ impl LoopsView {
             .child(div().flex().flex_col().gap(px(5.)).child(label(tr("Distance", "Distance"))).child(mode).child(distance))
             .child(div().flex().flex_col().gap(px(5.)).child(label(tr("Ground", "Terrain"))).child(trail).child(paved))
             .child(div().flex().items_center().gap(px(6.)).child(label(tr("Climb wished", "D+ souhaité"))).child(field(&self.climb)).child(label("m")))
-            .child(relief)
-            .child(
-                div()
-                    .flex()
-                    .gap(px(8.))
-                    .child(button("loops-go", tr("Propose loops", "Proposer des boucles"), true, t).on_click(cx.listener(|this, _, _, cx| this.propose(false, cx))))
-                    .child(button("loops-again", tr("Others", "D'autres"), false, t).on_click(cx.listener(|this, _, _, cx| this.propose(true, cx)))),
-            )
+
     }
 
     fn list(&mut self, found: &Arc<Vec<Loop>>, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
-        let pct = |f: f32| format!("{:.0}{}", f * 100.0, crate::lang::pct());
+        // `+ 0.0`: an empty sum is −0.0, said "-0".
+        let pct = |f: f32| format!("{:.0}{}", (f * 100.0).round() + 0.0, crate::lang::pct());
+        // The mini-profiles share one scale, height and length, so that they compare.
+        let all: Vec<Option<f32>> = found.iter().flat_map(|l| l.eles.iter().copied()).collect();
+        let scale = range(&all);
+        let longest = found.iter().map(|l| l.along.last().copied().unwrap_or(0.0)).fold(1.0f32, f32::max);
         let rows = found.iter().enumerate().map(|(i, l)| {
             let on = i == self.selected;
+            let xs: Arc<Vec<f32>> = Arc::new(l.along.clone());
+            let share = l.along.last().copied().unwrap_or(0.0) / longest;
+            let mini = div().h(px(26.)).w(relative(share.clamp(0.05, 1.0))).relative().when(scale.is_some(), |d| {
+                d.child(
+                    line_chart(
+                        Series { xs, ys: Arc::new(l.eles.clone()), scale, line: if on { t.accent } else { t.soft }, fill: blend(if on { t.accent } else { t.soft }, t.bg, 0.12), invert: false },
+                        None,
+                        t.soft,
+                    )
+                    .size_full(),
+                )
+            });
             div()
                 .id(("loop", i))
                 .debug_selector(move || format!("loop-{i}"))
                 .flex()
                 .flex_col()
-                .gap(px(2.))
+                .gap(px(3.))
                 .px(px(8.))
                 .py(px(6.))
                 .rounded(px(6.))
@@ -518,30 +693,25 @@ impl LoopsView {
                         .child(num(fmt_km(l.dist)).font_weight(FontWeight::BOLD).text_color(if on { t.accent } else { t.text }))
                         .child(num(format!("+{} −{}", fmt_m(l.up), fmt_m(l.down))).text_size(px(12.))),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .text_size(px(11.))
-                        .text_color(t.soft)
-                        .child(format!(
-                            "{} {} · {} {} · {} {}",
-                            pct(l.trail),
-                            tr("trail", "sentier"),
-                            pct(l.paved),
-                            tr("asphalt", "bitume"),
-                            pct(l.back),
-                            tr("twice", "en double")
-                        ))
-                        .child(num(format!("#{}", l.seed % 100_000))),
-                )
+                .child(mini)
+                .child(div().text_size(px(11.)).text_color(t.soft).child(format!(
+                    "{} {} · {} {} · {} {}",
+                    pct(l.trail),
+                    tr("trail", "sentier"),
+                    pct(l.paved),
+                    tr("asphalt", "bitume"),
+                    pct(l.back),
+                    tr("twice", "en double")
+                )))
         });
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .children(rows)
-            .child(div().pt(px(4.)).child(button("loops-export", tr("Save as GPX", "Enregistrer en GPX"), false, t).on_click(cx.listener(|this, _, _, cx| this.export(cx)))))
+        div().flex().flex_col().gap(px(4.)).children(rows).child(
+            div()
+                .pt(px(4.))
+                .flex()
+                .gap(px(8.))
+                .child(button("loops-again", tr("Other loops", "Autres boucles"), false, t).on_click(cx.listener(|this, _, _, cx| this.propose(true, cx))))
+                .child(button("loops-export", tr("Save as GPX", "Enregistrer en GPX"), false, t).on_click(cx.listener(|this, _, _, cx| this.export(cx)))),
+        )
     }
 
     fn profile(&mut self, found: &Arc<Vec<Loop>>, cx: &mut Context<Self>) -> Div {

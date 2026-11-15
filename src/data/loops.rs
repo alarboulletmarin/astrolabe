@@ -52,6 +52,8 @@ pub struct Loops {
     pub error: Option<String>,
     /// The loops last planned, best first.
     pub found: Arc<Vec<Loop>>,
+    /// Counts the sets of loops planned: a new one is fitted on the map, an edit is not.
+    pub generation: u64,
     pub planning: bool,
     pub plan_error: Option<String>,
     plan_round: u64,
@@ -72,6 +74,7 @@ impl Default for Loops {
             job: None,
             error: None,
             found: Arc::default(),
+            generation: 0,
             planning: false,
             plan_error: None,
             plan_round: 0,
@@ -306,7 +309,10 @@ impl Data {
                 }
                 d.loops.planning = false;
                 match res {
-                    Ok(found) => d.loops.found = Arc::new(found),
+                    Ok(found) => {
+                        d.loops.found = Arc::new(found);
+                        d.loops.generation += 1;
+                    }
                     Err(e) => {
                         d.loops.found = Arc::default();
                         d.loops.plan_error = Some(
@@ -323,6 +329,16 @@ impl Data {
             .ok();
         })
         .detach();
+    }
+
+    /// Forgets the loops (and the answer to a planning still under way).
+    pub fn clear_loops(&mut self, cx: &mut Context<Self>) {
+        self.loops.plan_round += 1;
+        self.loops.planning = false;
+        self.loops.plan_error = None;
+        self.loops.found = Arc::default();
+        self.loops.generation += 1;
+        cx.notify();
     }
 
     /// Writes a loop as GPX where the user chose.
