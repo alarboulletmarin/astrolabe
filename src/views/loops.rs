@@ -5,15 +5,16 @@
 use crate::data::{Data, Snapshot};
 use crate::lang::{decimal, tr, trf};
 use crate::logic::activity::{fmt_km, fmt_m, group};
-use crate::logic::loops::{Loop, Request, Target};
+use crate::logic::loops::{Loop, Request, Route, Target};
 use crate::logic::map::{self, View};
 use crate::logic::relief;
 use crate::logic::route::Prefs;
 use crate::ui::chart::{Series, line_chart, nearest, range};
 use crate::ui::theme::blend;
-use crate::ui::{Plots, button, heading, num, render_image, segmented};
+use crate::ui::{Plots, button, heading, icon, num, render_image, segmented};
 use crate::views::Page;
 use crate::views::map::{MapState, map_widget};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{prelude::FluentBuilder, *};
@@ -114,6 +115,10 @@ pub struct LoopsView {
     grabbed_at: Option<(Point<Pixels>, Step)>,
     undo: Vec<Step>,
     redo: Vec<Step>,
+    /// The name to keep the chosen loop under.
+    name: Entity<InputState>,
+    /// The kept route shown, if the loops are one: keeping again updates it.
+    opened: Option<u64>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -133,6 +138,7 @@ impl LoopsView {
         let min_km = input(get("loops.min", "10"), window, cx);
         let max_km = input(get("loops.max", "15"), window, cx);
         let climb = cx.new(|cx| InputState::new(window, cx).placeholder(tr("any", "libre")).default_value(get("loops.climb", "")));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("Name of the route", "Nom du parcours")));
         let mut subs = vec![cx.observe(&data, |this, data, cx| {
             this.snap = data.read(cx).snapshot();
             cx.notify();
@@ -172,6 +178,8 @@ impl LoopsView {
             grabbed_at: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            name,
+            opened: None,
             _subscriptions: subs,
         }
     }
@@ -205,6 +213,8 @@ impl LoopsView {
             Ok(req) => {
                 self.bad_input = None;
                 self.selected = 0;
+                // New loops: no longer the route opened.
+                self.opened = None;
                 self.hover = None;
                 let km = |i: &Entity<InputState>| i.read(cx).value().to_string();
                 let saved = [
@@ -471,6 +481,42 @@ impl LoopsView {
         self.propose(false, cx);
     }
 
+    /// Keeps the chosen loop under the name typed (or its length): the route opened is updated,
+    /// unless `copy`.
+    pub fn keep(&mut self, copy: bool, cx: &mut Context<Self>) {
+        let found = self.snap_found(cx);
+        let (Some(l), Some(start)) = (found.get(self.selected), self.start) else { return };
+        let typed = self.name.read(cx).value().trim().to_string();
+        let name = if typed.is_empty() { format!("{} {}", tr("Loop", "Boucle"), fmt_km(l.dist)) } else { typed };
+        let next = self.data.read(cx).loops.routes.iter().map(|r| r.id + 1).max().unwrap_or(0);
+        let id = match self.opened {
+            Some(id) if !copy => id,
+            _ => (chrono::Utc::now().timestamp_millis().max(0) as u64).max(next),
+        };
+        let route = Route { id, name, start: [start.0, start.1], pins: self.pins.iter().map(|p| [p.0, p.1]).collect(), prefs: self.prefs(), shape: l.clone(), trashed: false };
+        self.opened = Some(id);
+        self.data.update(cx, |d, cx| d.keep_route(route, cx));
+        cx.notify();
+    }
+
+    /// Shows a kept route, with its start, its points and its settings, to change it.
+    pub fn open_route(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.data.read(cx).loops.routes.iter().find(|r| r.id == id).cloned() else { return };
+        self.remember(cx);
+        self.start = Some((r.start[0], r.start[1]));
+        self.pins = r.pins.iter().map(|p| (p[0], p[1])).collect();
+        self.trail = if r.prefs.trail < 0.25 { 0 } else if r.prefs.trail > 0.75 { 2 } else { 1 };
+        self.avoid_paved = r.prefs.avoid_paved;
+        self.selected = 0;
+        self.draft = None;
+        self.hover = None;
+        self.opened = Some(id);
+        let name = r.name.clone();
+        self.name.update(cx, |s, cx| s.set_value(name, window, cx));
+        self.data.update(cx, |d, cx| d.show_route(&r, cx));
+        cx.notify();
+    }
+
     /// Forgets the start and the loops, to begin again elsewhere.
     fn clear(&mut self, cx: &mut Context<Self>) {
         self.remember(cx);
@@ -519,6 +565,13 @@ impl LoopsView {
     #[cfg(test)]
     pub fn focus_km(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.km.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    /// Types the name to keep a loop under.
+    #[cfg(test)]
+    pub fn name_as(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let name = name.to_string();
+        self.name.update(cx, |s, cx| s.set_value(name, window, cx));
     }
 
     #[cfg(test)]
@@ -846,8 +899,9 @@ impl LoopsView {
                 );
             }
             if !found.is_empty() {
-                body = body.child(self.list(found, cx)).child(self.profile(found, cx));
+                body = body.child(self.list(found, cx)).child(self.keeper(cx)).child(self.profile(found, cx));
             }
+            body = body.child(self.routes(cx));
             if let Some(time) = built.filter(|t| *t > 0)
                 && let Some(date) = chrono::DateTime::from_timestamp(time, 0)
             {
@@ -988,6 +1042,72 @@ impl LoopsView {
                 .child(button("loops-again", tr("Other loops", "Autres boucles"), false, t).on_click(cx.listener(|this, _, _, cx| this.propose(true, cx))))
                 .child(button("loops-export", tr("Save as GPX", "Enregistrer en GPX"), false, t).on_click(cx.listener(|this, _, _, cx| this.export(cx)))),
         )
+    }
+
+    /// The name field and the buttons that keep the chosen loop.
+    fn keeper(&mut self, cx: &mut Context<Self>) -> Div {
+        let t = self.snap.theme;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(Input::new(&self.name).small())
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(button("loops-keep", tr("Keep", "Garder"), true, t).debug_selector(|| "loops-keep".into()).on_click(cx.listener(|this, _, _, cx| this.keep(false, cx))))
+                    .when(self.opened.is_some(), |d| {
+                        d.child(button("loops-copy", tr("Keep a copy", "Garder une copie"), false, t).debug_selector(|| "loops-copy".into()).on_click(cx.listener(|this, _, _, cx| this.keep(true, cx))))
+                    }),
+            )
+    }
+
+    /// The routes kept: a click opens one, the cross takes it away.
+    fn routes(&mut self, cx: &mut Context<Self>) -> Div {
+        let t = self.snap.theme;
+        let routes: Vec<Route> = self.data.read(cx).loops.routes.iter().filter(|r| !r.trashed).cloned().collect();
+        if routes.is_empty() {
+            return div();
+        }
+        let rows = routes.into_iter().rev().enumerate().map(|(i, r)| {
+            let (id, on) = (r.id, self.opened == Some(r.id));
+            div()
+                .id(("route", i))
+                .debug_selector(move || format!("route-{i}"))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .when(on, |d| d.bg(t.selection))
+                .hover(|d| d.bg(t.border))
+                .on_click(cx.listener(move |this, _, window, cx| this.open_route(id, window, cx)))
+                .child(div().flex_1().min_w(px(0.)).overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(13.)).text_color(if on { t.accent } else { t.text }).child(r.name.clone()))
+                .child(num(format!("{} · +{}", fmt_km(r.shape.dist), fmt_m(r.shape.up))).text_size(px(12.)).text_color(t.soft))
+                .child(
+                    div()
+                        .id(("route-trash", i))
+                        .debug_selector(move || format!("route-trash-{i}"))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if this.opened == Some(id) {
+                                this.opened = None;
+                            }
+                            this.data.update(cx, |d, cx| d.trash_route(id, cx));
+                        }))
+                        .child(icon(IconName::X, t.soft, 13.)),
+                )
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(div().text_size(px(12.)).text_color(t.soft).child(tr("Routes kept", "Parcours gardés")))
+            .children(rows)
     }
 
     fn profile(&mut self, found: &Arc<Vec<Loop>>, cx: &mut Context<Self>) -> Div {

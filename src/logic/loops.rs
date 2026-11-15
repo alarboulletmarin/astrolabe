@@ -84,7 +84,7 @@ pub struct Request {
 }
 
 /// A proposed loop.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Loop {
     /// (lat, lon), from the start back to it.
     pub line: Vec<[f64; 2]>,
@@ -107,8 +107,26 @@ pub struct Loop {
     /// were asked for (the others were drawn to make the length).
     pub waypoints: Vec<[f64; 2]>,
     pub pinned: Vec<bool>,
-    /// The graph's edges it uses, with the length used on each, for comparing loops.
+    /// The graph's edges it uses, with the length used on each, for comparing loops (not kept:
+    /// the graph's numbering changes when it is built again).
+    #[serde(skip)]
     edges: Vec<(u32, f32)>,
+}
+
+/// A loop kept under a name, with what made it: it opens again as it was, and can be changed.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Route {
+    /// Milliseconds since 1970 when it was first kept, unique among the routes.
+    pub id: u64,
+    pub name: String,
+    pub start: [f64; 2],
+    pub pins: Vec<[f64; 2]>,
+    pub prefs: Prefs,
+    #[serde(rename = "loop")]
+    pub shape: Loop,
+    /// Taken away from the list, but kept in the file: nothing is destroyed.
+    #[serde(default)]
+    pub trashed: bool,
 }
 
 #[derive(Debug, PartialEq)]

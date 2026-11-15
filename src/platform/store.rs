@@ -181,6 +181,28 @@ pub fn save_settings(s: &HashMap<String, String>) -> Result<(), String> {
     write_atomic(&data_dir().join("settings"), text.as_bytes(), false).map_err(|e| format!("{} : {e}", crate::lang::tr("Settings not saved", "Réglages non enregistrés")))
 }
 
+/// The routes kept on the Loops page. No file: none yet; a file that can't be read is set aside,
+/// so that the next save can't write over it, and reported.
+pub fn load_routes() -> Result<Vec<crate::logic::loops::Route>, String> {
+    let path = data_dir().join("routes.json");
+    let unreadable = crate::lang::tr("Routes unreadable", "Parcours illisibles");
+    let err = match fs::read(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{unreadable} : {e}")),
+        Ok(b) => match serde_json::from_slice(&b) {
+            Ok(r) => return Ok(r),
+            Err(e) => e.to_string(),
+        },
+    };
+    let kept = set_aside(&path, "json");
+    Err(crate::lang::trf(format!("{unreadable} ({err}), kept as {kept}"), format!("{unreadable} ({err}), conservés sous {kept}")))
+}
+
+pub fn save_routes(r: &[crate::logic::loops::Route]) -> Result<(), String> {
+    let bytes = serde_json::to_vec(r).map_err(|e| e.to_string())?;
+    write_atomic(&data_dir().join("routes.json"), &bytes, true).map_err(|e| format!("{} : {e}", crate::lang::tr("Routes not saved", "Parcours non enregistrés")))
+}
+
 /// The folder of the OpenStreetMap extracts and the graphs built from them.
 pub fn osm_dir() -> PathBuf {
     data_dir().join("osm")

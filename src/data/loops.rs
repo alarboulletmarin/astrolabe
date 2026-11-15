@@ -6,7 +6,7 @@ use super::{Data, Status};
 use crate::lang::{tr, trf};
 use crate::logic::elevation::{self, Dem};
 use crate::logic::graph::{self, CANCELLED, Graph};
-use crate::logic::loops::{self, Loop, NoLoop, Request};
+use crate::logic::loops::{self, Loop, NoLoop, Request, Route};
 use crate::logic::regions::{self, Region};
 use crate::logic::route::Prefs;
 use crate::platform::{self, store};
@@ -60,6 +60,8 @@ pub struct Loops {
     plan_round: u64,
     /// A loop being routed again through points moved by hand.
     pub editing: bool,
+    /// The routes kept, the ones taken away included (read when the page first shows).
+    pub routes: Vec<Route>,
     /// Geofabrik's and the elevation tiles' addresses (local stand-ins in the tests).
     pub osm_base: String,
     pub elevation_base: String,
@@ -82,6 +84,7 @@ impl Default for Loops {
             plan_error: None,
             plan_round: 0,
             editing: false,
+            routes: Vec::new(),
             osm_base: platform::osm::GEOFABRIK.into(),
             elevation_base: platform::elevation::TERRARIUM.into(),
             relief: HashMap::new(),
@@ -106,9 +109,13 @@ impl Data {
         self.loops.region = regions::find(self.settings.get("loops.region").map_or("", String::as_str));
         let id = self.loops.region.id;
         cx.spawn(async move |this, cx| {
-            let (size, stored) = cx.background_executor().spawn(async move { (store::extract_size(id), store::load_graph(id)) }).await;
+            let (size, stored, routes) = cx.background_executor().spawn(async move { (store::extract_size(id), store::load_graph(id), store::load_routes()) }).await;
             this.update(cx, |d, cx| {
                 d.loops.extract = size;
+                match routes {
+                    Ok(r) => d.loops.routes = r,
+                    Err(e) => d.status = Status::Failed(e),
+                }
                 match stored {
                     store::StoredGraph::Ready(g) => d.loops.graph = Some(Arc::new(g)),
                     store::StoredGraph::Absent | store::StoredGraph::Stale => {
@@ -333,6 +340,47 @@ impl Data {
             .ok();
         })
         .detach();
+    }
+
+    /// Keeps a route, or the new version of one kept already (same id).
+    pub fn keep_route(&mut self, r: Route, cx: &mut Context<Self>) {
+        let name = r.name.clone();
+        match self.loops.routes.iter_mut().find(|k| k.id == r.id) {
+            Some(k) => *k = r,
+            None => self.loops.routes.push(r),
+        }
+        self.note = Some(trf(format!("route kept: {name}"), format!("parcours gardé : {name}")));
+        self.save_routes(cx);
+    }
+
+    /// Takes a route away from the list; the file still holds it.
+    pub fn trash_route(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(r) = self.loops.routes.iter_mut().find(|r| r.id == id) {
+            r.trashed = true;
+            self.save_routes(cx);
+        }
+    }
+
+    fn save_routes(&mut self, cx: &mut Context<Self>) {
+        let routes = self.loops.routes.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = cx.background_executor().spawn(async move { store::save_routes(&routes) }).await;
+            if let Err(e) = res {
+                this.update(cx, |d, cx| {
+                    d.status = Status::Failed(e);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Shows a kept route as the one loop, fitted on the map.
+    pub fn show_route(&mut self, r: &Route, cx: &mut Context<Self>) {
+        self.set_found(Arc::new(vec![r.shape.clone()]), cx);
+        self.loops.generation += 1;
     }
 
     /// Forgets the loops (and the answer to a planning still under way).

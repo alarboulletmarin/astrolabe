@@ -10,7 +10,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 /// What one prefers to run on.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Prefs {
     /// 0: streets rather than trails, 1: trails rather than streets, 0.5: either.
     pub trail: f32,

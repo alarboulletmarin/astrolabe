@@ -349,6 +349,83 @@ fn the_loop_is_shaped_by_hand(cx: &mut TestAppContext) {
     assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().len()), 1);
 }
 
+/// A loop kept under a name: listed, written to disk, opened again as it was, changed and kept
+/// again (the same route), kept as a copy, taken away from the list (still in the file).
+#[gpui::test]
+fn a_loop_is_kept_and_opened_again(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let root = std::env::temp_dir().join(format!("astrolabe-routes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    crate::platform::store::use_root(root.clone());
+    let (shell, cx) = start(cx, 3);
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| d.loops.graph = Some(std::sync::Arc::new(crate::logic::graph::tests::town()))));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    let s0 = [43.70, 7.25 + 1000.0 / (111_195.0 * 0.7230)];
+    let look = |shell: &gpui::Entity<Shell>, cx: &mut gpui::VisualTestContext| {
+        shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
+            l.look_at(43.70 + 1500.0 / 111_195.0, 7.25 + 500.0 / (111_195.0 * 0.7230), 14.0);
+            cx.notify();
+        }));
+        cx.run_until_parked();
+    };
+    look(&shell, cx);
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| l.type_km("6", window, cx)));
+    let screen = |cx: &mut gpui::VisualTestContext, p: [f64; 2]| shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(p[0], p[1]));
+    let found = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.clone());
+    let routes = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.data.read(cx).loops.routes.clone());
+    let p = screen(cx, s0);
+    cx.simulate_click(p, Modifiers::none());
+    cx.run_until_parked();
+    click(cx, "loop-1");
+    let kept = found(cx)[1].clone();
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| l.name_as("Tour du parc ✓", window, cx)));
+    click(cx, "loops-keep");
+    assert_eq!(routes(cx).len(), 1);
+    assert_eq!(routes(cx)[0].name, "Tour du parc ✓");
+    let file = root.join("data/routes.json");
+    assert!(std::fs::read_to_string(&file).unwrap().contains("Tour du parc"));
+    // Begun again elsewhere, then the route opened: its loop, its start, its points.
+    click(cx, "loops-clear");
+    assert!(found(cx).is_empty());
+    click(cx, "route-0");
+    assert_eq!(found(cx).len(), 1);
+    // Read back from the file the next time; here from memory: the same, to the last digit.
+    assert_eq!(found(cx)[0].line, kept.line);
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()), Some((routes(cx)[0].start[0], routes(cx)[0].start[1])));
+    // Changed by hand and kept again: the same route, changed.
+    look(&shell, cx);
+    let l = found(cx)[0].clone();
+    let from = screen(cx, l.waypoints[0]);
+    let to = gpui::point(from.x + gpui::px(80.), from.y - gpui::px(80.));
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(gpui::point(from.x + gpui::px(40.), from.y), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert_ne!(found(cx)[0].line, kept.line);
+    click(cx, "loops-keep");
+    assert_eq!(routes(cx).len(), 1);
+    assert_eq!(routes(cx)[0].shape.line, found(cx)[0].line);
+    // A copy; then the first taken away: out of the list, still in the file.
+    click(cx, "loops-copy");
+    assert_eq!(routes(cx).len(), 2);
+    assert_ne!(routes(cx)[0].id, routes(cx)[1].id);
+    click(cx, "route-trash-1");
+    assert_eq!(routes(cx).iter().filter(|r| !r.trashed).count(), 1);
+    assert!(cx.debug_bounds("route-1").is_none());
+    let on_disk = crate::platform::store::load_routes().unwrap();
+    assert_eq!(on_disk.len(), 2);
+    assert_eq!(on_disk.iter().filter(|r| r.trashed).count(), 1);
+    // Read back, a route is the loop it was, to a millimetre (JSON may round the last digit).
+    let (a, b) = (on_disk.iter().find(|r| !r.trashed).unwrap(), routes(cx).into_iter().find(|r| !r.trashed).unwrap());
+    assert_eq!(a.shape.line.len(), b.shape.line.len());
+    assert!(a.shape.line.iter().zip(&b.shape.line).all(|(p, q)| crate::logic::fit::metres(*p, *q) < 0.001));
+    assert_eq!((a.name.as_str(), a.shape.dist, a.pins.len()), (b.name.as_str(), b.shape.dist, b.pins.len()));
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// A record row opens on its ten best, a click on one opens its outing, and a second click on the row closes it.
 #[gpui::test]
 fn a_record_row_unfolds_its_ranking(cx: &mut TestAppContext) {
