@@ -297,6 +297,9 @@ impl Shell {
             (line, t.soft)
         } else if let Some(why) = &d.fetch.stopped {
             (format!("{outings} · {} : {why}", tr("synchronisation interrupted", "synchronisation interrompue")), t.bad())
+        } else if matches!(self.page, Page::Loops | Page::Heatmap) && d.note.is_none() {
+            // Nothing to say, over a map: its attribution shows instead.
+            return div().id("status");
         } else {
             (format!("{outings}{}", d.note.as_ref().map(|x| format!(" · {x}")).unwrap_or_default()), t.dim)
         };

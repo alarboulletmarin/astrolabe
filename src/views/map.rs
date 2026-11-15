@@ -28,11 +28,13 @@ pub struct MapState {
     pub click: Option<(f64, f64)>,
     /// When the wheel last tried to zoom without Ctrl: the hint shows a moment.
     pub hint: Option<Instant>,
+    /// Room taken over the map on the left and at the bottom (a panel): the controls go beside it.
+    pub inset: (f32, f32),
 }
 
 impl MapState {
     pub fn new() -> Self {
-        MapState { view: View::default(), bounds: Rc::new(Cell::new(Bounds::default())), drag: None, fitted: None, fit_at: None, click: None, hint: None }
+        MapState { view: View::default(), bounds: Rc::new(Cell::new(Bounds::default())), drag: None, fitted: None, fit_at: None, click: None, hint: None, inset: (0.0, 0.0) }
     }
 
     /// Fits the map to `bbox` when `subject` changed (or on demand), or when the map was resized
@@ -66,7 +68,7 @@ pub fn map_widget<V: 'static>(
     wheel_needs_ctrl: bool,
     cx: &mut Context<V>,
 ) -> Stateful<Div> {
-    let (view, bounds, dragging, hint) = (m.view, m.bounds.clone(), m.drag.is_some(), m.hint);
+    let (view, bounds, dragging, hint, inset) = (m.view, m.bounds.clone(), m.drag.is_some(), m.hint, m.inset);
     let t = data.read(cx).theme;
     let b = bounds.get();
     let (w, h) = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
@@ -200,8 +202,8 @@ pub fn map_widget<V: 'static>(
         .child(
             div()
                 .absolute()
-                .left(px(10.))
-                .bottom(px(10.))
+                .left(px(10. + inset.0))
+                .bottom(px(10. + inset.1))
                 .flex()
                 .flex_col()
                 .gap(px(4.))

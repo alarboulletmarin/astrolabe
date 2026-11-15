@@ -25,6 +25,14 @@ use std::sync::Arc;
 #[path = "loops3d.rs"]
 mod three;
 
+/// The height of the band under the map that holds the profile and the climbs.
+const BAND: f64 = 132.0;
+
+/// The letter that names the `i`-th loop proposed, in the list and on the map.
+fn letter(i: usize) -> char {
+    (b'A' + (i % 26) as u8) as char
+}
+
 /// How many loops are proposed at once.
 const COUNT: usize = 3;
 /// The panel's width, over the map.
@@ -134,6 +142,10 @@ pub struct LoopsView {
     placing_zone: bool,
     /// The avoid settings unfolded.
     avoid_open: bool,
+    /// The settings unfolded while there are loops (folded to a line, they leave room for them).
+    settings_open: bool,
+    /// The loop pointed at in the list: its line comes forward on the map.
+    card_hover: Option<usize>,
     /// The chosen loop drawn in the colours of its grade.
     show_slope: bool,
     /// The climb pointed at in the list.
@@ -212,6 +224,8 @@ impl LoopsView {
             zones: read_zones(&get("loops.zones", "")),
             placing_zone: false,
             avoid_open: false,
+            settings_open: false,
+            card_hover: None,
             show_slope: get("loops.slope", "1") == "1",
             runs: None,
             climb_hover: None,
@@ -392,6 +406,22 @@ impl LoopsView {
         from_line(&line, at).filter(|(d, _)| *d <= GRAB / 2.0 + 2.0).map(|(_, i)| i)
     }
 
+    /// The loop, other than the chosen one, whose line passes under the pointer.
+    fn other_at(&self, p: Point<Pixels>, cx: &App) -> Option<usize> {
+        let b = self.map.bounds.get();
+        let at = (((p.x - b.origin.x) / px(1.)), ((p.y - b.origin.y) / px(1.)));
+        self.snap_found(cx)
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != self.selected)
+            .filter_map(|(i, l)| {
+                let line: Vec<(f32, f32)> = l.line.iter().map(|q| self.on_map(q[0], q[1])).collect();
+                from_line(&line, at).filter(|(d, _)| *d <= GRAB / 2.0 + 2.0).map(|(d, _)| (d, i))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, i)| i)
+    }
+
     fn step_now(&self, cx: &App) -> Step {
         Step { start: self.start, pins: self.pins.clone(), zones: self.zones.clone(), found: self.snap_found(cx), selected: self.selected }
     }
@@ -430,6 +460,17 @@ impl LoopsView {
     fn grab(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
         let before = self.step_now(cx);
         let mut h = self.handle_at(e.position, cx);
+        // On another loop's line: that loop is chosen.
+        if h.is_none()
+            && self.line_at(e.position, cx).is_none()
+            && let Some(i) = self.other_at(e.position, cx)
+        {
+            self.selected = i;
+            self.hover = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         // On the chosen loop's line: a new point there, to drag.
         if h.is_none()
             && let Some(at) = self.line_at(e.position, cx)
@@ -806,10 +847,15 @@ impl Render for LoopsView {
         };
         // The panel covers the map's left: the loops are fitted in the rest.
         let width = (self.map.bounds.get().size.width / px(1.)) as f64;
+        // The profile's band covers its bottom.
+        let height = (self.map.bounds.get().size.height / px(1.)) as f64;
+        let band = if found.is_empty() { 0.0 } else { BAND + 24.0 };
         let bbox = bbox.map(|[s, w, n, e]| {
             let free = (width - PANEL - 28.0).max(width * 0.3);
-            [s, w - (e - w) * (width - free) / free, n, e]
+            let tall = (height - band).max(height * 0.4);
+            [s - (n - s) * (height - tall) / tall, w - (e - w) * (width - free) / free, n, e]
         });
+        self.map.inset = (PANEL as f32 + 14.0, band as f32);
         self.map.fit(generation, bbox, false);
 
         let b = self.map.bounds.get();
@@ -846,6 +892,8 @@ impl Render for LoopsView {
             img(raster.clone()).absolute().left(px(left as f32)).top(px(top as f32)).w(px((s0.0 * k) as f32)).h(px((s0.1 * k) as f32)).into_any_element()
         });
         let lines: Vec<(Vec<[f64; 2]>, bool)> = found.iter().enumerate().map(|(i, l)| (l.line.clone(), i == self.selected)).collect();
+        // The loop pointed at in the list, brought forward.
+        let pointed = self.card_hover.filter(|i| *i != self.selected).and_then(|i| found.get(i)).map(|l| l.line.clone());
         // Loops of the last settings, while those of the new ones are looked for: faded.
         let fade = if self.data.read(cx).loops.planning { 0.45 } else { 1.0 };
         let start = self.start;
@@ -881,10 +929,28 @@ impl Render for LoopsView {
                     let (x, y) = view.screen(p[0], p[1], w, h);
                     point(b.origin.x + px(x as f32), b.origin.y + px(y as f32))
                 };
-                // The others thin, the chosen one on top.
+                let stroke = |line: &[[f64; 2]], width: f32, colour: Hsla, window: &mut Window| {
+                    if line.len() < 2 {
+                        return;
+                    }
+                    let mut path = line_path(width);
+                    path.move_to(at(line[0]));
+                    line[1..].iter().for_each(|p| path.line_to(at(*p)));
+                    if let Ok(p) = path.build() {
+                        window.paint_path(p, colour);
+                    }
+                };
+                // The others thin and light, the one pointed at in the list darker, the chosen
+                // one on top, over a halo of the page's colour that parts it from the map.
+                if let Some(line) = &pointed {
+                    stroke(line, 7.0, bg.opacity(0.8 * fade), window);
+                }
                 for (line, on) in lines.iter().filter(|l| !l.1).chain(lines.iter().filter(|l| l.1)) {
                     if line.len() < 2 {
                         continue;
+                    }
+                    if *on {
+                        stroke(line, 8.5, bg.opacity(0.85 * fade), window);
                     }
                     if *on && let Some(classes) = &classes {
                         // The whole line in the palest colour (no gaps where runs meet), then
@@ -905,12 +971,14 @@ impl Render for LoopsView {
                         }
                         continue;
                     }
-                    let mut path = line_path(if *on { 4. } else { 2.5 });
-                    path.move_to(at(line[0]));
-                    line[1..].iter().for_each(|p| path.line_to(at(*p)));
-                    if let Ok(p) = path.build() {
-                        window.paint_path(p, if *on { accent.opacity(fade) } else { ink.opacity(0.4 * fade) });
+                    if *on {
+                        stroke(line, 4.5, accent.opacity(fade), window);
+                    } else {
+                        stroke(line, 2.0, ink.opacity(0.38 * fade), window);
                     }
+                }
+                if let Some(line) = &pointed {
+                    stroke(line, 3.0, ink.opacity(0.8 * fade), window);
                 }
                 // The climb pointed at in the list: a dark band over it.
                 if let Some(c) = climb.as_ref().filter(|c| c.len() > 1) {
@@ -966,11 +1034,33 @@ impl Render for LoopsView {
         .absolute()
         .size_full()
         .into_any_element();
+        // Each loop's letter, at its point farthest from the start, as in the list.
+        let letters = found.iter().enumerate().filter_map(|(i, l)| {
+            let first = *l.line.first()?;
+            let far = l.line.iter().copied().max_by(|a, b| crate::logic::fit::metres(first, *a).total_cmp(&crate::logic::fit::metres(first, *b)))?;
+            let (x, y) = view.screen(far[0], far[1], w, h);
+            let on = i == self.selected;
+            Some(
+                div()
+                    .absolute()
+                    .left(px(x as f32 - 9.))
+                    .top(px(y as f32 - 9.))
+                    .size(px(18.))
+                    .rounded(px(9.))
+                    .bg(t.bg)
+                    .shadow_sm()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(num(letter(i).to_string()).text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(if on { t.accent } else { t.soft })),
+            )
+        });
         let overlay = div()
             .absolute()
             .size_full()
             .children(shade)
             .child(drawing)
+            .children(letters)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab(e, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.move_to(e, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, cx| this.drop_at(e, cx)))
@@ -983,11 +1073,13 @@ impl Render for LoopsView {
             None => map_widget(&self.map, |v: &mut LoopsView| &mut v.map, &self.data, "loops-map", Some(overlay), bbox, false, cx).into_any_element(),
         };
         let three = chosen.is_some() && self.three_d;
+        let band = (!found.is_empty()).then(|| self.band(&found, cx));
         div()
             .size_full()
             .relative()
             .child(ground)
             .child(self.panel(&found, cx))
+            .children(band)
             .child(
                 div()
                     .absolute()
@@ -1036,8 +1128,10 @@ impl Render for LoopsView {
 }
 
 /// The colours of the grade classes (`slope::class`): the accent, from pale to dark.
+/// The colours of the grade: the flat in a neutral grey that holds on any ground, then the
+/// accent, deeper as it steepens.
 fn slope_ramp(t: &crate::ui::theme::Theme) -> [Hsla; 5] {
-    [blend(t.accent, t.bg, 0.3), blend(t.accent, t.bg, 0.55), blend(t.accent, t.bg, 0.8), t.accent, blend(t.text, t.accent, 0.55)]
+    [blend(t.text, t.bg, 0.5), blend(t.accent, t.bg, 0.5), blend(t.accent, t.bg, 0.78), t.accent, blend(t.text, t.accent, 0.55)]
 }
 
 /// What the colours of the grade say.
@@ -1090,7 +1184,7 @@ impl LoopsView {
             body = body.child(small(e, t.bad()));
         }
         if ready {
-            body = body.child(self.settings(cx));
+            body = body.child(self.settings(!found.is_empty(), cx));
             if let Some(e) = self.bad_input.clone() {
                 body = body.child(small(e, t.bad()));
             }
@@ -1131,24 +1225,34 @@ impl LoopsView {
                 );
             }
             if !found.is_empty() {
-                body = body.child(self.list(found, cx)).child(self.keeper(cx)).child(self.profile(found, cx)).child(self.climbs(found, cx));
+                body = body.child(self.list(found, cx)).child(self.keeper(cx));
             }
             body = body.child(self.routes(cx));
-            if let Some(time) = built.filter(|t| *t > 0)
-                && let Some(date) = chrono::DateTime::from_timestamp(time, 0)
-            {
-                body = body.child(small(
-                    trf(format!("OpenStreetMap data of {}.", date.format("%Y-%m-%d")), format!("Données OpenStreetMap du {}.", date.format("%d/%m/%Y"))),
-                    t.dim,
-                ));
-            }
-            if !running {
-                body = body.child(
-                    div().child(button("loops-update", tr("Download the region again", "Télécharger à nouveau la région"), false, t).on_click(cx.listener(|this, _, _, cx| this.data.update(cx, |d, cx| d.download_region(cx))))),
-                );
-            }
         }
-        body = body.child(small(tr("Elevation: Mapzen Terrain Tiles (SRTM, Copernicus EU-DEM and others).", "Altitude : Mapzen Terrain Tiles (SRTM, Copernicus EU-DEM et d'autres).").into(), t.dim));
+        // Where the data comes from, and its update: one quiet line at the end.
+        let date = built.filter(|t| *t > 0).and_then(|t| chrono::DateTime::from_timestamp(t, 0));
+        body = body.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_x(px(6.))
+                .text_size(px(11.))
+                .text_color(t.dim)
+                .when_some(date, |d, date| d.child(trf(format!("OpenStreetMap of {}", date.format("%Y-%m-%d")), format!("OpenStreetMap du {}", date.format("%d/%m/%Y")))))
+                .child(tr("· elevation: Mapzen Terrain Tiles (SRTM, Copernicus EU-DEM…)", "· altitude : Mapzen Terrain Tiles (SRTM, Copernicus EU-DEM…)"))
+                .when(ready && !running, |d| {
+                    d.child(
+                        div()
+                            .id("loops-update")
+                            .debug_selector(|| "loops-update".into())
+                            .cursor_pointer()
+                            .text_color(t.soft)
+                            .hover(|d| d.text_color(t.text))
+                            .child(tr("· download again", "· télécharger à nouveau"))
+                            .on_click(cx.listener(|this, _, _, cx| this.data.update(cx, |d, cx| d.download_region(cx)))),
+                    )
+                }),
+        );
 
         div()
             .id("loops-panel")
@@ -1172,8 +1276,69 @@ impl LoopsView {
             .child(body)
     }
 
-    fn settings(&mut self, cx: &mut Context<Self>) -> Div {
+    /// The settings in a few words, for the line they fold to.
+    fn summary(&self, cx: &App) -> String {
+        let value = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        let mut said = vec![if self.exact { format!("{} km", value(&self.km)) } else { format!("{}–{} km", value(&self.min_km), value(&self.max_km)) }];
+        let ground = [tr("streets", "routes"), tr("streets or trails", "routes ou sentiers"), tr("trails", "sentiers")][self.trail.min(2)];
+        said.push(if self.avoid_paved { format!("{ground}, {}", tr("no asphalt", "sans bitume")) } else { ground.to_string() });
+        let climb = value(&self.climb);
+        if !climb.is_empty() {
+            said.push(format!("D+ {climb} m"));
+        }
+        match self.mine {
+            1 => said.push(tr("my ways", "mes chemins").into()),
+            -1 => said.push(tr("new ways", "chemins nouveaux").into()),
+            _ => {}
+        }
+        let avoided = self.avoided();
+        if !avoided.is_empty() {
+            said.push(format!("{} {}", tr("avoid:", "éviter :"), avoided));
+        }
+        said.join(" · ")
+    }
+
+    /// What is avoided, in a few words; empty when nothing is.
+    fn avoided(&self) -> String {
+        let mut said: Vec<String> = Vec::new();
+        if self.avoid_industrial {
+            said.push(tr("industry", "industrie").into());
+        }
+        if self.lit {
+            said.push(tr("unlit ways", "voies non éclairées").into());
+        }
+        let zones = self.zones.len();
+        if zones > 0 {
+            said.push(format!("{zones} zone{}", if zones > 1 { "s" } else { "" }));
+        }
+        said.join(" · ")
+    }
+
+    /// The settings; while there are loops, folded to a line that unfolds them.
+    fn settings(&mut self, has_loops: bool, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
+        let fold = |open: bool, text: Option<String>, cx: &mut Context<Self>| {
+            div()
+                .id("loops-settings")
+                .debug_selector(|| "loops-settings".into())
+                .flex()
+                .items_start()
+                .gap(px(4.))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.settings_open = !this.settings_open;
+                    cx.notify();
+                }))
+                .child(div().pt(px(2.)).child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, t.soft, 12.)))
+                .child(match text {
+                    Some(text) => div().flex_1().min_w(px(0.)).text_size(px(12.)).text_color(t.text).child(text),
+                    None => div().text_size(px(12.)).text_color(t.soft).child(tr("Settings", "Réglages")),
+                })
+        };
+        if has_loops && !self.settings_open {
+            let text = self.summary(cx);
+            return div().child(fold(false, Some(text), cx));
+        }
         let label = |s: &'static str| div().text_size(px(12.)).text_color(t.soft).child(s);
         let mode = segmented("loops-mode", vec![(tr("Exact", "Exacte").into(), self.exact), (tr("Range", "Fourchette").into(), !self.exact)], t, cx, |this: &mut LoopsView, i, _, cx| {
             this.exact = i == 0;
@@ -1219,24 +1384,9 @@ impl LoopsView {
             this.settle(cx);
         });
         let zones = self.zones.len();
-        // What the folded settings say, in a few words.
-        let summary = {
-            let mut said: Vec<String> = Vec::new();
-            match self.mine {
-                1 => said.push(tr("my ways", "mes chemins").into()),
-                -1 => said.push(tr("new ways", "chemins nouveaux").into()),
-                _ => {}
-            }
-            if self.avoid_industrial {
-                said.push(tr("no industry", "sans industrie").into());
-            }
-            if self.lit {
-                said.push(tr("lit", "éclairé").into());
-            }
-            if zones > 0 {
-                said.push(trf(format!("{zones} zone{}", if zones > 1 { "s" } else { "" }), format!("{zones} zone{}", if zones > 1 { "s" } else { "" })));
-            }
-            if said.is_empty() { tr("nothing", "rien").to_string() } else { said.join(" · ") }
+        let summary = match self.avoided() {
+            a if a.is_empty() => tr("nothing", "rien").to_string(),
+            a => a,
         };
         let draw = button("loops-zone", if self.placing_zone { tr("Click on the map…", "Clique sur la carte…") } else { tr("Draw a zone to avoid", "Dessiner une zone à éviter") }, self.placing_zone, t)
             .debug_selector(|| "loops-zone".into())
@@ -1253,8 +1403,10 @@ impl LoopsView {
             .flex()
             .flex_col()
             .gap(px(10.))
+            .when(has_loops, |d| d.child(fold(true, None, cx)))
             .child(div().flex().flex_col().gap(px(5.)).child(label(tr("Distance", "Distance"))).child(mode).child(distance))
             .child(div().flex().flex_col().gap(px(5.)).child(label(tr("Ground", "Terrain"))).child(trail).child(paved))
+            .child(div().flex().flex_col().gap(px(5.)).child(label(tr("Where to run", "Où courir"))).child(mine))
             .child(div().flex().items_center().gap(px(6.)).child(label(tr("Climb wished", "D+ souhaité"))).child(field(&self.climb)).child(label("m")))
             .child(
                 div()
@@ -1277,14 +1429,15 @@ impl LoopsView {
                             .child(label(tr("Avoid", "Éviter")))
                             .when(!self.avoid_open, |d| d.child(div().text_size(px(12.)).text_color(t.text).child(summary))),
                     )
-                    .when(self.avoid_open, |d| d.child(mine).child(industrial).child(lit))
-                    .child(div().flex().flex_wrap().gap(px(8.)).child(draw).when(zones > 0, |d| {
-                        d.child(button("loops-zones-clear", tr("Take the zones away", "Retirer les zones"), false, t).on_click(cx.listener(|this, _, _, cx| {
-                            this.remember(cx);
-                            this.zones.clear();
-                            this.propose(false, cx);
-                        })))
-                    })),
+                    .when(self.avoid_open, |d| {
+                        d.child(industrial).child(lit).child(div().flex().flex_wrap().gap(px(8.)).child(draw).when(zones > 0, |d| {
+                            d.child(button("loops-zones-clear", tr("Take the zones away", "Retirer les zones"), false, t).on_click(cx.listener(|this, _, _, cx| {
+                                this.remember(cx);
+                                this.zones.clear();
+                                this.propose(false, cx);
+                            })))
+                        }))
+                    }),
             )
 
     }
@@ -1323,6 +1476,10 @@ impl LoopsView {
                 .cursor_pointer()
                 .when(on, |d| d.bg(t.selection))
                 .hover(|d| d.bg(t.border))
+                .on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                    this.card_hover = if *over { Some(i) } else { this.card_hover.filter(|k| *k != i) };
+                    cx.notify();
+                }))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected = i;
                     this.hover = None;
@@ -1332,7 +1489,13 @@ impl LoopsView {
                     div()
                         .flex()
                         .justify_between()
-                        .child(num(fmt_km(l.dist)).font_weight(FontWeight::BOLD).text_color(if on { t.accent } else { t.text }))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.))
+                                .child(num(letter(i).to_string()).text_color(t.soft))
+                                .child(num(fmt_km(l.dist)).font_weight(FontWeight::BOLD).text_color(if on { t.accent } else { t.text })),
+                        )
                         .child(num(format!("+{} −{}", fmt_m(l.up), fmt_m(l.down))).text_size(px(12.))),
                 )
                 .child(mini)
@@ -1423,13 +1586,38 @@ impl LoopsView {
             .children(rows)
     }
 
+    /// Along the bottom of the map, right of the panel: the chosen loop's profile and its climbs,
+    /// always in sight.
+    fn band(&mut self, found: &Arc<Vec<Loop>>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = self.snap.theme;
+        div()
+            .id("loops-band")
+            .debug_selector(|| "loops-band".into())
+            .absolute()
+            .left(px(PANEL as f32 + 28.0))
+            .right(px(14.))
+            .bottom(px(24.))
+            .h(px(BAND as f32))
+            .bg(blend(t.bg, t.panel, 0.94))
+            .rounded(px(8.))
+            .shadow_md()
+            .px(px(14.))
+            .py(px(10.))
+            .flex()
+            .gap(px(16.))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(div().flex_1().min_w(px(0.)).child(self.profile(found, cx)))
+            .child(div().id("loops-climbs").w(px(300.)).flex_none().overflow_y_scroll().child(self.climbs(found, cx)))
+    }
+
     /// The chosen loop's climbs; one pointed at is outlined on the map and the profile.
     fn climbs(&mut self, found: &Arc<Vec<Loop>>, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
         let Some(l) = found.get(self.selected) else { return div() };
         let climbs = slope::climbs(&l.along, &l.eles);
         if climbs.is_empty() {
-            return div();
+            return div().text_size(px(12.)).text_color(t.soft).child(tr("No climb", "Aucune montée"));
         }
         let pct = |g: f32| format!("{:.0}{}", (g * 100.0).round() + 0.0, crate::lang::pct());
         let rows = climbs.iter().enumerate().map(|(i, c)| {
@@ -1486,7 +1674,7 @@ impl LoopsView {
                 div()
                     .id("loop-profile")
                     .relative()
-                    .h(px(90.))
+                    .h(px(84.))
                     .child(canvas(move |b, _, _| cell.set(b), |_, _, _, _| {}).absolute().size_full())
                     .child(line_chart(Series { xs, ys, scale, line: t.accent, fill: blend(t.accent, t.bg, 0.12), invert: false }, self.hover, t.soft).size_full())
                     .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {

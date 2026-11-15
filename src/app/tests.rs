@@ -232,6 +232,9 @@ fn the_start_is_dragged_and_a_new_distance_plans_again(cx: &mut TestAppContext) 
     assert!(crate::logic::fit::metres(begins, [lat, lon_at(1500.0)]) < 40.0, "{begins:?}");
     // A distance typed: nothing until the typing stops, then loops of that length.
     let before = generation(cx);
+    // With loops, the settings are folded to a line: unfolded first.
+    assert!(cx.debug_bounds("loops-zone").is_none());
+    click(cx, "loops-settings");
     shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| l.focus_km(window, cx)));
     cx.simulate_keystrokes("backspace 7");
     cx.run_until_parked();
@@ -359,6 +362,63 @@ fn the_loop_is_shaped_by_hand(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(found(cx)[i].line, before.line);
     assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().len()), 1);
+}
+
+/// With loops: the settings fold to a line, the profile shows in a band under the map, and a
+/// click on another loop's line chooses it.
+#[gpui::test]
+fn a_loop_is_chosen_on_the_map(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let (shell, cx) = start(cx, 3);
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| d.loops.graph = Some(std::sync::Arc::new(crate::logic::graph::tests::town()))));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    let s0 = [43.70, 7.25 + 1000.0 / (111_195.0 * 0.7230)];
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| {
+        l.look_at(43.70 + 1500.0 / 111_195.0, s0[1], 14.0);
+        l.type_km("7", window, cx);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    // No loops yet: the settings are open, no band.
+    assert!(cx.debug_bounds("loops-band").is_none() && cx.debug_bounds("loops-settings").is_none());
+    let p = shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(s0[0], s0[1]));
+    cx.simulate_click(p, Modifiers::none());
+    cx.run_until_parked();
+    let found = shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.clone());
+    assert!(found.len() >= 2);
+    assert!(cx.debug_bounds("loops-band").is_some() && cx.debug_bounds("loops-settings").is_some());
+    // Folded, then unfolded and folded again.
+    assert!(cx.debug_bounds("loops-avoid").is_none());
+    click(cx, "loops-settings");
+    assert!(cx.debug_bounds("loops-avoid").is_some());
+    click(cx, "loops-settings");
+    assert!(cx.debug_bounds("loops-avoid").is_none());
+    // The whole town in sight, then a point of another loop far from the chosen one.
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
+        l.look_at(43.70 + 1500.0 / 111_195.0, 7.25 + 500.0 / (111_195.0 * 0.7230), 14.0);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let chosen = shell.read_with(cx, |s, cx| s.loops.read(cx).selected());
+    let near = |line: &[[f64; 2]], p: [f64; 2]| line.iter().map(|q| crate::logic::fit::metres(*q, p)).fold(f64::MAX, f64::min);
+    let (k, q) = found
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != chosen)
+        .flat_map(|(i, l)| l.line.iter().map(move |q| (i, *q)))
+        .max_by(|a, b| near(&found[chosen].line, a.1).total_cmp(&near(&found[chosen].line, b.1)))
+        .unwrap();
+    assert!(near(&found[chosen].line, q) > 60.0, "the loops differ somewhere");
+    let p = shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(q[0], q[1]));
+    cx.simulate_mouse_down(p, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(p, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).selected()), k);
+    // Nothing else changed: no point to pass by, the same loops.
+    assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().is_empty()));
+    assert_eq!(shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.len()), found.len());
 }
 
 /// The chosen loop in 3D: the relief awaited, then the ground; a drag turns it, shift-drag moves
@@ -549,7 +609,9 @@ fn a_zone_is_drawn_and_kept_out_of(cx: &mut TestAppContext) {
     shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| l.type_km("6", window, cx)));
     let screen = |cx: &mut gpui::VisualTestContext, p: [f64; 2]| shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(p[0], p[1]));
     let zones = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.loops.read(cx).zones());
-    // Drawn before the start: kept, no complaint.
+    // Drawn before the start: kept, no complaint. The button is in the folded "Avoid" group.
+    assert!(cx.debug_bounds("loops-zone").is_none());
+    click(cx, "loops-avoid");
     click(cx, "loops-zone");
     // The region is fitted at the first frame: in close now.
     look(cx);
