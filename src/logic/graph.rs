@@ -61,6 +61,8 @@ pub struct Graph {
     pub pts: Vec<[i32; 2]>,
     pub pts_ele: Vec<u16>,
     grid: Grid,
+    /// Nodes in each component (worked out, never stored).
+    sizes: Vec<u32>,
 }
 
 /// The nearest place on the graph to a position: on edge `edge`, segment `seg` of its line
@@ -87,6 +89,11 @@ impl Graph {
     pub fn head(&self, arc: u32) -> (u32, u32) {
         let e = &self.edges[(arc >> 1) as usize];
         (arc >> 1, if arc & 1 == 0 { e.b } else { e.a })
+    }
+
+    /// How many nodes the component of `v` has.
+    pub fn component_size(&self, v: u32) -> u32 {
+        self.sizes.get(self.comp[v as usize] as usize).copied().unwrap_or(0)
     }
 
     pub fn position(&self, v: u32) -> [f64; 2] {
@@ -307,8 +314,9 @@ impl Graph {
         if !ok {
             return Err(damaged("indices"));
         }
-        let mut g = Graph { meta, lat, lon, ele, comp, first, arcs, edges, pts, pts_ele, grid: Grid::default() };
+        let mut g = Graph { meta, lat, lon, ele, comp, first, arcs, edges, pts, pts_ele, grid: Grid::default(), sizes: Vec::new() };
         g.grid = Grid::new(&g);
+        g.count_components();
         Ok(g)
     }
 }
@@ -730,6 +738,7 @@ pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &Atomi
         pts: Vec::new(),
         pts_ele: Vec::new(),
         grid: Grid::default(),
+        sizes: Vec::new(),
     };
     let deg = |p: [i32; 2]| [p[0] as f64 * 1e-7, p[1] as f64 * 1e-7];
     for chain in &chains {
@@ -759,6 +768,14 @@ pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &Atomi
 }
 
 impl Graph {
+    fn count_components(&mut self) {
+        let mut sizes = vec![0u32; self.comp.iter().max().map_or(0, |m| *m as usize + 1)];
+        for c in &self.comp {
+            sizes[*c as usize] += 1;
+        }
+        self.sizes = sizes;
+    }
+
     /// Adjacency and components, from the edges.
     fn link(&mut self) {
         let n = self.nodes();
@@ -802,6 +819,7 @@ impl Graph {
             next += 1;
         }
         self.comp = comp;
+        self.count_components();
     }
 }
 

@@ -88,13 +88,19 @@ pub enum NoStart {
 }
 
 const START_REACH: f64 = 500.0;
+/// A component of at least this many nodes is a network to start from.
+const NETWORK: u32 = 200;
 
 impl<'g> Local<'g> {
     /// The part of `g` reachable from the path nearest to (lat, lon) without going farther than
     /// `radius` metres from it, on ways `prefs` allows.
     pub fn around(g: &'g Graph, lat: f64, lon: f64, radius: f64, prefs: &Prefs) -> Result<Local<'g>, NoStart> {
         let usable = |e: u32| factor(g.edges[e as usize].class, prefs).is_some();
-        let snap = g.snap(lat, lon, START_REACH, usable).ok_or(NoStart::TooFar)?;
+        // A path cut off from the rest (a yard's footway, streets boxed in by main roads, which
+        // aren't kept) holds no loop: the start goes to the nearest part of a real network, if
+        // there is one within reach.
+        let joined = |e: u32| usable(e) && g.component_size(g.edges[e as usize].a) >= NETWORK;
+        let snap = g.snap(lat, lon, START_REACH, joined).or_else(|| g.snap(lat, lon, START_REACH, usable)).ok_or(NoStart::TooFar)?;
         let line = g.line(snap.edge);
         let pts: Vec<[f64; 2]> = line.iter().map(|(p, _)| [p[0] as f64 * 1e-7, p[1] as f64 * 1e-7]).collect();
         let mut along = 0.0;
