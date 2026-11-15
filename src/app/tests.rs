@@ -361,6 +361,92 @@ fn the_loop_is_shaped_by_hand(cx: &mut TestAppContext) {
     assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().len()), 1);
 }
 
+/// The chosen loop in 3D: the relief awaited, then the ground; a drag turns it, shift-drag moves
+/// it, the wheel comes closer, the pointer over the line shows where on the profile; 2D again.
+#[gpui::test]
+fn the_loop_is_seen_in_3d(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent};
+    let (shell, cx) = start(cx, 3);
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| d.loops.graph = Some(std::sync::Arc::new(crate::logic::graph::tests::town()))));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    let s0 = [43.70, 7.25 + 1000.0 / (111_195.0 * 0.7230)];
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| {
+        l.look_at(43.70 + 1500.0 / 111_195.0, s0[1], 14.0);
+        l.type_km("7", window, cx);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let p = shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(s0[0], s0[1]));
+    cx.simulate_click(p, Modifiers::none());
+    cx.run_until_parked();
+    assert!(!shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.is_empty()));
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
+        l.show_3d(true);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    // No tile in the tests: the relief is awaited.
+    assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).camera()).is_none());
+    // A slope rising north, 1 m per tile pixel.
+    let mut slope = |_z: u8, _x: u32, _y: u32| Some(std::sync::Arc::new((0..256 * 256).map(|i| 300.0 - (i / 256) as f32).collect::<Vec<f32>>()));
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
+        l.ground_from(&mut slope, cx);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let cam = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.loops.read(cx).camera()).expect("a scene");
+    let b = shell.update(cx, |s, cx| s.loops.update(cx, |l, _| l.bounds_3d()));
+    assert!(b.size.width > gpui::px(400.) && b.size.height > gpui::px(200.), "{b:?}");
+    let mid = gpui::point(b.origin.x + b.size.width * 0.75, b.origin.y + b.size.height * 0.5);
+    let by = |dx: f32, dy: f32| gpui::point(mid.x + gpui::px(dx), mid.y + gpui::px(dy));
+    // Dragged: turned.
+    let c0 = cam(cx);
+    cx.simulate_mouse_down(mid, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(by(60., 0.), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(by(120., 30.), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(by(120., 30.), MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let c1 = cam(cx);
+    assert!((c1.yaw - c0.yaw).abs() > 0.5 && c1.pitch > c0.pitch && c1.target == c0.target, "{c0:?} {c1:?}");
+    // Shift-dragged: moved, not turned.
+    let shift = Modifiers { shift: true, ..Modifiers::none() };
+    cx.simulate_mouse_down(mid, MouseButton::Left, shift);
+    cx.simulate_mouse_move(by(80., 40.), MouseButton::Left, shift);
+    cx.simulate_mouse_up(by(80., 40.), MouseButton::Left, shift);
+    cx.run_until_parked();
+    let c2 = cam(cx);
+    assert!(c2.target != c1.target && c2.yaw == c1.yaw, "{c1:?} {c2:?}");
+    // The wheel: closer.
+    cx.simulate_event(ScrollWheelEvent { position: mid, delta: ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(120.))), ..Default::default() });
+    cx.run_until_parked();
+    assert!(cam(cx).dist < c2.dist);
+    // The pointer over the line: that point on the profile; far from it, none.
+    let line = shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[s.loops.read(cx).selected()].line.clone());
+    let mid_line = line.len() / 2;
+    let (k, p) = shell
+        .update(cx, |s, cx| s.loops.update(cx, |l, cx| (mid_line..line.len()).chain(0..mid_line).find_map(|i| l.screen_3d(i, cx).filter(|p| b.contains(p) && p.x > b.origin.x + gpui::px(400.)).map(|p| (i, p)))))
+        .expect("a point of the line in sight");
+    cx.simulate_mouse_move(p, None, Modifiers::none());
+    cx.run_until_parked();
+    let h = shell.read_with(cx, |s, cx| s.loops.read(cx).hover()).expect("a point of the profile");
+    assert!(crate::logic::fit::metres(line[h], line[k]) < 60.0);
+    cx.simulate_mouse_move(gpui::point(b.origin.x + b.size.width - gpui::px(2.), b.origin.y + gpui::px(2.)), None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).hover()), None);
+    // 2D again: the map, and its points under the pointer.
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
+        l.show_3d(false);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let p = shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(line[mid_line][0], line[mid_line][1]));
+    cx.simulate_mouse_move(p, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).hover()).is_some());
+}
+
 /// A loop kept under a name: listed, written to disk, opened again as it was, changed and kept
 /// again (the same route), kept as a copy, taken away from the list (still in the file).
 #[gpui::test]

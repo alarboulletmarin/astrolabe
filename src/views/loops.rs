@@ -22,6 +22,9 @@ use gpui_kit::{prelude::FluentBuilder, *};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+#[path = "loops3d.rs"]
+mod three;
+
 /// How many loops are proposed at once.
 const COUNT: usize = 3;
 /// The panel's width, over the map.
@@ -143,6 +146,9 @@ pub struct LoopsView {
     hover: Option<usize>,
     show_relief: bool,
     relief: Relief,
+    /// The chosen loop shown in 3D, and its scene.
+    three_d: bool,
+    scene: Option<three::Scene>,
     plots: Plots,
     /// What the input asked that can't be read.
     bad_input: Option<String>,
@@ -221,6 +227,8 @@ impl LoopsView {
             hover: None,
             show_relief: true,
             relief: Relief::default(),
+            three_d: false,
+            scene: None,
             plots: Plots::default(),
             bad_input: None,
             drag: None,
@@ -969,24 +977,37 @@ impl Render for LoopsView {
             .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, _, cx| this.take_away(e, cx)))
             .into_any_element();
 
+        // The chosen loop over its ground, in 3D, instead of the map.
+        let ground = match chosen.filter(|_| self.three_d) {
+            Some(l) => self.view_3d(l, cx),
+            None => map_widget(&self.map, |v: &mut LoopsView| &mut v.map, &self.data, "loops-map", Some(overlay), bbox, false, cx).into_any_element(),
+        };
+        let three = chosen.is_some() && self.three_d;
         div()
             .size_full()
             .relative()
-            .child(map_widget(&self.map, |v: &mut LoopsView| &mut v.map, &self.data, "loops-map", Some(overlay), bbox, false, cx))
+            .child(ground)
             .child(self.panel(&found, cx))
             .child(
                 div()
                     .absolute()
                     .top(px(14.0f32.max(crate::ui::top() - 14.0) + 40.0))
                     .right(px(14.))
-                    .bg(t.bg)
-                    .rounded(px(8.))
-                    .shadow_sm()
+                    .flex()
+                    .gap(px(6.))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(segmented("loops-relief", vec![(tr("Relief", "Relief").into(), self.show_relief), (tr("Flat", "Plate").into(), !self.show_relief)], t, cx, |this: &mut LoopsView, i, _, _| {
-                        this.show_relief = i == 0;
-                        this.relief.drawn = None;
-                    })),
+                    .when(!three, |d| {
+                        d.child(div().bg(t.bg).rounded(px(8.)).shadow_sm().child(segmented("loops-relief", vec![(tr("Relief", "Relief").into(), self.show_relief), (tr("Flat", "Plate").into(), !self.show_relief)], t, cx, |this: &mut LoopsView, i, _, _| {
+                            this.show_relief = i == 0;
+                            this.relief.drawn = None;
+                        })))
+                    })
+                    .when(chosen.is_some(), |d| {
+                        d.child(div().bg(t.bg).rounded(px(8.)).shadow_sm().child(segmented("loops-3d-toggle", vec![("2D".into(), !three), ("3D".into(), three)], t, cx, |this: &mut LoopsView, i, _, _| {
+                            this.three_d = i == 1;
+                            this.hover = None;
+                        })))
+                    }),
             )
             .child(
                 div()

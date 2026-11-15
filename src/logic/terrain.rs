@@ -3,8 +3,6 @@
 //! (same layout as `relief::shade`: the three colour bytes as given by the caller, then alpha).
 //! Pure: no gpui, no disk.
 
-// ponytail: nothing calls this yet; drop the allow once the planner view draws it.
-#![allow(dead_code)]
 
 use crate::logic::map::world;
 use std::sync::{Arc, Mutex};
@@ -309,7 +307,7 @@ pub fn render(t: &Terrain, colors: &[[u8; 3]], cam: &Camera, exaggeration: f32, 
         }
         segs.push((screen(a, focal, wf, hf), screen(b, focal, wf, hf), line[k].1));
     }
-    let radius = (w as f32 * 1.5 / 1200.0).max(1.0);
+    let radius = (w as f32 * 2.0 / 1200.0).max(1.0);
 
     let bands = Mutex::new(out.chunks_mut(BAND * w * 4).enumerate());
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
