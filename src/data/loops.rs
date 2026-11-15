@@ -4,6 +4,7 @@
 
 use super::{Data, Status};
 use crate::lang::{tr, trf};
+use crate::logic::buildings::Building;
 use crate::logic::elevation::{self, Dem};
 use crate::logic::graph::{self, CANCELLED, Graph};
 use crate::logic::loops::{self, Loop, NoLoop, Request, Route};
@@ -69,6 +70,9 @@ pub struct Loops {
     pub elevation_base: String,
     relief: HashMap<(u8, u32, u32), Option<Arc<Vec<f32>>>>,
     relief_busy: usize,
+    /// The buildings read, by tile (`buildings::ZOOM`), and whether more are being read.
+    buildings: HashMap<(u32, u32), Arc<Vec<Building>>>,
+    buildings_busy: bool,
 }
 
 impl Default for Loops {
@@ -92,6 +96,8 @@ impl Default for Loops {
             elevation_base: platform::elevation::TERRARIUM.into(),
             relief: HashMap::new(),
             relief_busy: 0,
+            buildings: HashMap::new(),
+            buildings_busy: false,
         }
     }
 }
@@ -167,6 +173,8 @@ impl Data {
         let (done, total, cancel) = (job.done.clone(), job.total.clone(), job.cancel.clone());
         self.loops.job = Some(job);
         self.loops.error = None;
+        // Another extract: its buildings are read again.
+        self.loops.buildings.clear();
         self.tick_loops(cx);
         let (base, region) = (self.loops.osm_base.clone(), self.loops.region);
         cx.notify();
@@ -464,6 +472,47 @@ impl Data {
             .ok();
         })
         .detach();
+    }
+
+    /// The buildings of these tiles (`buildings::ZOOM`) of the region, if all are ready; otherwise
+    /// has them read in the background, from the cache or the extract (one reading at a time).
+    /// Without an extract a tile is empty.
+    pub fn buildings(&mut self, tiles: &[(u32, u32)], cx: &mut Context<Self>) -> Option<Vec<Arc<Vec<Building>>>> {
+        // The tests have no extract to read.
+        if cfg!(test) {
+            return None;
+        }
+        if let Some(all) = tiles.iter().map(|t| self.loops.buildings.get(t).cloned()).collect::<Option<Vec<_>>>() {
+            return Some(all);
+        }
+        if self.loops.buildings_busy {
+            return None;
+        }
+        // ponytail: forgets every tile past 150 (about 50 MB in a town), an LRU if it shows.
+        if self.loops.buildings.len() > 150 {
+            self.loops.buildings.clear();
+        }
+        self.loops.buildings_busy = true;
+        let missing: Vec<(u32, u32)> = tiles.iter().copied().filter(|t| !self.loops.buildings.contains_key(t)).collect();
+        let id = self.loops.region.id;
+        cx.spawn(async move |this, cx| {
+            let asked = missing.clone();
+            let read = cx.background_executor().spawn(async move { platform::osm::buildings(id, &missing, threads()) }).await;
+            this.update(cx, |d, cx| {
+                d.loops.buildings_busy = false;
+                let mut read = read.unwrap_or_default();
+                // Another region chosen meanwhile: these are not its buildings.
+                if d.loops.region.id == id {
+                    for t in asked {
+                        d.loops.buildings.insert(t, Arc::new(read.remove(&t).unwrap_or_default()));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        None
     }
 
     /// The altitudes of an elevation tile for the relief, if ready; otherwise asks for it (two at

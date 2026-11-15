@@ -15,6 +15,8 @@ const LIGHT: [f32; 3] = [-0.5, 0.5, std::f32::consts::FRAC_1_SQRT_2];
 const FLAT_LIT: f32 = AMBIENT + (1.0 - AMBIENT) * LIGHT[2];
 /// The line is 0.5 % nearer than its own ground, so it is not buried in it.
 const LINE_BIAS: f32 = 1.005;
+/// Brightness of a wall turned away from the sun.
+const WALL_SHADE: f32 = 0.7;
 const NEAR: f64 = 1.0;
 const BAND: usize = 16;
 
@@ -291,6 +293,73 @@ impl Shade {
     }
 }
 
+/// A triangle standing on the ground, of one colour (already lit): corners `[east, north,
+/// altitude]` in local metres, bytes in the caller's order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Face {
+    pub p: [[f32; 3]; 3],
+    pub colour: [u8; 3],
+}
+
+/// A block standing on an outline (`[east, north]` local metres, not closed, either way round)
+/// from `base` up to `top`: its roof in `roof`, flat, and its walls in `wall`, each lit by its
+/// side to the sun. No floor. Fewer than three distinct points: nothing.
+pub fn extrude(ring: &[[f32; 2]], base: f32, top: f32, wall: [u8; 3], roof: [u8; 3]) -> Vec<Face> {
+    let mut pts: Vec<[f32; 2]> = Vec::with_capacity(ring.len());
+    for p in ring {
+        if p[0].is_finite() && p[1].is_finite() && pts.last() != Some(p) {
+            pts.push(*p);
+        }
+    }
+    if pts.len() > 1 && pts.first() == pts.last() {
+        pts.pop();
+    }
+    let area: f32 = (0..pts.len()).map(|i| { let (a, b) = (pts[i], pts[(i + 1) % pts.len()]); a[0] * b[1] - b[0] * a[1] }).sum();
+    if pts.len() < 3 || area == 0.0 {
+        return Vec::new();
+    }
+    // Counter-clockwise from above: the outside of a wall is on the right of its edge.
+    if area < 0.0 {
+        pts.reverse();
+    }
+    let n = pts.len();
+    let mut out = Vec::with_capacity(3 * n);
+    for i in 0..n {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        // Softer than the ground's shade, and never as light as the roof: a town stays legible.
+        let lit = ((dy * LIGHT[0] - dx * LIGHT[1]) / len).max(0.0);
+        let f = WALL_SHADE + (1.0 - WALL_SHADE) * lit;
+        let colour = wall.map(|c| (c as f32 * f + 0.5).min(255.0) as u8);
+        out.push(Face { p: [[a[0], a[1], base], [b[0], b[1], base], [b[0], b[1], top]], colour });
+        out.push(Face { p: [[a[0], a[1], base], [b[0], b[1], top], [a[0], a[1], top]], colour });
+    }
+    // The roof, ear by ear: a corner whose triangle turns left and holds no other point is cut
+    // off, until three are left.
+    let cross = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    let mut left: Vec<usize> = (0..n).collect();
+    while left.len() > 3 {
+        let m = left.len();
+        let ear = (0..m).find(|&i| {
+            let (a, b, c) = (pts[left[(i + m - 1) % m]], pts[left[i]], pts[left[(i + 1) % m]]);
+            cross(a, b, c) > 0.0
+                && !left.iter().any(|&k| {
+                    let p = pts[k];
+                    p != a && p != b && p != c && cross(a, b, p) >= 0.0 && cross(b, c, p) >= 0.0 && cross(c, a, p) >= 0.0
+                })
+        });
+        // An outline that crosses itself has no ear left: the rest is closed as a fan.
+        let i = ear.unwrap_or(0);
+        let (a, b, c) = (pts[left[(i + m - 1) % m]], pts[left[i]], pts[left[(i + 1) % m]]);
+        out.push(Face { p: [[a[0], a[1], top], [b[0], b[1], top], [c[0], c[1], top]], colour: roof });
+        left.remove(i);
+    }
+    let (a, b, c) = (pts[left[0]], pts[left[1]], pts[left[2]]);
+    out.push(Face { p: [[a[0], a[1], top], [b[0], b[1], top], [c[0], c[1], top]], colour: roof });
+    out
+}
+
 /// Where the eye looks from: orbiting `target` (local metres east, north, altitude).
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
@@ -420,13 +489,14 @@ pub fn project(_t: &Terrain, cam: &Camera, exaggeration: f32, p: [f64; 3], w: us
     (c[2] > NEAR).then(|| screen(c, focal, w as f64, h as f64)).map(|v| (v[0], v[1]))
 }
 
-/// Draws `t` with `texture` laid over it (its light is in the picture), then `line` over it, edged with the
-/// background's colour. Each line point is `([east, north, altitude], colour of the segment that
-/// starts there)`. `smooth` draws at twice the size and averages, for soft edges (about a
-/// third more time: the triangles' set-up costs more than their pixels). Returns `w * h` pixels of 4 bytes: the colour bytes as given, alpha 255;
+/// Draws `t` with `texture` laid over it (its light is in the picture), the `solids` standing on
+/// it, then `line` over it, edged with the background's colour. Each line point is `([east,
+/// north, altitude], colour of the segment that starts there)`. `smooth` draws at twice the size
+/// and averages, for soft edges (about a third more time: the triangles' set-up costs more than
+/// their pixels). Returns `w * h` pixels of 4 bytes: the colour bytes as given, alpha 255;
 /// `background` where nothing is drawn, and under the ground's faded edges.
 #[allow(clippy::too_many_arguments)]
-pub fn render(t: &Terrain, texture: &Texture, cam: &Camera, exaggeration: f32, line: &[([f64; 3], [u8; 3])], w: usize, h: usize, background: [u8; 4], smooth: bool) -> Vec<u8> {
+pub fn render(t: &Terrain, texture: &Texture, solids: &[Face], cam: &Camera, exaggeration: f32, line: &[([f64; 3], [u8; 3])], w: usize, h: usize, background: [u8; 4], smooth: bool) -> Vec<u8> {
     let mut out: Vec<u8> = background.iter().copied().cycle().take(w * h * 4).collect();
     if w == 0 || h == 0 || t.cols < 2 || t.rows < 2 || texture.w < 2 || texture.h < 2 || texture.px.len() < texture.w * texture.h {
         return out;
@@ -439,47 +509,108 @@ pub fn render(t: &Terrain, texture: &Texture, cam: &Camera, exaggeration: f32, l
     let focal = sh as f64 / 2.0 / (cam.fov / 2.0).tan();
     let (wf, hf) = (sw as f64, sh as f64);
 
+    // The triangles' set-up is shared between the processors, each taking a run of the ground's
+    // rows or of the solids: it costs more than the pixels.
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     // Vertices in view space, with their place on the texture and their light.
     let (cols, rows) = (t.cols, t.rows);
     let mut verts = vec![[0f64; 6]; cols * rows];
-    for j in 0..rows {
-        for i in 0..cols {
-            let k = j * cols + i;
-            let z = t.heights[k] as f64 * ex;
-            let s = to_cam(&eye, &b, [i as f64 * t.dx, j as f64 * t.dy, z]);
-            // The ground's light is in its picture (`Texture::lit`), finer than the vertices.
-            verts[k] = [s[0], s[1], s[2], i as f64 / (cols - 1) as f64, j as f64 / (rows - 1) as f64, 1.0];
-        }
-    }
-    // Screen triangles: each cell's two triangles cut at the near plane, the rest fanned; with
-    // their vertical extent, to skip the bands they do not touch.
-    // Each band of rows keeps the list of the triangles that touch it; those out of the picture
-    // are dropped.
-    let mut tris: Vec<[[f32; 6]; 3]> = Vec::with_capacity(2 * (cols - 1) * (rows - 1));
-    let band = (BAND * ss) as f32;
-    let mut bins: Vec<Vec<u32>> = vec![Vec::new(); h.div_ceil(BAND)];
-    for j in 0..rows - 1 {
-        for i in 0..cols - 1 {
-            let (v00, v10, v01, v11) = (&verts[j * cols + i], &verts[j * cols + i + 1], &verts[(j + 1) * cols + i], &verts[(j + 1) * cols + i + 1]);
-            for tri in [[v00, v10, v11], [v00, v11, v01]] {
-                let (poly, n) = clip_near(tri);
-                let p = poly.map(|v| {
-                    let s = screen([v[0], v[1], v[2].max(NEAR)], focal, wf, hf);
-                    [s[0], s[1], s[2], v[3] as f32, v[4] as f32, v[5] as f32]
-                });
-                for m in 1..n.saturating_sub(1) {
-                    let (a, b, c) = (p[0], p[m], p[m + 1]);
-                    let (top, bottom) = (a[1].min(b[1]).min(c[1]), a[1].max(b[1]).max(c[1]));
-                    if bottom < 0.0 || top >= hf as f32 || a[0].max(b[0]).max(c[0]) < 0.0 || a[0].min(b[0]).min(c[0]) >= wf as f32 {
-                        continue;
-                    }
-                    let last = ((bottom / band) as usize).min(bins.len() - 1);
-                    for bin in &mut bins[(top.max(0.0) / band) as usize..=last] {
-                        bin.push(tris.len() as u32);
-                    }
-                    tris.push([a, b, c]);
+    let per = rows.div_ceil(threads).max(1);
+    std::thread::scope(|sc| {
+        for (n, part) in verts.chunks_mut(per * cols).enumerate() {
+            let (eye, b) = (&eye, &b);
+            sc.spawn(move || {
+                for (k, v) in part.iter_mut().enumerate() {
+                    let (i, j) = (k % cols, n * per + k / cols);
+                    let s = to_cam(eye, b, [i as f64 * t.dx, j as f64 * t.dy, t.heights[j * cols + i] as f64 * ex]);
+                    // The ground's light is in its picture (`Texture::lit`), finer than the vertices.
+                    *v = [s[0], s[1], s[2], i as f64 / (cols - 1) as f64, j as f64 / (rows - 1) as f64, 1.0];
                 }
+            });
+        }
+    });
+    // Screen triangles, cut at the near plane and the rest fanned. Each band of rows keeps the
+    // list of the triangles that touch it; those out of the picture are dropped, and so are
+    // the faces of a solid that turn their back (`cull`).
+    type Tris = (Vec<[[f32; 6]; 3]>, Vec<Vec<u32>>);
+    let band = (BAND * ss) as f32;
+    let bands = h.div_ceil(BAND);
+    let push = |(tris, bins): &mut Tris, tri: [&[f64; 6]; 3], cull: bool| {
+        let (poly, n) = clip_near(tri);
+        let p = poly.map(|v| {
+            let s = screen([v[0], v[1], v[2].max(NEAR)], focal, wf, hf);
+            [s[0], s[1], s[2], v[3] as f32, v[4] as f32, v[5] as f32]
+        });
+        for m in 1..n.saturating_sub(1) {
+            let (a, b, c) = (p[0], p[m], p[m + 1]);
+            let (top, bottom) = (a[1].min(b[1]).min(c[1]), a[1].max(b[1]).max(c[1]));
+            if bottom < 0.0 || top >= hf as f32 || a[0].max(b[0]).max(c[0]) < 0.0 || a[0].min(b[0]).min(c[0]) >= wf as f32 {
+                continue;
             }
+            // Seen from outside, a face goes round clockwise on screen (y grows downwards).
+            if cull && (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) >= 0.0 {
+                continue;
+            }
+            let last = ((bottom / band) as usize).min(bins.len() - 1);
+            for bin in &mut bins[(top.max(0.0) / band) as usize..=last] {
+                bin.push(tris.len() as u32);
+            }
+            tris.push([a, b, c]);
+        }
+    };
+    let (verts, push, eye_, b_) = (&verts, &push, &eye, &b);
+    let cell_rows: Vec<usize> = (0..rows - 1).collect();
+    let (ground_parts, solid_parts): (Vec<Tris>, Vec<Tris>) = std::thread::scope(|sc| {
+        let ground: Vec<_> = cell_rows
+            .chunks(cell_rows.len().div_ceil(threads).max(1))
+            .map(|run| {
+                sc.spawn(move || {
+                    let mut out: Tris = (Vec::with_capacity(2 * run.len() * (cols - 1)), vec![Vec::new(); bands]);
+                    for &j in run {
+                        for i in 0..cols - 1 {
+                            let (v00, v10, v01, v11) = (&verts[j * cols + i], &verts[j * cols + i + 1], &verts[(j + 1) * cols + i], &verts[(j + 1) * cols + i + 1]);
+                            push(&mut out, [v00, v10, v11], false);
+                            push(&mut out, [v00, v11, v01], false);
+                        }
+                    }
+                    out
+                })
+            })
+            .collect();
+        // The solids' faces have their colour where the ground's have their place on the texture.
+        let solid: Vec<_> = solids
+            .chunks(solids.len().div_ceil(threads).max(1))
+            .map(|run| {
+                sc.spawn(move || {
+                    let mut out: Tris = (Vec::with_capacity(run.len()), vec![Vec::new(); bands]);
+                    for f in run {
+                        let v = f.p.map(|p| {
+                            let c = to_cam(eye_, b_, [p[0] as f64, p[1] as f64, p[2] as f64 * ex]);
+                            [c[0], c[1], c[2], f.colour[0] as f64, f.colour[1] as f64, f.colour[2] as f64]
+                        });
+                        if v.iter().all(|v| v[..3].iter().all(|x| x.is_finite())) {
+                            push(&mut out, [&v[0], &v[1], &v[2]], true);
+                        }
+                    }
+                    out
+                })
+            })
+            .collect();
+        let done = |hs: Vec<std::thread::ScopedJoinHandle<Tris>>| hs.into_iter().map(|h| h.join().expect("a drawing thread")).collect();
+        (done(ground), done(solid))
+    });
+    // One list: the ground's triangles first, then the solids'.
+    let mut tris: Vec<[[f32; 6]; 3]> = Vec::with_capacity(ground_parts.iter().chain(&solid_parts).map(|p| p.0.len()).sum());
+    let mut bins: Vec<Vec<u32>> = vec![Vec::new(); bands];
+    let (mut ground_tris, ground_runs) = (0, ground_parts.len());
+    for (n, (part, part_bins)) in ground_parts.into_iter().chain(solid_parts).enumerate() {
+        let from = tris.len() as u32;
+        tris.extend(part);
+        for (bin, more) in bins.iter_mut().zip(part_bins) {
+            bin.extend(more.into_iter().map(|k| k + from));
+        }
+        if n < ground_runs {
+            ground_tris = tris.len();
         }
     }
     // Line segments cut at the near plane; a point that is not a number cuts the line there.
@@ -507,7 +638,6 @@ pub fn render(t: &Terrain, texture: &Texture, cam: &Camera, exaggeration: f32, l
     let ground = Ground { texture, background: background.map(|v| v as f32) };
 
     let bands = Mutex::new(out.chunks_mut(BAND * w * 4).enumerate());
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     std::thread::scope(|sc| {
         for _ in 0..threads {
             sc.spawn(|| {
@@ -523,7 +653,7 @@ pub fn render(t: &Terrain, texture: &Texture, cam: &Camera, exaggeration: f32, l
                     zbuf.iter_mut().for_each(|z| *z = 0.0);
                     for k in &bins[n] {
                         let v = &tris[*k as usize];
-                        triangle([&v[0], &v[1], &v[2]], &ground, y0, y1, sw, buf, &mut zbuf);
+                        triangle([&v[0], &v[1], &v[2]], ((*k as usize) < ground_tris).then_some(&ground), y0, y1, sw, buf, &mut zbuf);
                     }
                     // The edging first and without depth of its own: no segment's edging covers
                     // another's line.
@@ -564,10 +694,10 @@ fn put(px: &mut [u8], c: [f32; 4]) {
     px.copy_from_slice(&c.map(|v| (v + 0.5).clamp(0.0, 255.0) as u8));
 }
 
-/// One triangle, restricted to rows `y0..y1`; place on the texture, light and 1/depth are
-/// interpolated on screen.
+/// One triangle, restricted to rows `y0..y1`: of the ground `g` (place on the texture, light and
+/// 1/depth are interpolated on screen), or else of one colour, held by its vertices.
 /// ponytail: the texture is not perspective-corrected; with small cells the error is invisible.
-fn triangle(v: [&[f32; 6]; 3], g: &Ground, y0: usize, y1: usize, w: usize, rows_out: &mut [u8], zbuf: &mut [f32]) {
+fn triangle(v: [&[f32; 6]; 3], g: Option<&Ground>, y0: usize, y1: usize, w: usize, rows_out: &mut [u8], zbuf: &mut [f32]) {
     let [a, b, c] = v;
     let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
     if area.abs() < 1e-6 {
@@ -597,6 +727,10 @@ fn triangle(v: [&[f32; 6]; 3], g: &Ground, y0: usize, y1: usize, w: usize, rows_
             let zi = (y - y0) * w + x;
             if iz > zbuf[zi] {
                 zbuf[zi] = iz;
+                let Some(g) = g else {
+                    put(&mut rows_out[zi * 4..zi * 4 + 4], [a[3], a[4], a[5], 255.0]);
+                    continue;
+                };
                 let [u, v, light] = [3, 4, 5].map(|k| wa * a[k] + wb * b[k] + wc * c[k]);
                 let (tex, shown, bg) = (g.texture.sample(u, v), g.texture.shown(u, v), g.background);
                 let lit = [tex[0] * light, tex[1] * light, tex[2] * light, 255.0];
@@ -665,7 +799,7 @@ mod tests {
     fn flat_terrain_from_above_shows_its_lit_colour() {
         let t = grid(21, |_, _| 0.0);
         let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.0, pitch: PITCH_MAX, dist: 3000.0, min_dist: 300.0, fov: 0.8 };
-        let img = render(&t, &plain([200, 100, 50]), &cam, 1.0, &[], 200, 150, CLEAR, false);
+        let img = render(&t, &plain([200, 100, 50]), &[], &cam, 1.0, &[], 200, 150, CLEAR, false);
         let p = pixel(&img, 200, 100.0, 75.0);
         for (got, want) in p.iter().zip([200.0, 100.0, 50.0, 255.0]) {
             assert!((*got as f32 - want).abs() <= 1.5, "{p:?} vs {want}");
@@ -685,7 +819,7 @@ mod tests {
     #[test]
     fn line_shows_on_flat_ground() {
         let (t, cam, line) = ridge_scene(0.0);
-        let img = render(&t, &plain([40, 160, 40]), &cam, 1.0, &line, 1200, 800, CLEAR, false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false);
         let (x, y) = project(&t, &cam, 1.0, [1000.0, 1500.0, 0.0], 1200, 800).unwrap();
         assert_eq!(pixel(&img, 1200, x, y)[..3], [255, 0, 0]);
         // About 3 px thick: the pixels 4 px above and below are ground.
@@ -696,7 +830,7 @@ mod tests {
     #[test]
     fn a_peak_in_front_hides_the_line() {
         let (t, cam, line) = ridge_scene(1500.0);
-        let img = render(&t, &plain([40, 160, 40]), &cam, 1.0, &line, 1200, 800, CLEAR, false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false);
         let (x, y) = project(&t, &cam, 1.0, [1000.0, 1500.0, 0.0], 1200, 800).unwrap();
         assert_ne!(pixel(&img, 1200, x, y)[..3], [255, 0, 0]);
         assert_eq!(pixel(&img, 1200, x, y)[3], 255, "the ridge covers that pixel");
@@ -760,7 +894,7 @@ mod tests {
         let t = grid(301, |_, _| 100.0);
         for dist in [50.0, 200.0, 300.0] {
             let cam = Camera { target: [15_000.0, 15_000.0, 100.0], yaw: 0.4, pitch: PITCH_MIN, dist, min_dist: 300.0, fov: 0.8 };
-            let img = render(&t, &plain([40, 160, 40]), &cam, 1.0, &[], 1200, 800, CLEAR, false);
+            let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &[], 1200, 800, CLEAR, false);
             let bg = lower_half_background(&img);
             assert!(bg < 0.01, "dist {dist}: {:.1} % background", bg * 100.0);
         }
@@ -772,7 +906,7 @@ mod tests {
         let cam = Camera { target: [1500.0, 1500.0, 0.0], yaw: 0.0, pitch: PITCH_MIN, dist: 200.0, min_dist: 300.0, fov: 0.8 };
         // From ahead of the eye to behind it.
         let line = [([1500.0, 1450.0, 0.0], [255, 0, 0]), ([1500.0, 1100.0, 0.0], [255, 0, 0])];
-        let img = render(&t, &plain([40, 160, 40]), &cam, 1.0, &line, 1200, 800, CLEAR, false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false);
         assert_eq!(pixel(&img, 1200, 600.0, 799.0)[..3], [255, 0, 0], "the line reaches the bottom edge");
     }
 
@@ -782,7 +916,7 @@ mod tests {
         let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.0, pitch: 40f64.to_radians(), dist: 3000.0, min_dist: 300.0, fov: 0.8 };
         let red = [255, 0, 0];
         let line = [([f64::NAN, 1000.0, 0.0], red), ([900.0, 1000.0, 0.0], red), ([1100.0, 1000.0, 0.0], red)];
-        let img = render(&t, &plain([40, 160, 40]), &cam, 1.0, &line, 1200, 800, CLEAR, false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false);
         let (x, y) = project(&t, &cam, 1.0, [1000.0, 1000.0, 0.0], 1200, 800).unwrap();
         assert_eq!(pixel(&img, 1200, x, y)[..3], [255, 0, 0], "the good segment is drawn");
         let reds = img.chunks(4).filter(|p| p[..3] == [255, 0, 0]).count();
@@ -793,7 +927,7 @@ mod tests {
     fn an_empty_grid_has_no_extent_to_overflow() {
         let t = Terrain { cols: 0, rows: 0, heights: vec![], dx: 0.0, dy: 0.0, south: 0.0, west: 0.0, mx: 1.0, my: 1.0 };
         let cam = Camera::fit(&t);
-        assert_eq!(render(&t, &plain([0; 3]), &cam, 1.0, &[], 4, 4, [1, 2, 3, 4], false).len(), 64);
+        assert_eq!(render(&t, &plain([0; 3]), &[], &cam, 1.0, &[], 4, 4, [1, 2, 3, 4], false).len(), 64);
         assert_eq!(t.height_at(5.0, 5.0), 0.0);
     }
 
@@ -906,6 +1040,72 @@ mod tests {
         assert_eq!(Texture { w: 300, h: 7, px: vec![[100, 200, 50]; 2100], fade: 0.0 }.lit(&flat).px[2099], [100, 200, 50]);
     }
 
+    #[test]
+    fn a_block_has_lit_walls_and_a_roof_that_fills_its_outline() {
+        let (wall, roof) = ([200, 200, 200], [100, 150, 250]);
+        let area = |f: &Face| ((f.p[1][0] - f.p[0][0]) * (f.p[2][1] - f.p[0][1]) - (f.p[1][1] - f.p[0][1]) * (f.p[2][0] - f.p[0][0])).abs() / 2.0;
+        let roofs = |faces: &[Face]| faces.iter().filter(|f| f.colour == roof).map(area).sum::<f32>();
+        // A square of 10 m, 5 m to 17 m up: 8 wall triangles, 2 for the roof, 100 m² of it.
+        let square = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let faces = extrude(&square, 5.0, 17.0, wall, roof);
+        assert_eq!(faces.len(), 10);
+        assert!((roofs(&faces) - 100.0).abs() < 1e-3);
+        assert!(faces.iter().all(|f| f.p.iter().all(|p| p[2] == 5.0 || p[2] == 17.0)));
+        assert!(faces.iter().filter(|f| f.colour == roof).all(|f| f.p.iter().all(|p| p[2] == 17.0)));
+        // The light comes from the north-west: the north and west walls are lighter than the
+        // south and east ones. A wall is the two triangles with x (or y) constant.
+        let side = |k: usize, v: f32| faces.iter().find(|f| f.colour != roof && f.p.iter().all(|p| p[k] == v)).unwrap().colour[0];
+        let (west, east, south, north) = (side(0, 0.0), side(0, 10.0), side(1, 0.0), side(1, 10.0));
+        assert!(west > east + 20 && north > south + 20 && west == north && east == south && west < 200, "{west} {east} {south} {north}");
+        // Drawn the other way round, closed, or with a point twice: the same block.
+        let back: Vec<[f32; 2]> = square.iter().rev().copied().collect();
+        let sorted = |f: Vec<Face>| { let mut c: Vec<[u8; 3]> = f.iter().map(|f| f.colour).collect(); c.sort(); (c, roofs(&f)) };
+        assert_eq!(sorted(extrude(&back, 5.0, 17.0, wall, roof)), sorted(faces.clone()));
+        assert_eq!(extrude(&[[0.0, 0.0], [10.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0], [0.0, 0.0]], 5.0, 17.0, wall, roof).len(), 10);
+        // An L: the roof covers the L (75 m²), not its hollow.
+        let l = [[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [5.0, 5.0], [5.0, 10.0], [0.0, 10.0]];
+        let faces = extrude(&l, 0.0, 8.0, wall, roof);
+        assert_eq!(faces.len(), 12 + 4);
+        assert!((roofs(&faces) - 75.0).abs() < 1e-3, "{}", roofs(&faces));
+        // A long outline with a hollow (a comb of 40 teeth): still its own area.
+        let comb: Vec<[f32; 2]> = (0..40).flat_map(|k| { let x = k as f32 * 2.0; [[x, 10.0], [x, 0.0], [x + 1.0, 0.0], [x + 1.0, 10.0]] }).chain([[79.0, 12.0], [0.0, 12.0]]).collect();
+        let faces = extrude(&comb, 0.0, 8.0, wall, roof);
+        assert!((roofs(&faces) - (40.0 * 10.0 + 79.0 * 2.0)).abs() < 0.5, "{}", roofs(&faces));
+        // Nothing to stand on: no point, a line, the same point, not a number. A bow tie: no panic.
+        for ring in [vec![], vec![[0.0, 0.0], [1.0, 1.0]], vec![[2.0, 2.0]; 5], vec![[0.0, 0.0], [5.0, 5.0], [9.0, 9.0]], vec![[f32::NAN, 0.0], [1.0, 1.0], [0.0, 1.0]]] {
+            assert!(extrude(&ring, 0.0, 8.0, wall, roof).is_empty(), "{ring:?}");
+        }
+        assert!(!extrude(&[[0.0, 0.0], [10.0, 10.0], [10.0, 0.0], [0.0, 10.5]], 0.0, 8.0, wall, roof).is_empty());
+    }
+
+    #[test]
+    fn blocks_stand_on_the_ground_and_hide_what_is_behind() {
+        // Flat ground seen from the south at 30°: a red line runs east-west, a block stands in
+        // front of its middle.
+        let t = grid(21, |_, _| 0.0);
+        let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.0, pitch: 30f64.to_radians(), dist: 1500.0, min_dist: 300.0, fov: 0.8 };
+        let line = vec![([600.0, 1100.0, 0.0], [255, 0, 0]), ([1400.0, 1100.0, 0.0], [255, 0, 0])];
+        let block = extrude(&[[950.0, 950.0], [1050.0, 950.0], [1050.0, 1050.0], [950.0, 1050.0]], 0.0, 120.0, [90, 90, 90], [10, 20, 250]);
+        let at = |solids: &[Face], p: [f64; 3]| {
+            let img = render(&t, &plain([40, 160, 40]), solids, &cam, 1.0, &line, 600, 400, CLEAR, false);
+            let (x, y) = project(&t, &cam, 1.0, p, 600, 400).unwrap();
+            pixel(&img, 600, x, y)
+        };
+        // Without the block the line's middle shows; with it, the block's south wall does, and
+        // the roof on top; beside the block the line is still there, and the ground.
+        assert_eq!(at(&[], [1000.0, 1100.0, 0.0]), [255, 0, 0, 255]);
+        let wall = at(&block, [1000.0, 950.0, 60.0]);
+        assert!(wall[0] == wall[1] && wall[1] == wall[2] && wall[0] < 70, "a south wall, in the shade: {wall:?}");
+        assert_eq!(at(&block, [1000.0, 1100.0, 0.0])[0], wall[0], "the line is behind the block");
+        assert_eq!(at(&block, [1000.0, 1000.0, 120.0]), [10, 20, 250, 255]);
+        assert_eq!(at(&block, [700.0, 1100.0, 0.0]), [255, 0, 0, 255]);
+        assert_eq!(at(&block, [700.0, 900.0, 0.0]), [40, 160, 40, 255]);
+        // Heights are drawn higher with the ground's: the roof is where `project` says.
+        let img = render(&t, &plain([40, 160, 40]), &block, &cam, 2.0, &[], 600, 400, CLEAR, false);
+        let (x, y) = project(&t, &cam, 2.0, [1000.0, 1000.0, 120.0], 600, 400).unwrap();
+        assert_eq!(pixel(&img, 600, x, y), [10, 20, 250, 255]);
+    }
+
     /// Flat ground from above, north up, under a picture with one colour per quarter.
     fn quarters(fade: f32, smooth: bool) -> Vec<u8> {
         let t = grid(21, |_, _| 0.0);
@@ -916,7 +1116,7 @@ mod tests {
             (true, false) => [0, 0, 250],
             (false, false) => [250, 250, 0],
         });
-        render(&t, &Texture { w: 40, h: 40, px: px.collect(), fade }, &cam, 1.0, &[], 300, 300, [10, 20, 30, 255], smooth)
+        render(&t, &Texture { w: 40, h: 40, px: px.collect(), fade }, &[], &cam, 1.0, &[], 300, 300, [10, 20, 30, 255], smooth)
     }
 
     #[test]
@@ -950,7 +1150,7 @@ mod tests {
         let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.3, pitch: PITCH_MAX, dist: 4500.0, min_dist: 300.0, fov: 0.8 };
         let line = vec![([500.0, 500.0, 0.0], [255, 255, 255]), ([1500.0, 900.0, 0.0], [255, 255, 255])];
         let between = |smooth: bool| {
-            let img = render(&t, &plain([200, 0, 0]), &cam, 1.0, &line, 300, 300, [0, 0, 0, 255], smooth);
+            let img = render(&t, &plain([200, 0, 0]), &[], &cam, 1.0, &line, 300, 300, [0, 0, 0, 255], smooth);
             assert_eq!(img.len(), 300 * 300 * 4);
             // Neither ground, background nor line: a blend.
             img.chunks_exact(4).filter(|p| ![0, 200, 255].contains(&p[0])).count()
@@ -964,7 +1164,7 @@ mod tests {
         let t = grid(21, |_, _| 0.0);
         let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.0, pitch: PITCH_MAX, dist: 3000.0, min_dist: 300.0, fov: 0.8 };
         let line = vec![([500.0, 1000.0, 0.0], [255, 0, 0]), ([1500.0, 1000.0, 0.0], [255, 0, 0])];
-        let img = render(&t, &plain([40, 160, 40]), &cam, 1.0, &line, 1200, 800, [9, 9, 9, 255], false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, [9, 9, 9, 255], false);
         // Down from the line's middle: the line, its edging, the ground.
         let col: Vec<[u8; 4]> = (0..10).map(|d| pixel(&img, 1200, 600.0, 400.0 + d as f32)).collect();
         assert_eq!(col[0], [255, 0, 0, 255]);
@@ -980,14 +1180,30 @@ mod tests {
         let colors = Texture { w: 1500, h: 1500, px: (0..1500 * 1500).map(|k| [(k % 251) as u8, 120, 60]).collect(), fade: 0.12 };
         let cam = Camera::fit(&t);
         let line: Vec<_> = (0..500).map(|k| ([k as f64 * 50.0, 15_000.0 + (k as f64 / 20.0).sin() * 8000.0, 900.0], [255, 40, 40])).collect();
-        render(&t, &colors, &cam, 1.5, &line, 1200, 800, CLEAR, true);
+        render(&t, &colors, &[], &cam, 1.5, &line, 1200, 800, CLEAR, true);
         let start = std::time::Instant::now();
         let runs = 10;
         for _ in 0..runs {
-            std::hint::black_box(render(&t, &colors, &cam, 1.5, &line, 1200, 800, CLEAR, true));
+            std::hint::black_box(render(&t, &colors, &[], &cam, 1.5, &line, 1200, 800, CLEAR, true));
         }
         let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
         println!("terrain render 1200x800, 500x500 vertices, smooth: {ms:.1} ms");
+        assert!(ms < 60.0, "{ms} ms");
+        // From close, over a town: 10 000 blocks of 20 m within 1.2 km of what the eye looks at.
+        let cam = Camera { dist: 1200.0, pitch: 0.6, ..cam };
+        let blocks: Vec<Face> = (0..10_000)
+            .flat_map(|k| {
+                let (x, y) = (cam.target[0] as f32 - 1200.0 + (k % 100) as f32 * 24.0, cam.target[1] as f32 - 1200.0 + (k / 100) as f32 * 24.0);
+                let g = t.height_at(x as f64, y as f64) as f32;
+                extrude(&[[x, y], [x + 20.0, y], [x + 20.0, y + 20.0], [x, y + 20.0]], g, g + 15.0, [150; 3], [200; 3])
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(render(&t, &colors, &blocks, &cam, 1.5, &line, 1200, 800, CLEAR, true));
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
+        println!("the same from 1200 m with {} faces of buildings: {ms:.1} ms", blocks.len());
         assert!(ms < 60.0, "{ms} ms");
     }
 }

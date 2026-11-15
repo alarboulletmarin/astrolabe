@@ -6,7 +6,8 @@ use crate::lang::tr;
 use crate::logic::loops::Loop;
 use crate::logic::map::world;
 use crate::logic::slope;
-use crate::logic::terrain::{self, Camera, Shade, Terrain, Texture};
+use crate::logic::buildings::{self, Building};
+use crate::logic::terrain::{self, Camera, Face, Shade, Terrain, Texture};
 use crate::ui::render_image;
 use gpui_kit::*;
 use std::hash::{Hash, Hasher};
@@ -30,6 +31,57 @@ const MAP_PIXELS: f64 = 1024.0;
 /// The loop fills this share of the free area's width, or of its height.
 const FILL: f64 = 0.8;
 
+/// Buildings stand within this many metres of the loop.
+const BESIDE: f64 = 400.0;
+/// They are drawn once the eye is this close to what it looks at, in metres, and then within
+/// that distance of it: from further away they are specks, and too many.
+const BUILDINGS_FROM: f64 = 3000.0;
+
+/// The buildings beside the loop, as blocks ready to draw.
+struct Blocks {
+    faces: Vec<Face>,
+    /// Each block: where it stands (local metres) and its faces in `faces`.
+    at: Vec<([f32; 2], std::ops::Range<usize>)>,
+}
+
+impl Blocks {
+    /// The blocks of `tiles` that stand beside `line`, on the ground `t`; walls and roofs in
+    /// these colours (the picture's byte order).
+    fn beside(line: &[[f64; 2]], tiles: &[Arc<Vec<Building>>], t: &Terrain, wall: [u8; 3], roof: [u8; 3]) -> Blocks {
+        // The cells (of `BESIDE` metres) the line goes through.
+        let cell = |p: [f64; 2]| ((p[0] / BESIDE).floor() as i32, (p[1] / BESIDE).floor() as i32);
+        let along: std::collections::HashSet<(i32, i32)> = line.iter().map(|p| cell(t.local(p[0], p[1]))).collect();
+        let mut out = Blocks { faces: Vec::new(), at: Vec::new() };
+        for b in tiles.iter().flat_map(|t| t.iter()) {
+            let ring: Vec<[f64; 2]> = b.ring.iter().map(|p| t.local(p[0] as f64 / 1e7, p[1] as f64 / 1e7)).collect();
+            let Some(first) = ring.first() else { continue };
+            let (cx, cy) = cell(*first);
+            if !(-1..=1).any(|dx| (-1..=1).any(|dy| along.contains(&(cx + dx, cy + dy)))) {
+                continue;
+            }
+            // From the lowest ground under it (no gap on a slope) to its height over the highest;
+            // heights are drawn higher with the ground's, a building's own is not.
+            let (lo, hi) = ring.iter().map(|p| t.height_at(p[0], p[1])).fold((f64::MAX, f64::MIN), |(lo, hi), h| (lo.min(h), hi.max(h)));
+            let flat: Vec<[f32; 2]> = ring.iter().map(|p| [p[0] as f32, p[1] as f32]).collect();
+            let faces = terrain::extrude(&flat, lo as f32, hi as f32 + b.height / EXAGGERATION, wall, roof);
+            if !faces.is_empty() {
+                out.at.push(([first[0] as f32, first[1] as f32], out.faces.len()..out.faces.len() + faces.len()));
+                out.faces.extend(faces);
+            }
+        }
+        out
+    }
+
+    /// The faces to draw for an eye: none from afar, those around what it looks at from close.
+    fn seen(&self, cam: &Camera) -> Vec<Face> {
+        if cam.dist > BUILDINGS_FROM {
+            return Vec::new();
+        }
+        let (x, y, r2) = (cam.target[0] as f32, cam.target[1] as f32, (cam.dist * cam.dist) as f32);
+        self.at.iter().filter(|(p, _)| (p[0] - x).powi(2) + (p[1] - y).powi(2) <= r2).flat_map(|(_, r)| &self.faces[r.clone()]).copied().collect()
+    }
+}
+
 pub(super) struct Scene {
     /// The loop and theme it was made for.
     key: u64,
@@ -41,6 +93,9 @@ pub(super) struct Scene {
     /// Grey by altitude until the map's tiles are all there, then the map (`draped`); lit.
     texture: Arc<Texture>,
     draped: bool,
+    /// The buildings beside the loop, once read (`None` until then, and in the tests).
+    blocks: Option<Arc<Blocks>>,
+    blocks_busy: bool,
     pub(super) cam: Camera,
     image: Option<Arc<RenderImage>>,
     /// The eye and the size `image` was drawn with. While the pointer moves the ground the picture
@@ -126,7 +181,7 @@ impl Scene {
         let shade = Shade::from_tiles(bbox, z, EXAGGERATION, &|x, y| needed.get(&(x, y)).cloned())?;
         let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE }.lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None };
+        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None };
         s.frame(line, size);
         Some(s)
     }
@@ -207,6 +262,30 @@ impl LoopsView {
         }
     }
 
+    /// Stands the buildings beside the loop on the ground, once they are read (from the cache or
+    /// the region's extract); they are made into blocks in the background.
+    fn ensure_blocks(&mut self, l: &Loop, cx: &mut Context<Self>) {
+        let t = self.snap.theme;
+        let Some(s) = self.scene.as_mut().filter(|s| s.blocks.is_none() && !s.blocks_busy) else { return };
+        let Some(tiles) = self.data.update(cx, |d, cx| d.buildings(&buildings::tiles_along(&l.line, BESIDE), cx)) else { return };
+        s.blocks_busy = true;
+        // Walls and roofs: the page's neutrals, a roof lighter than its walls.
+        let (wall, roof) = (bytes(crate::ui::theme::blend(t.dim, t.bg, if t.dark { 0.45 } else { 0.35 })), bytes(crate::ui::theme::blend(t.dim, t.bg, if t.dark { 0.7 } else { 0.12 })));
+        let (line, terrain, key) = (l.line.clone(), s.terrain.clone(), s.key);
+        cx.spawn(async move |this, cx| {
+            let blocks = cx.background_executor().spawn(async move { Blocks::beside(&line, &tiles, &terrain, wall, roof) }).await;
+            this.update(cx, |v, cx| {
+                if let Some(s) = v.scene.as_mut().filter(|s| s.key == key) {
+                    s.blocks = Some(Arc::new(blocks));
+                    s.blocks_busy = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Draws the scene again in the background when the eye, the line or the size changed, at
     /// full size and smoothed even while the pointer moves it (about 16 ms for 1200 × 800). One
     /// drawing at a time, the latest wins.
@@ -232,7 +311,7 @@ impl LoopsView {
         let key = {
             let mut hsh = std::collections::hash_map::DefaultHasher::new();
             let c = s.cam;
-            (c.target.map(f64::to_bits), c.yaw.to_bits(), c.pitch.to_bits(), c.dist.to_bits(), w, h, s.key, s.draped).hash(&mut hsh);
+            (c.target.map(f64::to_bits), c.yaw.to_bits(), c.pitch.to_bits(), c.dist.to_bits(), w, h, s.key, s.draped, s.blocks.is_some()).hash(&mut hsh);
             line.iter().for_each(|(_, c)| c.hash(&mut hsh));
             hsh.finish()
         };
@@ -240,12 +319,13 @@ impl LoopsView {
             return;
         }
         s.busy = true;
-        let (terrain, texture, cam) = (s.terrain.clone(), s.texture.clone(), s.cam);
+        let (terrain, texture, blocks, cam) = (s.terrain.clone(), s.texture.clone(), s.blocks.clone(), s.cam);
         cx.spawn(async move |this, cx| {
             let img = cx
                 .background_executor()
                 .spawn(async move {
-                    let px = terrain::render(&terrain, &texture, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], true);
+                    let solids = blocks.map(|b| b.seen(&cam)).unwrap_or_default();
+                    let px = terrain::render(&terrain, &texture, &solids, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], true);
                     render_image(w as u32, h as u32, px).map(Arc::new)
                 })
                 .await;
@@ -275,6 +355,7 @@ impl LoopsView {
         let dims = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
         self.ensure_scene(l, dims, cx);
         self.ensure_drape(cx);
+        self.ensure_blocks(l, cx);
         self.ensure_picture(l, dims, cx);
         let cell = bounds.clone();
         let base = div().id("loops-3d").absolute().size_full().bg(t.bg).child(canvas(move |b, _, _| cell.set(b), |_, _, _, _| {}).absolute().size_full());
@@ -418,6 +499,39 @@ impl LoopsView {
 mod tests {
     use super::{Scene, around, bounds, map_zoom, span, tiles, tint, world};
     use std::sync::Arc;
+
+    #[test]
+    fn buildings_stand_beside_the_loop_and_show_from_close() {
+        use super::{BUILDINGS_FROM, Blocks, EXAGGERATION};
+        use crate::logic::buildings::Building;
+        let line = [[43.70, 7.25], [43.72, 7.27], [43.71, 7.29]];
+        let mut slope = |_: u8, _: u32, _: u32| Some(Arc::new((0..256 * 256).map(|i| 300.0 - (i / 256) as f32).collect::<Vec<f32>>()));
+        let s = Scene::of(&line, 0, false, (1200.0, 800.0), &mut slope).unwrap();
+        // A house of 10 m by the start, 9 m high; one a kilometre from the line; a way of two points.
+        let house = |lat: f64, lon: f64| Building { ring: [[0.0, 0.0], [0.0001, 0.0], [0.0001, 0.00012], [0.0, 0.00012]].iter().map(|d| [((lat + d[0]) * 1e7) as i32, ((lon + d[1]) * 1e7) as i32]).collect(), height: 9.0 };
+        let tiles = [Arc::new(vec![house(43.7001, 7.2502), house(43.70, 7.2650), Building { ring: vec![[437_000_000, 72_500_000], [437_000_100, 72_500_000]], height: 9.0 }]), Arc::new(vec![])];
+        let b = Blocks::beside(&line, &tiles, &s.terrain, [100; 3], [200; 3]);
+        assert_eq!(b.at.len(), 1, "only the house by the line");
+        assert_eq!(b.faces.len(), 10);
+        // It stands on the ground: from the lowest ground under it to 9 m (drawn as the ground's
+        // heights are) over the highest.
+        let at = b.at[0].0;
+        let ground = s.terrain.height_at(at[0] as f64, at[1] as f64) as f32;
+        let (lo, hi) = b.faces.iter().flat_map(|f| f.p).fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])));
+        assert!((lo - ground).abs() < 12.0 && lo <= ground + 0.01, "{lo} {ground}");
+        assert!(hi - lo >= 9.0 / EXAGGERATION && hi - lo < 9.0 / EXAGGERATION + 15.0, "{lo} {hi}");
+        // Seen from close when the eye looks near it; not from afar, nor when it looks elsewhere.
+        let mut cam = s.cam;
+        cam.target = [at[0] as f64, at[1] as f64, ground as f64];
+        cam.dist = 800.0;
+        assert_eq!(b.seen(&cam).len(), 10);
+        cam.dist = BUILDINGS_FROM + 1.0;
+        assert!(b.seen(&cam).is_empty());
+        cam.dist = 800.0;
+        cam.target[0] += 900.0;
+        assert!(b.seen(&cam).is_empty());
+        assert!(Blocks::beside(&line, &[], &s.terrain, [0; 3], [0; 3]).seen(&s.cam).is_empty());
+    }
 
     #[test]
     fn marks_stay_on_the_picture_shown_while_the_eye_moves() {
