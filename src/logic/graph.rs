@@ -11,7 +11,7 @@ use std::sync::{Mutex, mpsc};
 
 /// Raised when the filter, the classes, the contraction or the format change: an older graph is
 /// built again from the extract kept on disk.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 const MAGIC: &[u8; 8] = b"ASTRLOOP";
 /// Edges are cut so that no straight stretch is longer: the altitude is read along it, and the
 /// snapping grid finds every edge from its points.
@@ -542,8 +542,10 @@ pub const CANCELLED: &str = "cancelled";
 /// junctions). Altitudes are not read here (`set_elevation`).
 pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &AtomicBool, progress: &Progress) -> Result<Graph, String> {
     // Pass 1: every node a kept way uses, and the ends of the ways.
-    let (header, states) = pass(read, 1, threads, cancel, progress, || (Vec::<i64>::new(), Vec::<i64>::new()), |(refs, ends), _, d| {
-        for w in osm::block(d, false, true)?.ways {
+    let (header, states) = pass(read, 1, threads, cancel, progress, || (Vec::<i64>::new(), Vec::<i64>::new(), Vec::<Vec<i64>>::new()), |(refs, ends, areas), _, d| {
+        let b = osm::block(d, false, true)?;
+        areas.extend(b.areas);
+        for w in b.ways {
             ends.push(w.refs[0]);
             ends.push(*w.refs.last().unwrap());
             refs.extend_from_slice(&w.refs);
@@ -552,10 +554,16 @@ pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &Atomi
     })?;
     let mut ids: Vec<i64> = Vec::with_capacity(states.iter().map(|s| s.0.len()).sum());
     let mut ends = Vec::new();
-    for (r, e) in states {
+    let mut areas: Vec<Vec<i64>> = Vec::new();
+    for (r, e, a) in states {
         ids.extend_from_slice(&r);
         ends.extend_from_slice(&e);
+        areas.extend(a);
     }
+    // Nodes of the industrial areas, apart from `ids`: they are no junctions.
+    let mut area_ids: Vec<i64> = areas.iter().flatten().copied().collect();
+    area_ids.sort_unstable();
+    area_ids.dedup();
     ids.sort_unstable();
     // A junction: used twice or more (by two ways, or twice by one), or the end of a way.
     let mut junction = Vec::with_capacity(ids.len() / 2);
@@ -579,16 +587,34 @@ pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &Atomi
 
     // Pass 2: the positions of those nodes, packed (lat, lon) in a u64; MAX: not found.
     let coords: Vec<AtomicU64> = (0..ids.len()).map(|_| AtomicU64::new(u64::MAX)).collect();
+    let area_coords: Vec<AtomicU64> = (0..area_ids.len()).map(|_| AtomicU64::new(u64::MAX)).collect();
     pass(read, 2, threads, cancel, progress, || (), |_, _, d| {
-        let mut cursor = 0usize;
+        let (mut cursor, mut area_cursor) = (0usize, 0usize);
         for (id, lat, lon) in osm::block(d, true, false)?.nodes {
+            let packed = (lat as u32 as u64) << 32 | lon as u32 as u64;
             if let Some(at) = gallop(&ids, &mut cursor, id) {
-                coords[at].store((lat as u32 as u64) << 32 | lon as u32 as u64, Ordering::Relaxed);
+                coords[at].store(packed, Ordering::Relaxed);
+            }
+            if let Some(at) = gallop(&area_ids, &mut area_cursor, id) {
+                area_coords[at].store(packed, Ordering::Relaxed);
             }
         }
         Ok(())
     })?;
     let coords: Vec<u64> = coords.into_iter().map(AtomicU64::into_inner).collect();
+    // The areas' rings, as positions; one with a node the extract lacks is left out.
+    let rings: Vec<Vec<[i32; 2]>> = areas
+        .iter()
+        .filter_map(|a| {
+            a.iter()
+                .map(|r| {
+                    let c = area_coords[area_ids.binary_search(r).ok()?].load(Ordering::Relaxed);
+                    (c != u64::MAX).then_some([(c >> 32) as u32 as i32, c as u32 as i32])
+                })
+                .collect()
+        })
+        .collect();
+    drop((areas, area_ids, area_coords));
     let pos = |i: u32| {
         let c = coords[i as usize];
         [(c >> 32) as u32 as i32, c as u32 as i32]
@@ -762,12 +788,71 @@ pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &Atomi
         g.edges.push(Edge { a: rank(line[0]), b: rank(*line.last().unwrap()), len: len as f32, up: 0.0, down: 0.0, class: pieces[chain[0].0 as usize].2, geom });
     }
     g.pts_ele = vec![elevation::UNKNOWN; g.pts.len()];
+    g.mark_industrial(&rings);
     g.link();
     g.grid = Grid::new(&g);
     Ok(g)
 }
 
+/// Whether `p` is inside the ring (even-odd rule; the ring is closed).
+fn inside(ring: &[[i32; 2]], p: [i32; 2]) -> bool {
+    let (y, x) = (p[0] as f64, p[1] as f64);
+    let mut odd = false;
+    for w in ring.windows(2) {
+        let ([y0, x0], [y1, x1]) = ([w[0][0] as f64, w[0][1] as f64], [w[1][0] as f64, w[1][1] as f64]);
+        if (y0 > y) != (y1 > y) && x < x0 + (y - y0) / (y1 - y0) * (x1 - x0) {
+            odd = !odd;
+        }
+    }
+    odd
+}
+
 impl Graph {
+    /// Marks every edge whose midpoint is inside one of the rings. Rings are indexed by the
+    /// cells (of `CELL`) their bounding box touches.
+    fn mark_industrial(&mut self, rings: &[Vec<[i32; 2]>]) {
+        use std::collections::HashMap;
+        let cell = |v: i32| (v as i64).div_euclid(CELL);
+        let mut index: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
+        let mut boxes = Vec::with_capacity(rings.len());
+        for (i, r) in rings.iter().enumerate() {
+            let (la0, la1) = (r.iter().map(|p| p[0]).min().unwrap(), r.iter().map(|p| p[0]).max().unwrap());
+            let (lo0, lo1) = (r.iter().map(|p| p[1]).min().unwrap(), r.iter().map(|p| p[1]).max().unwrap());
+            boxes.push([la0, la1, lo0, lo1]);
+            for y in cell(la0)..=cell(la1) {
+                for x in cell(lo0)..=cell(lo1) {
+                    index.entry((y, x)).or_default().push(i as u32);
+                }
+            }
+        }
+        if index.is_empty() {
+            return;
+        }
+        for e in 0..self.edges.len() {
+            let edge = self.edges[e];
+            let end = self.edges.get(e + 1).map_or(self.pts.len(), |n| n.geom as usize);
+            let line: Vec<[i32; 2]> = std::iter::once([self.lat[edge.a as usize], self.lon[edge.a as usize]])
+                .chain(self.pts[edge.geom as usize..end].iter().copied())
+                .chain(std::iter::once([self.lat[edge.b as usize], self.lon[edge.b as usize]]))
+                .collect();
+            // ponytail: the middle point of the line, not of its length; fine for edges of a few hundred metres.
+            let n = line.len();
+            let mid = if n % 2 == 1 {
+                line[n / 2]
+            } else {
+                let (a, b) = (line[n / 2 - 1], line[n / 2]);
+                [((a[0] as i64 + b[0] as i64) / 2) as i32, ((a[1] as i64 + b[1] as i64) / 2) as i32]
+            };
+            let Some(cands) = index.get(&(cell(mid[0]), cell(mid[1]))) else { continue };
+            if cands.iter().any(|&i| {
+                let b = boxes[i as usize];
+                mid[0] >= b[0] && mid[0] <= b[1] && mid[1] >= b[2] && mid[1] <= b[3] && inside(&rings[i as usize], mid)
+            }) {
+                self.edges[e].class = edge.class.with_industrial();
+            }
+        }
+    }
+
     fn count_components(&mut self) {
         let mut sizes = vec![0u32; self.comp.iter().max().map_or(0, |m| *m as usize + 1)];
         for c in &self.comp {
@@ -954,6 +1039,51 @@ pub mod tests {
         }
         // The same extract gives the same graph, whatever the threads did.
         assert_eq!(build_from(&place()).unwrap().encode(), g.encode());
+    }
+
+    #[test]
+    fn marks_edges_inside_industrial_areas() {
+        let d = 0.001;
+        let (la, lo) = (43.7, 7.25);
+        let nodes = [
+            (1, la, lo),
+            (2, la, lo + 2.0 * d),
+            (3, la + 2.0 * d, lo + 2.0 * d),
+            (4, la + 2.0 * d, lo),
+            (6, la + 3.0 * d, lo + 2.0 * d),
+            // A ring around the north: latitudes 43.7015 to 43.7035.
+            (20, la + 1.5 * d, lo - d),
+            (21, la + 3.5 * d, lo - d),
+            (22, la + 3.5 * d, lo + 3.0 * d),
+            (23, la + 1.5 * d, lo + 3.0 * d),
+        ];
+        let street = || vec![("highway", "residential")];
+        let ring = |tag| (300, vec![("landuse", tag)], vec![20, 21, 22, 23, 20]);
+        let ways = [
+            (100, street(), vec![1, 2]),
+            (101, street(), vec![2, 3]),
+            (102, vec![("highway", "residential"), ("lit", "no")], vec![3, 4]),
+            (103, street(), vec![4, 1]),
+            (104, street(), vec![3, 6]),
+            ring("industrial"),
+        ];
+        let g = build_from(&extract(&nodes, &ways)).unwrap();
+        // 3-4 (unlit), 3-6, and the rest of the square contracted into one edge from 3 to 4.
+        assert_eq!(g.edges.len(), 3);
+        for e in &g.edges {
+            // The contracted square (over 500 m) swings down to 43.7: its middle is outside even
+            // though both ends are inside. The two short edges are inside.
+            assert_eq!(e.class.industrial(), e.len < 500.0, "{e:?}");
+        }
+        assert!(g.edges.iter().any(|e| e.class.lit() == 2 && e.class.industrial()));
+        assert_eq!(g.edges.iter().filter(|e| e.class.industrial()).count(), 2);
+        // Other landuse, or a ring left open: nothing marked.
+        let mut forest = ways.clone();
+        forest[5] = ring("forest");
+        assert!(build_from(&extract(&nodes, &forest)).unwrap().edges.iter().all(|e| !e.class.industrial()));
+        // The bits survive the file.
+        let back = Graph::decode(&g.encode()).unwrap();
+        assert_eq!(back.edges.iter().map(|e| e.class).collect::<Vec<_>>(), g.edges.iter().map(|e| e.class).collect::<Vec<_>>());
     }
 
     #[test]

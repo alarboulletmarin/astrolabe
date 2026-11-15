@@ -179,6 +179,9 @@ pub struct Way {
 pub struct Block {
     pub nodes: Vec<(i64, i32, i32)>,
     pub ways: Vec<Way>,
+    /// The node refs of closed ways tagged as an industrial area (see `is_industrial_area`).
+    // ponytail: multipolygon relations are not read, so an area drawn as one is missed.
+    pub areas: Vec<Vec<i64>>,
 }
 
 /// Reads an `OSMData` block (inflated). Positions only if `nodes`, ways only if `ways`.
@@ -274,6 +277,9 @@ pub fn block(b: &[u8], nodes: bool, ways: bool) -> Result<Block, String> {
                     for (k, v) in keys.iter().zip(&vals) {
                         tags.push((text(*k)?, text(*v)?));
                     }
+                    if refs.len() >= 4 && refs.first() == refs.last() && is_industrial_area(&tags) {
+                        out.areas.push(refs.clone());
+                    }
                     if refs.len() >= 2
                         && let Some(class) = classify(&tags)
                     {
@@ -336,13 +342,33 @@ pub enum Surface {
 
 /// A way's attributes, packed in a `u32`: highway (4 bits), surface (2), sac_scale (3: 0 none,
 /// 1 hiking … 6 difficult_alpine_hiking), trail_visibility (3: 0 unknown, 1 excellent … 6 no),
-/// tracktype (3: 0 unknown, 1 grade1 … 5 grade5).
+/// tracktype (3: 0 unknown, 1 grade1 … 5 grade5), lit (2: 0 unknown, 1 lit, 2 unlit), and
+/// industrial (1: inside an industrial area, set by the graph build, not read from the way).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Class(pub u32);
 
 impl Class {
     pub fn new(h: Highway, s: Surface, sac: u8, visibility: u8, tracktype: u8) -> Class {
         Class(h as u32 | (s as u32) << 4 | (sac.min(7) as u32) << 6 | (visibility.min(7) as u32) << 9 | (tracktype.min(7) as u32) << 12)
+    }
+
+    /// The same class with `lit` (0 unknown, 1 lit, 2 unlit).
+    pub fn with_lit(self, lit: u8) -> Class {
+        Class(self.0 & !(3 << 15) | (lit.min(2) as u32) << 15)
+    }
+
+    pub fn with_industrial(self) -> Class {
+        Class(self.0 | 1 << 17)
+    }
+
+    #[allow(dead_code)] // read by the route planner, not wired yet
+    pub fn lit(self) -> u8 {
+        (self.0 >> 15 & 3) as u8
+    }
+
+    #[allow(dead_code)] // read by the route planner, not wired yet
+    pub fn industrial(self) -> bool {
+        self.0 >> 17 & 1 == 1
     }
 
     pub fn highway(self) -> Highway {
@@ -445,7 +471,18 @@ pub fn classify(tags: &[(&[u8], &[u8])]) -> Option<Class> {
         b"grade5" => 5,
         _ => 0,
     };
-    Some(Class::new(highway, surface, sac, visibility, tracktype))
+    let lit = match tag(b"lit").unwrap_or_default() {
+        b"" => 0,
+        b"no" | b"disused" => 2,
+        b"yes" | b"24/7" | b"automatic" | b"limited" | b"interval" | b"sunset-sunrise" => 1,
+        _ => 0,
+    };
+    Some(Class::new(highway, surface, sac, visibility, tracktype).with_lit(lit))
+}
+
+/// A closed way that is an industrial, railway or quarry area.
+fn is_industrial_area(tags: &[(&[u8], &[u8])]) -> bool {
+    tags.iter().any(|(k, v)| *k == b"landuse" && matches!(*v, b"industrial" | b"railway" | b"quarry"))
 }
 
 #[cfg(test)]
@@ -571,6 +608,35 @@ pub mod tests {
         assert_eq!(c(&[("highway", "primary")]).unwrap().highway(), Highway::Primary);
         assert_eq!(c(&[("highway", "trunk")]), None);
         assert_eq!(c(&[("building", "yes")]), None);
+        // Lighting: said yes in several ways, said no, or silent or odd.
+        let lit = |v: &str| c(&[("highway", "residential"), ("lit", v)]).unwrap().lit();
+        assert_eq!([lit("yes"), lit("24/7"), lit("automatic"), lit("limited"), lit("sunset-sunrise")], [1; 5]);
+        assert_eq!([lit("no"), lit("disused")], [2; 2]);
+        assert_eq!([lit("maybe"), lit("")], [0; 2]);
+        assert_eq!(residential.lit(), 0);
+        // The new bits leave the others alone.
+        let both = gravel_road.with_lit(2).with_industrial();
+        assert!(both.lit() == 2 && both.industrial() && !gravel_road.industrial());
+        assert_eq!((both.highway(), both.surface()), (Highway::Unclassified, Surface::Gravel));
+        assert_eq!(both.with_lit(1).lit(), 1);
+    }
+
+    #[test]
+    fn reads_closed_industrial_areas() {
+        let ring = &[10, 11, 12, 10];
+        let b = block_with(
+            &[(10, 43.7, 7.25), (11, 43.701, 7.251), (12, 43.702, 7.252)],
+            &[
+                (200, &[("landuse", "industrial")], ring),
+                (201, &[("landuse", "quarry")], ring),
+                (202, &[("landuse", "railway")], ring),
+                (203, &[("landuse", "forest")], ring),
+                (204, &[("landuse", "industrial")], &[10, 11, 12]),
+            ],
+        );
+        let r = block(&b, false, true).unwrap();
+        assert_eq!(r.areas.len(), 3);
+        assert!(r.ways.is_empty());
     }
 
     #[test]
