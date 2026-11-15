@@ -406,6 +406,19 @@ impl LoopsView {
                 tr("Drag: move · right button or Shift: turn · wheel: zoom", "Glisser : se déplacer · bouton droit ou Maj : tourner · molette : zoomer"),
                 (t.bg, t.dim),
             )))
+            // The ground carries the map's tiles: their makers are named, as on the map.
+            .child(
+                div()
+                    .id("loops-3d-credit")
+                    .absolute()
+                    .bottom(px(30.))
+                    .right(px(14.))
+                    .text_size(px(11.))
+                    .text_color(t.dim)
+                    .cursor_pointer()
+                    .on_click(|_, _, cx| cx.open_url("https://www.openstreetmap.org/copyright"))
+                    .child(tr("© OpenStreetMap contributors", "© les contributeurs d'OpenStreetMap")),
+            )
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab_3d(e, e.modifiers.shift, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab_3d(e, true, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.move_3d(e, cx)))
