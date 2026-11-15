@@ -82,6 +82,37 @@ impl Blocks {
     }
 }
 
+/// Flying over the loop: the eye this far from the point it follows, this high over the horizon,
+/// a picture every `FLY_TICK`; the whole loop in about a minute, within these speeds (m/s).
+const FLY_DIST: f64 = 900.0;
+const FLY_PITCH: f64 = 0.5;
+const FLY_TICK: std::time::Duration = std::time::Duration::from_millis(33);
+const FLY_SPEED: (f64, f64) = (60.0, 300.0);
+/// The eye looks this many metres ahead along the line, and turns to it at this rate (per second).
+const FLY_AHEAD: f64 = 200.0;
+const FLY_TURN: f64 = 2.5;
+
+/// A flight over the loop: how far along it (metres), and whether it goes on.
+struct Fly {
+    at: f64,
+    playing: bool,
+    /// Which run of the clock moves it: a flight started again leaves the old clock behind.
+    run: u64,
+}
+
+/// Where a flight is `at` metres along a line (`along`: metres from the start at each point):
+/// the point before it and the share of the way to the next one.
+fn fly_at(along: &[f32], at: f64) -> (usize, f64) {
+    let i = along.partition_point(|a| (*a as f64) <= at).saturating_sub(1).min(along.len().saturating_sub(2));
+    let (a, b) = (along.get(i).copied().unwrap_or(0.0) as f64, along.get(i + 1).copied().unwrap_or(0.0) as f64);
+    (i, if b > a { ((at - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 })
+}
+
+/// The shortest turn from one heading to another, radians within ±π.
+fn turn(from: f64, to: f64) -> f64 {
+    (to - from + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+}
+
 pub(super) struct Scene {
     /// The loop and theme it was made for.
     key: u64,
@@ -110,6 +141,7 @@ pub(super) struct Scene {
     /// until then, a view that changes size (a window being laid out, resized) is framed again.
     framed: (f64, f64),
     moved: bool,
+    fly: Option<Fly>,
 }
 
 /// The box of a loop, `[south, west, north, east]`.
@@ -185,7 +217,7 @@ impl Scene {
         let shade = Shade::from_tiles(bbox, z, EXAGGERATION, &|x, y| needed.get(&(x, y)).cloned())?;
         let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE }.lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false };
+        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
         s.frame(line, size);
         Some(s)
     }
@@ -219,6 +251,29 @@ impl Scene {
             self.cam.pan_screen(&self.terrain, EXAGGERATION, left + free / 2.0 - cx, h / 2.0 - cy, h);
         }
         self.cam.lift(&self.terrain, EXAGGERATION);
+    }
+
+    /// Puts the eye over the loop `at` metres along it, looking the way it goes; `dt` seconds
+    /// have passed since the last time (the eye turns at its own pace, not with every bend).
+    /// Returns the point of the line it is at.
+    fn fly_to(&mut self, l: &Loop, at: f64, dt: f64) -> usize {
+        let on = |at: f64| {
+            let (i, f) = fly_at(&l.along, at);
+            let (a, b) = (self.place(l.line[i]), self.place(l.line[(i + 1).min(l.line.len() - 1)]));
+            [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * f)
+        };
+        let total = l.along.last().copied().unwrap_or(0.0) as f64;
+        let here = on(at);
+        // Ahead; at the very end, the way it came.
+        let (from, to) = if at + FLY_AHEAD <= total { (here, on(at + FLY_AHEAD)) } else { (on((total - FLY_AHEAD).max(0.0)), on(total)) };
+        self.cam.target = here;
+        if (to[0] - from[0]).hypot(to[1] - from[1]) > 1.0 {
+            let heading = (to[0] - from[0]).atan2(to[1] - from[1]);
+            self.cam.orbit(turn(self.cam.yaw, heading) * (dt * FLY_TURN).min(1.0), 0.0);
+        }
+        self.cam.lift(&self.terrain, EXAGGERATION);
+        self.moved = true;
+        fly_at(&l.along, at).0
     }
 
     /// Where a point of the loop is on the ground, local metres and altitude.
@@ -357,6 +412,69 @@ impl LoopsView {
         .detach();
     }
 
+    /// Starts flying over the chosen loop, pauses, or goes on; from the start again once at the end.
+    pub fn fly(&mut self, cx: &mut Context<Self>) {
+        let found = self.snap_found(cx);
+        let (Some(l), Some(s)) = (found.get(self.selected), self.scene.as_mut()) else { return };
+        let total = l.along.last().copied().unwrap_or(0.0) as f64;
+        if l.line.len() < 2 || l.along.len() != l.line.len() || total <= 0.0 {
+            return;
+        }
+        let run = s.fly.as_ref().map_or(0, |f| f.run) + 1;
+        match s.fly.as_mut() {
+            Some(f) if f.playing => f.playing = false,
+            Some(f) if f.at < total => *f = Fly { at: f.at, playing: true, run },
+            _ => {
+                // Close to the ground, looking along the line from its first step.
+                s.cam.dist = FLY_DIST.max(s.cam.min_dist);
+                s.cam.pitch = FLY_PITCH;
+                s.fly = Some(Fly { at: 0.0, playing: true, run });
+                s.fly_to(l, 0.0, 1.0);
+            }
+        }
+        cx.notify();
+        if !s.fly.as_ref().is_some_and(|f| f.playing) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(FLY_TICK).await;
+                if !this.update(cx, |v, cx| v.fly_on(run, cx)).unwrap_or(false) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Space: pauses the flight or goes on. `false` when there is no flight (the key is not ours).
+    pub fn fly_pause(&mut self, cx: &mut Context<Self>) -> bool {
+        let flying = self.three_d && self.scene.as_ref().is_some_and(|s| s.fly.is_some());
+        if flying {
+            self.fly(cx);
+        }
+        flying
+    }
+
+    /// One step of the flight's clock `run`; `false` once it is over, paused or replaced.
+    fn fly_on(&mut self, run: u64, cx: &mut Context<Self>) -> bool {
+        let found = self.snap_found(cx);
+        let (Some(l), Some(s)) = (found.get(self.selected), self.scene.as_mut()) else { return false };
+        let Some(f) = s.fly.as_mut().filter(|f| f.playing && f.run == run && self.three_d) else { return false };
+        let total = l.along.last().copied().unwrap_or(0.0) as f64;
+        let dt = FLY_TICK.as_secs_f64();
+        f.at = (f.at + (total / 60.0).clamp(FLY_SPEED.0, FLY_SPEED.1) * dt).min(total);
+        // At the end it stops there.
+        f.playing = f.at < total;
+        let (at, on) = (f.at, f.playing);
+        self.hover = Some(s.fly_to(l, at, dt).min(l.line.len() - 1));
+        if !on {
+            self.hover = Some(l.line.len() - 1);
+        }
+        cx.notify();
+        on
+    }
+
     /// The chosen loop in 3D, filling the page: drag to move over the ground, right-drag or
     /// shift-drag to turn it, the wheel to come closer. The pointer over the line shows where on
     /// the profile.
@@ -406,6 +524,22 @@ impl LoopsView {
                 tr("Drag: move · right button or Shift: turn · wheel: zoom", "Glisser : se déplacer · bouton droit ou Maj : tourner · molette : zoomer"),
                 (t.bg, t.dim),
             )))
+            .child({
+                let (label, tip) = match s.fly.as_ref() {
+                    Some(f) if f.playing => (tr("Pause", "Pause"), tr("Space: pause", "Espace : mettre en pause")),
+                    Some(f) if f.at > 0.0 && f.at < l.along.last().copied().unwrap_or(0.0) as f64 => (tr("Resume", "Reprendre"), tr("Space: go on", "Espace : reprendre")),
+                    _ => (tr("Fly over", "Survoler"), tr("Follow the loop from above", "Suivre la boucle vue d'en haut")),
+                };
+                div().absolute().bottom(px(34.)).left(px(PANEL as f32 + 44.0)).child(
+                    crate::ui::button("loops-fly", label, false, t)
+                        .bg(t.bg)
+                        .tooltip_show_delay(crate::ui::TIP_DELAY)
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx))
+                        // The button's own: the view under it must not take the press for a drag.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| this.fly(cx))),
+                )
+            })
             // The ground carries the map's tiles: their makers are named, as on the map.
             .child(
                 div()
@@ -439,6 +573,10 @@ impl LoopsView {
     fn grab_3d(&mut self, e: &MouseDownEvent, turn: bool, cx: &mut Context<Self>) {
         if let Some(s) = self.scene.as_mut() {
             s.drag = Some((e.position, turn));
+            // Taking the ground in hand pauses the flight.
+            if let Some(f) = s.fly.as_mut() {
+                f.playing = false;
+            }
             cx.notify();
         }
     }
@@ -468,6 +606,8 @@ impl LoopsView {
                 s.moved = true;
                 cx.notify();
             }
+            // In flight the mark on the profile is the flight's, not the pointer's.
+            None if s.fly.as_ref().is_some_and(|f| f.playing) => s.drag = None,
             None => {
                 s.drag = None;
                 // The point of the line nearest the pointer, if near enough.
@@ -519,6 +659,21 @@ impl LoopsView {
         Some(point(b.origin.x + px(x), b.origin.y + px(y)))
     }
 
+    /// Whether a flight is going on (`None`: there is none).
+    #[cfg(test)]
+    pub fn flying(&self) -> Option<bool> {
+        self.scene.as_ref().and_then(|s| s.fly.as_ref()).map(|f| f.playing)
+    }
+
+    /// Puts a flight this many metres before the end of the chosen loop, for the tests.
+    #[cfg(test)]
+    pub fn fly_seek(&mut self, before_end: f64, cx: &App) {
+        let total = self.snap_found(cx).get(self.selected).and_then(|l| l.along.last().copied()).unwrap_or(0.0) as f64;
+        if let Some(f) = self.scene.as_mut().and_then(|s| s.fly.as_mut()) {
+            f.at = (total - before_end).max(0.0);
+        }
+    }
+
     #[cfg(test)]
     pub fn show_3d(&mut self, on: bool) {
         self.three_d = on;
@@ -561,6 +716,29 @@ mod tests {
         cam.target[0] += 900.0;
         assert!(b.seen(&cam).is_empty());
         assert!(Blocks::beside(&line, &[], &s.terrain, [0; 3], [0; 3]).seen(&s.cam).is_empty());
+    }
+
+    #[test]
+    fn a_flight_knows_where_it_is_and_which_way_to_turn() {
+        use super::{fly_at, turn};
+        let along = [0.0, 100.0, 100.0, 250.0];
+        assert_eq!(fly_at(&along, 0.0), (0, 0.0));
+        assert_eq!(fly_at(&along, 50.0), (0, 0.5));
+        // Two points at the same place: the one after them.
+        assert_eq!(fly_at(&along, 100.0), (2, 0.0));
+        assert_eq!(fly_at(&along, 175.0), (2, 0.5));
+        // The end, beyond it, before the start, a line of one point or none: no step out of it.
+        assert_eq!(fly_at(&along, 250.0), (2, 1.0));
+        assert_eq!(fly_at(&along, 1.0e9), (2, 1.0));
+        assert_eq!(fly_at(&along, -5.0), (0, 0.0));
+        assert_eq!(fly_at(&[0.0], 10.0), (0, 0.0));
+        assert_eq!(fly_at(&[], 10.0), (0, 0.0));
+        // The short way round, through north too.
+        let deg = |d: f64| d.to_radians();
+        assert!((turn(deg(350.0), deg(10.0)) - deg(20.0)).abs() < 1e-9);
+        assert!((turn(deg(10.0), deg(350.0)) + deg(20.0)).abs() < 1e-9);
+        assert!((turn(deg(90.0), deg(90.0))).abs() < 1e-9);
+        assert!((turn(0.0, deg(179.0)) - deg(179.0)).abs() < 1e-9);
     }
 
     /// The loop's box on screen, in a view of `size`.
