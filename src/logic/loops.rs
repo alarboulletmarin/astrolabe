@@ -267,6 +267,28 @@ fn attempt(l: &Local, req: &Request, seed: u64, search: &mut Search) -> Option<L
     // Exact mode: move one waypoint at a time to a nearby node, while it brings the length
     // closer; the routes stay loops, never an out-and-back added for length.
     if matches!(req.target, Target::Exact(_)) {
+        // First coarse: a waypoint slid along its line from the start by half what is missing
+        // (a loop through it gains or loses about twice the slide).
+        for k in 0..2 * best.waypoints.len() {
+            if req.target.holds(best.dist) {
+                break;
+            }
+            let i = k % best.waypoints.len();
+            let w = best.waypoints[i] as usize;
+            let (x, y) = (l.x[w] as f64, l.y[w] as f64);
+            let r = x.hypot(y).max(1.0);
+            let slide = (aim - best.dist) / 2.0;
+            let k = ((r + slide) / r).max(0.1);
+            if let Some(v) = l.nearest((x * k) as f32, (y * k) as f32)
+                && v != 0
+                && !best.waypoints.contains(&v)
+                && let Some(t) = nudge(l, &best, i, v, search)
+                && (t.dist - aim).abs() < (best.dist - aim).abs()
+            {
+                best = t;
+            }
+        }
+        // Then fine: a waypoint moved to a node nearby.
         let mut stuck = 0;
         for k in 0..NUDGES {
             let n = best.waypoints.len();
