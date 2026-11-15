@@ -4,7 +4,7 @@
 
 use crate::data::{Data, Snapshot};
 use crate::lang::{decimal, tr, trf};
-use crate::logic::activity::{fmt_km, fmt_m, group};
+use crate::logic::activity::{CLIMB_COST, effort_pace, fmt_duration, fmt_km, fmt_m, group};
 use crate::logic::loops::{Loop, Request, Route, Target};
 use crate::logic::map::{self, View};
 use crate::logic::relief;
@@ -18,6 +18,7 @@ use crate::views::map::{MapState, map_widget};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder, *};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -27,6 +28,27 @@ mod three;
 
 /// The height of the band under the map that holds the profile and the climbs.
 const BAND: f64 = 132.0;
+
+/// A loop's ground as a bar: asphalt, other ways, trails; the shares in its tooltip.
+fn surfaces(l: &Loop, i: usize, t: crate::ui::theme::Theme) -> Stateful<Div> {
+    let (trail, paved) = (l.trail.clamp(0.0, 1.0), l.paved.clamp(0.0, 1.0 - l.trail.clamp(0.0, 1.0)));
+    let other = (1.0 - trail - paved).max(0.0);
+    let pct = |f: f32| format!("{:.0}{}", (f * 100.0).round() + 0.0, crate::lang::pct());
+    let tip = format!("{} {} · {} {} · {} {}", pct(paved), tr("asphalt", "bitume"), pct(other), tr("other ways", "autres chemins"), pct(trail), tr("trails", "sentiers"));
+    let part = |f: f32, c: Hsla| div().h_full().w(relative(f)).bg(c);
+    div()
+        .id(("loop-ground", i))
+        .h(px(4.))
+        .w_full()
+        .flex()
+        .rounded(px(2.))
+        .overflow_hidden()
+        .child(part(paved, blend(t.text, t.bg, 0.55)))
+        .child(part(other, blend(t.text, t.bg, 0.25)))
+        .child(part(trail, t.accent))
+        .tooltip_show_delay(crate::ui::TIP_DELAY)
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+}
 
 /// The letter that names the `i`-th loop proposed, in the list and on the map.
 fn letter(i: usize) -> char {
@@ -892,6 +914,23 @@ impl Render for LoopsView {
             img(raster.clone()).absolute().left(px(left as f32)).top(px(top as f32)).w(px((s0.0 * k) as f32)).h(px((s0.1 * k) as f32)).into_any_element()
         });
         let lines: Vec<(Vec<[f64; 2]>, bool)> = found.iter().enumerate().map(|(i, l)| (l.line.clone(), i == self.selected)).collect();
+        // Which way the chosen loop runs: a chevron every 800 m, pointing to a point a little ahead.
+        let arrows: Vec<([f64; 2], [f64; 2])> = chosen
+            .map(|l| {
+                let mut out = Vec::new();
+                let mut next = 400.0f32;
+                for (i, a) in l.along.iter().enumerate() {
+                    if *a >= next {
+                        let ahead = l.along[i..].iter().position(|b| *b >= a + 25.0).map_or(l.line.len() - 1, |k| i + k);
+                        if ahead > i {
+                            out.push((l.line[i], l.line[ahead]));
+                        }
+                        next += 800.0;
+                    }
+                }
+                out
+            })
+            .unwrap_or_default();
         // The loop pointed at in the list, brought forward.
         let pointed = self.card_hover.filter(|i| *i != self.selected).and_then(|i| found.get(i)).map(|l| l.line.clone());
         // Loops of the last settings, while those of the new ones are looked for: faded.
@@ -979,6 +1018,23 @@ impl Render for LoopsView {
                 }
                 if let Some(line) = &pointed {
                     stroke(line, 3.0, ink.opacity(0.8 * fade), window);
+                }
+                for (p, q) in &arrows {
+                    let (a, b) = (at(*p), at(*q));
+                    let (dx, dy) = ((b.x - a.x) / px(1.), (b.y - a.y) / px(1.));
+                    let n = (dx * dx + dy * dy).sqrt();
+                    if n < 0.5 {
+                        continue;
+                    }
+                    let (ux, uy) = (dx / n, dy / n);
+                    let wing = |side: f32| point(a.x - px(4.0 * ux - side * 3.5 * uy), a.y - px(4.0 * uy + side * 3.5 * ux));
+                    let mut path = line_path(1.8);
+                    path.move_to(wing(1.0));
+                    path.line_to(point(a.x + px(2.0 * ux), a.y + px(2.0 * uy)));
+                    path.line_to(wing(-1.0));
+                    if let Ok(p) = path.build() {
+                        window.paint_path(p, bg.opacity(fade));
+                    }
                 }
                 // The climb pointed at in the list: a dark band over it.
                 if let Some(c) = climb.as_ref().filter(|c| c.len() > 1) {
@@ -1276,6 +1332,25 @@ impl LoopsView {
             .child(body)
     }
 
+    /// The climb asked for, if any.
+    fn wished_climb(&self, cx: &App) -> Option<f64> {
+        self.climb.read(cx).value().trim().replace(',', ".").parse::<f64>().ok().filter(|v| *v > 0.0)
+    }
+
+    /// The chosen loop the other way round.
+    fn reverse(&mut self, cx: &mut Context<Self>) {
+        let found = self.snap_found(cx);
+        if found.get(self.selected).is_none() {
+            return;
+        }
+        self.remember(cx);
+        let mut v = (*found).clone();
+        v[self.selected] = v[self.selected].reversed();
+        self.hover = None;
+        self.climb_hover = None;
+        self.data.update(cx, |d, cx| d.set_found(Arc::new(v), cx));
+    }
+
     /// The settings in a few words, for the line they fold to.
     fn summary(&self, cx: &App) -> String {
         let value = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
@@ -1450,6 +1525,8 @@ impl LoopsView {
         let all: Vec<Option<f32>> = found.iter().flat_map(|l| l.eles.iter().copied()).collect();
         let scale = range(&all);
         let longest = found.iter().map(|l| l.along.last().copied().unwrap_or(0.0)).fold(1.0f32, f32::max);
+        let pace = effort_pace(&self.data.read(cx).acts);
+        let wished = self.wished_climb(cx);
         let rows = found.iter().enumerate().map(|(i, l)| {
             let on = i == self.selected;
             let xs: Arc<Vec<f32>> = Arc::new(l.along.clone());
@@ -1492,30 +1569,55 @@ impl LoopsView {
                         .child(
                             div()
                                 .flex()
+                                .items_baseline()
                                 .gap(px(8.))
                                 .child(num(letter(i).to_string()).text_color(t.soft))
-                                .child(num(fmt_km(l.dist)).font_weight(FontWeight::BOLD).text_color(if on { t.accent } else { t.text })),
+                                .child(num(fmt_km(l.dist)).font_weight(FontWeight::BOLD).text_color(if on { t.accent } else { t.text }))
+                                // At one's own pace, from one's last runs.
+                                .children(pace.map(|p| num(format!("≈ {}", fmt_duration(p * (l.dist + CLIMB_COST * l.up)))).text_size(px(12.)).text_color(t.soft))),
                         )
-                        .child(num(format!("+{} −{}", fmt_m(l.up), fmt_m(l.down))).text_size(px(12.))),
+                        .child(
+                            div()
+                                .flex()
+                                .items_baseline()
+                                .gap(px(6.))
+                                .child(num(format!("+{} −{}", fmt_m(l.up), fmt_m(l.down))).text_size(px(12.)))
+                                // How far from the climb asked for.
+                                .children(wished.map(|w| {
+                                    let gap = l.up - w;
+                                    num(format!("{}{}", if gap < 0.0 { "−" } else { "+" }, fmt_m(gap.abs()))).text_size(px(11.)).text_color(t.soft)
+                                })),
+                        ),
                 )
                 .child(mini)
+                .child(surfaces(l, i, t))
                 .child(div().text_size(px(11.)).text_color(t.soft).child(format!(
-                    "{} {} · {} {} · {} {}{}",
-                    pct(l.trail),
-                    tr("trail", "sentier"),
-                    pct(l.paved),
-                    tr("asphalt", "bitume"),
+                    "{} {}{}",
                     pct(l.back),
-                    tr("twice", "en double"),
+                    tr("out and back", "aller-retour"),
                     l.mine.map(|m| format!(" · {} {}", pct(m), tr("on my tracks", "sur mes traces"))).unwrap_or_default()
                 )))
         });
-        div().flex().flex_col().gap(px(4.)).children(rows).child(
+        // What was asked and could not be had, said rather than left to guess.
+        let mut unmet: Vec<String> = Vec::new();
+        if self.avoid_paved && found.iter().all(|l| l.paved > 0.5) {
+            unmet.push(tr("Few unpaved ways around the start: the asphalt could not be avoided.", "Peu de chemins non revêtus autour du départ : le bitume n'a pas pu être évité.").into());
+        }
+        if let Some(w) = wished {
+            if found.iter().all(|l| l.up < w * 0.75) {
+                unmet.push(trf(format!("Not enough relief around the start for {} of climb at this distance.", fmt_m(w)), format!("Pas assez de relief autour du départ pour {} de D+ à cette distance.", fmt_m(w))));
+            } else if found.iter().all(|l| l.up > w * 1.25) {
+                unmet.push(trf(format!("The ground around the start climbs more than {}.", fmt_m(w)), format!("Le terrain autour du départ monte plus que {}.", fmt_m(w))));
+            }
+        }
+        div().flex().flex_col().gap(px(4.)).children(rows).children(unmet.into_iter().map(|u| div().px(px(8.)).text_size(px(12.)).text_color(t.soft).child(u))).child(
             div()
                 .pt(px(4.))
                 .flex()
+                .flex_wrap()
                 .gap(px(8.))
                 .child(button("loops-again", tr("Other loops", "Autres boucles"), false, t).on_click(cx.listener(|this, _, _, cx| this.propose(true, cx))))
+                .child(button("loops-reverse", tr("Other way round", "Sens inverse"), false, t).debug_selector(|| "loops-reverse".into()).on_click(cx.listener(|this, _, _, cx| this.reverse(cx))))
                 .child(button("loops-export", tr("Save as GPX", "Enregistrer en GPX"), false, t).on_click(cx.listener(|this, _, _, cx| this.export(cx)))),
         )
     }
@@ -1665,16 +1767,24 @@ impl LoopsView {
             None => format!("{} {}", tr("Altitude", "Altitude"), group(l.eles.iter().flatten().fold(f32::MIN, |a, b| a.max(*b)) as i64) + " m max"),
         };
         let xs2 = xs.clone();
+        // The grade along it, in the colours of the map.
+        let total = l.along.last().copied().unwrap_or(0.0).max(1.0);
+        let ramp = slope_ramp(&t);
+        let strip = self.show_slope.then(|| {
+            div().h(px(4.)).w_full().flex().rounded(px(2.)).overflow_hidden().children(
+                slope::runs(&l.along, &l.eles).into_iter().map(|(i, j, k)| div().h_full().w(relative((l.along[j] - l.along[i]) / total)).bg(ramp[k as usize])),
+            )
+        });
         div()
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(px(4.))
             .child(div().flex().justify_between().text_size(px(12.)).text_color(t.soft).child(tr("Profile", "Profil")).child(num(label)))
             .child(
                 div()
                     .id("loop-profile")
                     .relative()
-                    .h(px(84.))
+                    .h(px(78.))
                     .child(canvas(move |b, _, _| cell.set(b), |_, _, _, _| {}).absolute().size_full())
                     .child(line_chart(Series { xs, ys, scale, line: t.accent, fill: blend(t.accent, t.bg, 0.12), invert: false }, self.hover, t.soft).size_full())
                     .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
@@ -1693,6 +1803,7 @@ impl LoopsView {
                         }
                     })),
             )
+            .children(strip)
     }
 }
 

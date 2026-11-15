@@ -118,6 +118,25 @@ pub struct Loop {
     edges: Vec<(u32, f32)>,
 }
 
+impl Loop {
+    /// The same loop run the other way round.
+    pub fn reversed(&self) -> Loop {
+        let total = self.along.last().copied().unwrap_or(0.0);
+        let rev = |v: &[[f64; 2]]| v.iter().rev().copied().collect::<Vec<_>>();
+        Loop {
+            line: rev(&self.line),
+            eles: self.eles.iter().rev().copied().collect(),
+            along: self.along.iter().rev().map(|a| total - a).collect(),
+            up: self.down,
+            down: self.up,
+            waypoints: rev(&self.waypoints),
+            pinned: self.pinned.iter().rev().copied().collect(),
+            edges: self.edges.iter().rev().copied().collect(),
+            ..self.clone()
+        }
+    }
+}
+
 /// A loop kept under a name, with what made it: it opens again as it was, and can be changed.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Route {
@@ -583,6 +602,24 @@ mod tests {
     fn req(target: Target, seed: u64) -> Request {
         // On the south street, 100 m from the corner.
         Request { lat: 43.70, lon: 7.25 + 100.0 / (111_195.0 * 0.7230), target, prefs: Prefs::default(), climb: None, seed, count: 3, via: Vec::new(), places: Places::default() }
+    }
+
+    #[test]
+    fn a_loop_runs_the_other_way_round() {
+        let g = town();
+        let l = plan(&g, &req(Target::Exact(5000.0), 1), 4).unwrap().remove(0);
+        let r = l.reversed();
+        assert_eq!(r.line.first(), l.line.last());
+        assert_eq!(r.line.last(), l.line.first());
+        assert_eq!(r.along[0], 0.0);
+        assert!(r.along.windows(2).all(|w| w[0] <= w[1]));
+        assert!((r.along.last().unwrap() - l.along.last().unwrap()).abs() < 1e-3);
+        assert_eq!((r.up, r.down, r.dist), (l.down, l.up, l.dist));
+        assert_eq!(r.waypoints.first(), l.waypoints.last());
+        // Twice: the same loop (the distances along up to rounding).
+        let rr = r.reversed();
+        assert_eq!((&rr.line, &rr.eles, &rr.waypoints, &rr.pinned, rr.up), (&l.line, &l.eles, &l.waypoints, &l.pinned, l.up));
+        assert!(rr.along.iter().zip(&l.along).all(|(a, b)| (a - b).abs() < 1e-2));
     }
 
     #[test]

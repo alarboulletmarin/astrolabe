@@ -419,6 +419,16 @@ fn a_loop_is_chosen_on_the_map(cx: &mut TestAppContext) {
     // Nothing else changed: no point to pass by, the same loops.
     assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().is_empty()));
     assert_eq!(shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.len()), found.len());
+    // The other way round, and back by undoing; each card says its ground in a bar.
+    assert!(cx.debug_bounds("loops-reverse").is_some());
+    click(cx, "loops-reverse");
+    let r = shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[k].clone());
+    assert_eq!(r.line, found[k].line.iter().rev().copied().collect::<Vec<_>>());
+    assert_eq!((r.up, r.down), (found[k].down, found[k].up));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-z"));
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[k].line.clone()), found[k].line);
 }
 
 /// The chosen loop in 3D: the relief awaited, then the ground; a drag turns it, shift-drag moves

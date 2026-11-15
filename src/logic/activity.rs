@@ -154,6 +154,30 @@ pub fn outings(n: usize) -> String {
     format!("{} {}", group(n as i64), plural(n, tr("outing", "sortie"), tr("outings", "sorties")))
 }
 
+/// Metres of flat a metre climbed costs, running: a rule of thumb that holds on usual grades.
+pub const CLIMB_COST: f64 = 10.0;
+
+/// How fast one runs: seconds per metre of flat (a metre climbed counting `CLIMB_COST`), the
+/// median of the last 20 runs (road or trail) of a kilometre or more; `None` without one.
+pub fn effort_pace(acts: &[Activity]) -> Option<f64> {
+    let mut runs: Vec<&Activity> = acts
+        .iter()
+        .filter(|a| matches!(a.sport(), Sport::Run | Sport::Trail) && a.distance.is_some_and(|d| d >= 1000.0) && a.duration.is_some_and(|t| t > 0.0))
+        .collect();
+    runs.sort_by(|a, b| b.start_time_local.cmp(&a.start_time_local));
+    let mut paces: Vec<f64> = runs
+        .iter()
+        .take(20)
+        .map(|a| a.duration.unwrap_or(0.0) / (a.distance.unwrap_or(0.0) + CLIMB_COST * a.elevation_gain.unwrap_or(0.0)))
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .collect();
+    if paces.is_empty() {
+        return None;
+    }
+    paces.sort_by(f64::total_cmp);
+    Some(paces[paces.len() / 2])
+}
+
 /// 3725 s -> "1h02", 1500 s -> "25min", 1 000 000 s -> "278h": totals stay short.
 pub fn fmt_duration(seconds: f64) -> String {
     let m = (seconds / 60.0).round() as i64;
@@ -550,6 +574,28 @@ mod tests {
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn effort_pace_is_the_median_of_the_last_runs() {
+        assert_eq!(effort_pace(&[]), None);
+        // 10 km in 50 min: 0.3 s/m; one with 100 m of D+ counts 11 km.
+        let mut hilly = act(2, "2026-10-02 08:00:00", "running", 10_000.0, 3300.0);
+        hilly.elevation_gain = Some(100.0);
+        let acts = vec![
+            act(1, "2026-10-01 08:00:00", "running", 10_000.0, 3000.0),
+            hilly,
+            act(3, "2026-10-03 08:00:00", "trail_running", 5_000.0, 1500.0),
+            // A ride, a walk of 500 m, a run with no time: not counted.
+            act(4, "2026-10-04 08:00:00", "cycling", 40_000.0, 3600.0),
+            act(5, "2026-10-05 08:00:00", "running", 500.0, 60.0),
+            act(6, "2026-10-06 08:00:00", "running", 8_000.0, 0.0),
+        ];
+        assert!((effort_pace(&acts).unwrap() - 0.3).abs() < 1e-9);
+        // Only the last 20: 25 old slow runs then 20 recent fast ones.
+        let mut many: Vec<Activity> = (0..25).map(|i| act(i, &format!("2025-01-{:02} 08:00:00", i + 1), "running", 10_000.0, 6000.0)).collect();
+        many.extend((0..20).map(|i| act(100 + i, &format!("2026-09-{:02} 08:00:00", i + 1), "running", 10_000.0, 3000.0)));
+        assert!((effort_pace(&many).unwrap() - 0.3).abs() < 1e-9);
     }
 
     #[test]
