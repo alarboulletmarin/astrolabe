@@ -43,6 +43,43 @@ One file:
 |---|---|
 | derive an 8-hour track at one sample a second (28,800 samples): map line, best efforts, profile, heart rate zones, splits | 5 ms |
 
+## Loops
+
+Measured on 15 November 2026, in a cloud container: Intel Xeon at 2.30 GHz, 4 cores (3 worker
+threads, one left to the window), 15 GB of memory, Linux. The data are the Provence-Alpes-Côte
+d'Azur extract of 13 November 2026 (448 MB), from the OpenStreetMap France mirror of the same
+regional cut. Release build.
+
+Building the network, once:
+
+| What | Time |
+|---|---|
+| pass 1, the ways kept and their nodes | 2.1 s |
+| pass 2, the positions of those nodes | 1.7 s |
+| pass 3, the ways cut at the junctions | 4.4 s |
+| the graph (1,227,104 nodes, 1,553,879 edges, 8,702,349 points) | 8.2 s in all |
+| the 796 elevation tiles, from the network | 59 s (from the cache: 0.7 s) |
+| altitudes, climb and descent of every edge | 6.3 s |
+| writing the file (165 MB) | 0.4 s |
+
+Peak memory during the build: 864 MB. Reading the network back at launch: 0.9 s, off the UI thread.
+
+Planning: 200 requests in exact mode, 5 to 40 km, from starts drawn within 12 km of the centre of
+Nice (the sea left out), five loops each:
+
+| What | Figure |
+|---|---|
+| requests with a loop within ±2 % | 191 (95.5 %) |
+| requests with no loop at all | 2 |
+| time, p50 | 37 ms |
+| time, p95 | 126 ms |
+| time, longest | 166 ms |
+| 18 to 22 km (21 requests), p50 / p95 | 37 ms / 57 ms |
+
+The window stays drawn during the build, since the build runs on the background executor and its
+workers leave a core free. Its frame times were not measured during the build: the container has no
+screen.
+
 ## Known slow spots
 
 - **Moving the Journal's selection** grows with the history: 10 ms a step with 500 activities,
@@ -61,4 +98,8 @@ CARGO_PROFILE_DEV_OPT_LEVEL=3 cargo test -- --ignored --nocapture measure
 cargo build --release
 scripts/demo-data.py /tmp/demo --days 3650
 XDG_DATA_HOME=/tmp/demo target/release/astrolabe
+
+# Loops: build a region's network (fetches the elevation tiles once), then plan around Nice.
+ASTROLABE_PBF=provence-alpes-cote-d-azur.osm.pbf cargo test --release -- --ignored --nocapture measure_graph_build
+cargo test --release -- --ignored --nocapture measure_loops_around_nice
 ```
