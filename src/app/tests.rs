@@ -401,23 +401,26 @@ fn the_loop_is_seen_in_3d(cx: &mut TestAppContext) {
     assert!(b.size.width > gpui::px(400.) && b.size.height > gpui::px(200.), "{b:?}");
     let mid = gpui::point(b.origin.x + b.size.width * 0.75, b.origin.y + b.size.height * 0.5);
     let by = |dx: f32, dy: f32| gpui::point(mid.x + gpui::px(dx), mid.y + gpui::px(dy));
-    // Dragged: turned.
-    let c0 = cam(cx);
-    cx.simulate_mouse_down(mid, MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_move(by(60., 0.), MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_move(by(120., 30.), MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_up(by(120., 30.), MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
-    let c1 = cam(cx);
-    assert!((c1.yaw - c0.yaw).abs() > 0.5 && c1.pitch > c0.pitch && c1.target == c0.target, "{c0:?} {c1:?}");
-    // Shift-dragged: moved, not turned.
+    // Dragged with the right button, or with Shift: turned.
     let shift = Modifiers { shift: true, ..Modifiers::none() };
-    cx.simulate_mouse_down(mid, MouseButton::Left, shift);
-    cx.simulate_mouse_move(by(80., 40.), MouseButton::Left, shift);
-    cx.simulate_mouse_up(by(80., 40.), MouseButton::Left, shift);
+    let mut c1 = cam(cx);
+    for (button, mods) in [(MouseButton::Right, Modifiers::none()), (MouseButton::Left, shift)] {
+        let c0 = c1;
+        cx.simulate_mouse_down(mid, button, mods);
+        cx.simulate_mouse_move(by(60., 0.), button, mods);
+        cx.simulate_mouse_move(by(120., 30.), button, mods);
+        cx.simulate_mouse_up(by(120., 30.), button, mods);
+        cx.run_until_parked();
+        c1 = cam(cx);
+        assert!((c1.yaw - c0.yaw).abs() > 0.5 && c1.pitch > c0.pitch && c1.target == c0.target, "{button:?} {c0:?} {c1:?}");
+    }
+    // Dragged: moved over the ground, not turned.
+    cx.simulate_mouse_down(mid, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(by(80., 40.), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(by(80., 40.), MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
     let c2 = cam(cx);
-    assert!(c2.target != c1.target && c2.yaw == c1.yaw, "{c1:?} {c2:?}");
+    assert!(c2.target != c1.target && c2.yaw == c1.yaw && c2.pitch == c1.pitch, "{c1:?} {c2:?}");
     // The wheel: closer.
     cx.simulate_event(ScrollWheelEvent { position: mid, delta: ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(120.))), ..Default::default() });
     cx.run_until_parked();
