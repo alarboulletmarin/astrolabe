@@ -2,6 +2,10 @@
 
 Notable changes, newest first. Versions follow [Semantic Versioning](https://semver.org); until 1.0, a minor version may change how things look or are stored.
 
+## Unreleased
+
+- **Settings kept in order**: changing two settings at once (proposing loops does) could show "Settings not saved" and, rarely, keep the older of the two on disk. Writes now run one after the other, in the order asked.
+
 ## 0.1.0
 
 First release.

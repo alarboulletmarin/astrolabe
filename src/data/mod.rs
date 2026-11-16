@@ -102,6 +102,8 @@ pub struct Data {
     api: String,
     /// The loop planner: the region's graph, the loops planned.
     pub loops: loops::Loops,
+    /// The last write asked for: the next one waits for it.
+    writing: Option<Task<()>>,
 }
 
 impl EventEmitter<DataEvent> for Data {}
@@ -181,6 +183,7 @@ impl Data {
             ground: HashMap::new(),
             api: garmin::BASE.into(),
             loops: loops::Loops::default(),
+            writing: None,
         }
     }
 
@@ -525,16 +528,21 @@ impl Data {
         .detach();
     }
 
-    fn save_derived(&self, cx: &mut Context<Self>) {
+    fn save_derived(&mut self, cx: &mut Context<Self>) {
         let d = self.derived.clone();
         self.persist(cx, move || store::save_derived(&d));
     }
 
-    /// Writes off the UI thread; a write that fails shows in the status line instead of vanishing.
-    fn persist(&self, cx: &mut Context<Self>, write: impl FnOnce() -> Result<(), String> + Send + 'static) {
-        let task = cx.background_executor().spawn(async move { write() });
-        cx.spawn(async move |this, cx| {
-            if let Err(e) = task.await {
+    /// Writes off the UI thread, one after the other in the order asked (side by side, two
+    /// writes of a file shared its temporary file, and an older content could land last); a
+    /// write that fails shows in the status line instead of vanishing.
+    fn persist(&mut self, cx: &mut Context<Self>, write: impl FnOnce() -> Result<(), String> + Send + 'static) {
+        let before = self.writing.take();
+        self.writing = Some(cx.spawn(async move |this, cx| {
+            if let Some(before) = before {
+                before.await;
+            }
+            if let Err(e) = cx.background_executor().spawn(async move { write() }).await {
                 this.update(cx, |d, cx| {
                     // ponytail: a sync under way owns the status line; the error goes to its note then.
                     if d.busy() { d.note = Some(e) } else { d.status = Status::Failed(e) }
@@ -542,8 +550,7 @@ impl Data {
                 })
                 .ok();
             }
-        })
-        .detach();
+        }));
     }
 
     /// Reads an activity's file, downloading it first if needed, and keeps what it derives.

@@ -310,6 +310,28 @@ fn a_write_that_fails_is_shown(cx: &mut TestAppContext) {
     });
 }
 
+/// Two writes in a row (two settings changed by one click) run one after the other, in the
+/// order asked: run together, they shared a temporary file and the second failed to rename it,
+/// or the older content could land last.
+#[gpui::test(iterations = 20)]
+fn writes_run_one_at_a_time_in_order(cx: &mut TestAppContext) {
+    let data = cx.new(|_| Data::with_activities(Theme::for_appearance(gpui::WindowAppearance::Dark), vec![]));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    data.update(cx, |d, cx| {
+        for i in 0..3 {
+            let log = log.clone();
+            d.persist(cx, move || {
+                log.lock().unwrap().push(format!("start {i}"));
+                std::thread::sleep(Duration::from_millis(5 * (3 - i)));
+                log.lock().unwrap().push(format!("end {i}"));
+                Ok(())
+            });
+        }
+    });
+    cx.run_until_parked();
+    assert_eq!(*log.lock().unwrap(), ["start 0", "end 0", "start 1", "end 1", "start 2", "end 2"]);
+}
+
 /// Geofabrik and the elevation tiles, stood in for: the made-up town's extract (`extract`, cut
 /// short if asked) and the same sloping tile everywhere.
 fn osm_servers(extract: Vec<u8>) -> Garmin {
