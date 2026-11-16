@@ -414,43 +414,63 @@ impl LoopsView {
         let data = self.data.clone();
         let mut tile = |z: u8, x: u32, y: u32| data.update(cx, |d, cx| d.relief_tile((z, x, y), cx));
         if let Some(mut s) = Scene::of(&l.line, key, self.snap.theme.dark, size, &mut tile) {
-            // The roads, from the region's own map: on the ground before any tile (about 90 ms,
-            // in the background), unless the map came first (it has them too).
-            if let Some(g) = self.data.read(cx).loops.graph.clone() {
-                let (gw, gh) = s.extent();
-                let (w, h) = if gw >= gh { (GROUND_PIXELS, (GROUND_PIXELS as f64 * gh / gw) as usize) } else { ((GROUND_PIXELS as f64 * gw / gh) as usize, GROUND_PIXELS) };
-                let (base, shade, bbox, dark) = (s.base.clone(), s.shade.clone(), s.bbox, self.snap.theme.dark);
-                cx.spawn(async move |this, cx| {
-                    let texture = cx
-                        .background_executor()
-                        .spawn(async move {
-                            let mut p = base.crop([0.0, 0.0, 1.0, 1.0], w.max(2), h.max(2));
-                            p.fade = FADE;
-                            with_roads(p, Some(&g), bbox, gw, dark).lit(&shade)
-                        })
-                        .await;
-                    this.update(cx, |v, cx| {
-                        if let Some(s) = v.scene.as_mut().filter(|s| s.key == key && !s.draped) {
-                            s.texture = Arc::new(texture);
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-                })
-                .detach();
-            }
             // The last loop's picture goes off the atlas with the next frame.
             if let Some(old) = self.scene.take() {
                 s.stale.extend(old.stale.into_iter().chain(old.image));
             }
             self.scene = Some(s);
+            self.paint_roads(cx);
         }
+    }
+
+    /// The roads, from the region's own map, on the grey ground (about 90 ms, in the background):
+    /// the plain ground, and the photos' until they are all there.
+    fn paint_roads(&mut self, cx: &mut Context<Self>) {
+        let (Some(g), Some(s)) = (self.data.read(cx).loops.graph.clone(), self.scene.as_ref()) else { return };
+        let (gw, gh) = s.extent();
+        let (w, h) = if gw >= gh { (GROUND_PIXELS, (GROUND_PIXELS as f64 * gh / gw) as usize) } else { ((GROUND_PIXELS as f64 * gw / gh) as usize, GROUND_PIXELS) };
+        let (base, shade, bbox, dark, key) = (s.base.clone(), s.shade.clone(), s.bbox, self.snap.theme.dark, s.key);
+        cx.spawn(async move |this, cx| {
+            let texture = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut p = base.crop([0.0, 0.0, 1.0, 1.0], w.max(2), h.max(2));
+                    p.fade = FADE;
+                    with_roads(p, Some(&g), bbox, gw, dark).lit(&shade)
+                })
+                .await;
+            this.update(cx, |v, cx| {
+                if let Some(s) = v.scene.as_mut().filter(|s| s.key == key && !s.draped) {
+                    s.texture = Arc::new(texture);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Photos on the 3D ground, or the plain ground with the roads: kept in the settings. The eye
+    /// stays where it is.
+    pub fn set_photos(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.photos == on {
+            return;
+        }
+        self.photos = on;
+        self.data.update(cx, |d, cx| d.set_setting("loops.photos", if on { "1" } else { "0" }.to_string(), cx));
+        if let Some(s) = self.scene.as_mut() {
+            s.draped = false;
+            s.insets.clear();
+            s.texture = Arc::new((*s.base).clone().lit(&s.shade));
+        }
+        self.paint_roads(cx);
+        cx.notify();
     }
 
     /// Lays the aerial photos on the ground once they are all there; where there is none (abroad,
     /// at sea) the grey ground shows. Until then, and offline, the ground stays grey.
     fn ensure_drape(&mut self, cx: &mut Context<Self>) {
-        let Some(s) = self.scene.as_mut().filter(|s| !s.draped) else { return };
+        let Some(s) = self.scene.as_mut().filter(|s| !s.draped && self.photos) else { return };
         let z = map_zoom(s.bbox);
         // Every tile asked for at once, so that they come together.
         let got: Vec<_> = tiles(s.bbox, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
@@ -459,21 +479,28 @@ impl LoopsView {
         if let Some(t) = Texture::from_tiles(s.bbox, z, FADE, Some((&s.base, [0.0, 0.0, 1.0, 1.0])), &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) {
             s.texture = Arc::new(t.lit(&s.shade));
             s.draped = true;
+            // The roads over grey laid while waiting would hide the photos: they go.
+            s.insets.retain(|(_, (_, _, photos))| *photos);
         }
     }
 
     /// Lays finer photos where the eye is close (see `levels`): the ground nearest the eye as
     /// sharp as the screen, coarser further on. One is made at a time (in the background), the
     /// finest first, again when the eye has moved a quarter of it away; the last ones show until
-    /// then. While a level's photos are coming, the roads of the region's map over the grey ground.
+    /// then. Before the photos are there, and on the plain ground, the roads of the region's map
+    /// over the grey ground; once they are, the coarser photos show until the finer ones are all
+    /// there, so that the ground doesn't flicker grey while the eye moves.
     fn ensure_inset(&mut self, size: (f64, f64), cx: &mut Context<Self>) {
-        let (graph, dark) = (self.data.read(cx).loops.graph.clone(), self.snap.theme.dark);
+        let (graph, dark, photos) = (self.data.read(cx).loops.graph.clone(), self.snap.theme.dark, self.photos);
         let Some(s) = self.scene.as_mut().filter(|s| !s.inset_busy) else { return };
         let t = s.terrain.clone();
         let (gw, gh) = ((t.cols - 1) as f64 * t.dx, (t.rows - 1) as f64 * t.dy);
         let cos = ((s.bbox[0] + s.bbox[2]) / 2.0).to_radians().cos();
         let (bbox, wanted) = (s.bbox, levels(&s.cam, cos, map_zoom(s.bbox), size.1));
-        for (z, centre, half) in wanted.iter().copied() {
+        // Coarsest first: it stays right longest while the eye moves; a finer level waits for the
+        // coarser one's photos (else, moving, it would take every download for tiles already
+        // behind the eye).
+        for (z, centre, half) in wanted.iter().rev().copied() {
             let (lat, lon) = (t.south + centre[1] / t.my, t.west + centre[0] / t.mx);
             let (dlat, dlon) = (half / t.my, half / t.mx);
             let b = [(lat - dlat).max(bbox[0]), (lon - dlon).max(bbox[1]), (lat + dlat).min(bbox[2]), (lon + dlon).min(bbox[3])];
@@ -482,13 +509,17 @@ impl LoopsView {
             }
             // The photos are asked for at every frame until they are all there, the finest level's
             // first.
-            let got: Vec<_> = tiles(b, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
-            let complete = got.iter().all(|(_, t)| t.is_some());
+            let got: Vec<_> = if photos { tiles(b, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect() } else { Vec::new() };
+            let complete = photos && got.iter().all(|(_, t)| t.is_some());
             let Some(s) = self.scene.as_mut() else { return };
-            if s.insets.iter().any(|(_, (iz, c, done))| *iz == z && (c[0] - centre[0]).abs().max((c[1] - centre[1]).abs()) < half / 2.0 && (*done || !complete)) {
+            let here: Vec<bool> = s.insets.iter().filter(|(_, (iz, c, _))| *iz == z && (c[0] - centre[0]).abs().max((c[1] - centre[1]).abs()) < half / 2.0).map(|(_, (_, _, done))| *done).collect();
+            if here.contains(&true) {
                 continue;
             }
-            if !complete && graph.is_none() {
+            if !complete && (!here.is_empty() || graph.is_none() || s.draped || s.insets.iter().any(|(_, (_, _, done))| *done)) {
+                if photos {
+                    return;
+                }
                 continue;
             }
             let have: std::collections::HashMap<(u32, u32), Arc<Vec<u8>>> = got.into_iter().filter_map(|(k, t)| Some((k, t?))).collect();
@@ -508,9 +539,13 @@ impl LoopsView {
                     })
                     .await;
                 this.update(cx, |v, cx| {
+                    let same = v.photos == photos;
                     if let Some(s) = v.scene.as_mut().filter(|s| s.key == key) {
                         s.inset_busy = false;
-                        if let Some(i) = inset {
+                        // Made for the other ground (photos or plain), or roads over grey once the
+                        // photos are there: dropped.
+                        let keep = same && (complete || !s.draped);
+                        if let Some(i) = inset.filter(|_| keep) {
                             // It takes its level's place; levels no longer wanted go.
                             s.insets.retain(|(_, (iz, _, _))| *iz != z && zooms.contains(iz));
                             s.insets.push((Arc::new(i), (z, centre, complete)));
@@ -756,7 +791,7 @@ impl LoopsView {
                     .text_color(t.dim)
                     .cursor_pointer()
                     .on_click(|_, _, cx| cx.open_url("https://www.openstreetmap.org/copyright"))
-                    .child(tr("Photos IGN · © OpenStreetMap contributors", "Photos IGN · © les contributeurs d'OpenStreetMap")),
+                    .child(if self.photos { tr("Photos IGN · © OpenStreetMap contributors", "Photos IGN · © les contributeurs d'OpenStreetMap") } else { tr("© OpenStreetMap contributors", "© les contributeurs d'OpenStreetMap") }),
             )
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab_3d(e, e.modifiers.shift, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab_3d(e, true, cx)))

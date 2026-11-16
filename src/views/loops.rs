@@ -195,6 +195,8 @@ pub struct LoopsView {
     card_hover: Option<usize>,
     /// The chosen loop drawn in the colours of its grade.
     show_slope: bool,
+    /// The IGN's photos on the 3D ground (else the plain ground with the roads).
+    pub(super) photos: bool,
     /// The climb pointed at in the list.
     climb_hover: Option<usize>,
     /// The chosen loop's stretches by grade, and which loop they are of.
@@ -274,6 +276,7 @@ impl LoopsView {
             settings_open: false,
             card_hover: None,
             show_slope: get("loops.slope", "1") == "1",
+            photos: get("loops.photos", "1") == "1",
             runs: None,
             climb_hover: None,
             data,
@@ -1299,6 +1302,11 @@ impl Render for LoopsView {
                     .flex()
                     .gap(px(6.))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .when(three, |d| {
+                        d.child(div().bg(t.bg).rounded(px(8.)).shadow_sm().child(segmented("loops-ground", vec![(tr("Photo", "Photo").into(), self.photos), (tr("Plain", "Plan").into(), !self.photos)], t, cx, |this: &mut LoopsView, i, _, cx| {
+                            this.set_photos(i == 0, cx);
+                        })))
+                    })
                     .when(!three, |d| {
                         d.child(div().bg(t.bg).rounded(px(8.)).shadow_sm().child(segmented("loops-relief", vec![(tr("Shading", "Ombrage").into(), self.show_relief), (tr("None", "Sans").into(), !self.show_relief)], t, cx, |this: &mut LoopsView, i, _, _| {
                             this.show_relief = i == 0;

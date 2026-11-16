@@ -668,6 +668,14 @@ fn the_loop_is_seen_in_3d(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("space");
     wait(cx, 2);
     assert_eq!(state(cx).1, Some(true));
+    // The plain ground instead of the photos, kept in the settings; and back.
+    let photos = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.data.read(cx).settings.get("loops.photos").cloned());
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| l.set_photos(false, cx)));
+    wait(cx, 2);
+    assert_eq!(photos(cx).as_deref(), Some("0"));
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| l.set_photos(true, cx)));
+    wait(cx, 2);
+    assert_eq!(photos(cx).as_deref(), Some("1"));
     // Back on the map the flight stops.
     shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
         l.show_3d(false);
