@@ -1690,6 +1690,8 @@ impl LoopsView {
                 d.child(div().h(px(6.)).w_full().rounded(px(3.)).bg(t.border).child(div().h_full().rounded(px(3.)).bg(t.accent).w(relative(f))))
             });
             body = body.child(button("loops-stop", tr("Stop", "Arrêter"), false, t).on_click(cx.listener(|this, _, _, cx| this.data.update(cx, |d, cx| d.stop_loops_job(cx)))));
+        } else if l.reading {
+            body = body.child(small(trf(format!("Reading the paths of {region}…"), format!("Lecture des chemins de {region}…")), t.soft));
         } else if !ready {
             body = body.child(small(
                 if has_extract {

@@ -5,6 +5,7 @@ Notable changes, newest first. Versions follow [Semantic Versioning](https://sem
 ## Unreleased
 
 - **Settings kept in order**: changing two settings at once (proposing loops does) could show "Settings not saved" and, rarely, keep the older of the two on disk. Writes now run one after the other, in the order asked.
+- **Loops page while the region is read**: for the second or two a large region's network takes to read, the page offered to download the region again. It now says the paths are being read.
 
 ## 0.1.0
 

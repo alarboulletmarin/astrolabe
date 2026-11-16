@@ -416,8 +416,17 @@ fn a_region_is_downloaded_once_and_planned_offline(cx: &mut TestAppContext) {
         assert!(d.loops.found.iter().all(|l| (l.dist - 5000.0).abs() <= 100.0));
     });
 
-    // Reopened without the network: read back, the same.
-    let again = open_loops(cx, &offline(), &offline());
+    // Reopened without the network: read back, the same. While it is read (a few hundred MB
+    // for a real region), the page must not offer to download it again.
+    let again = open(cx, &offline(), None);
+    again.update(cx, |d, cx| {
+        d.loops.osm_base = offline();
+        d.loops.elevation_base = offline();
+        d.open_loops(cx);
+        assert!(d.loops.reading && d.loops.graph.is_none());
+    });
+    settle(cx);
+    again.read_with(cx, |d, _| assert!(!d.loops.reading));
     assert_eq!(graph_nodes(&again, cx), Some(173));
     assert_eq!(std::fs::read(root.join("data/osm/provence-alpes-cote-d-azur.graph")).unwrap(), stored);
 

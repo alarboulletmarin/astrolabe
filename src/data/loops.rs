@@ -55,6 +55,8 @@ pub struct Loops {
     pub graph: Option<Arc<Graph>>,
     /// The disk was looked at (once, when the page first shows).
     pub looked: bool,
+    /// The region's files are being read: neither there nor missing yet.
+    pub reading: bool,
     /// Size of the extract on disk.
     pub extract: Option<u64>,
     pub job: Option<Job>,
@@ -95,6 +97,7 @@ impl Default for Loops {
             catalog_busy: false,
             graph: None,
             looked: false,
+            reading: false,
             extract: None,
             job: None,
             error: None,
@@ -131,6 +134,7 @@ impl Data {
         }
         self.read_regions();
         self.loops.looked = true;
+        self.loops.reading = true;
         let id = self.loops.region.id.clone();
         cx.spawn(async move |this, cx| {
             let asked = id.clone();
@@ -140,6 +144,7 @@ impl Data {
                 if d.loops.region.id != asked {
                     return;
                 }
+                d.loops.reading = false;
                 d.loops.extract = size;
                 match routes {
                     Ok(r) => d.loops.routes = r,
