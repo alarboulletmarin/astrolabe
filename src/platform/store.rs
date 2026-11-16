@@ -93,6 +93,9 @@ pub(super) fn write_atomic_from(path: &Path, from: &mut dyn std::io::Read, priva
     if private {
         std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     }
+    // Elsewhere the user's profile folder is already theirs alone.
+    #[cfg(not(unix))]
+    let _ = private;
     let mut f = std::io::BufWriter::new(opts.open(&tmp)?);
     let n = std::io::copy(from, &mut f)?;
     let f = f.into_inner().map_err(|e| e.into_error())?;
