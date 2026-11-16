@@ -11,6 +11,8 @@ Notable changes, newest first. Versions follow [Semantic Versioning](https://sem
     OpenStreetMap's paths, each with its distance, climb, descent, shares of trail, asphalt and
     out-and-back, and an altitude profile linked to the map.
   - The chosen loop saves as GPX (`Ctrl + S`), and its seed gives it back.
+  - Every change of the start, the points, the zones or the line can be undone (`Ctrl + Z`): the
+    arrows on the map name the change they take back, and the line under the map says it.
   - The map is shaded with the relief.
   - The region's extract (Provence-Alpes-Côte d'Azur for now) is downloaded once from Geofabrik,
     and the elevation tiles that cover it from the Amazon open data bucket. The network of paths is

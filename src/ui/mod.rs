@@ -21,7 +21,15 @@ impl AssetSource for Assets {
             "window-minimize.svg" => r#"<path d="M4 8H12"/>"#,
             "window-maximize.svg" => r#"<path d="M4.5 4.5H11.5V11.5H4.5Z"/>"#,
             "window-restore.svg" => r#"<path d="M3.5 6.5H9.5V12.5H3.5Z"/><path d="M10 8.5H12.5V3.5H7.5V6"/>"#,
-            "window-close.svg" => r#"<path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5"/>"#,
+            "window-close.svg" | "close.svg" => r#"<path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5"/>"#,
+            // An arrow that turns back, and the other way.
+            "undo.svg" => r#"<path d="M6 3.5L3.5 6L6 8.5"/><path d="M3.5 6H9.75A2.75 2.75 0 0 1 9.75 11.5H6.5"/>"#,
+            "redo.svg" => r#"<path d="M10 3.5L12.5 6L10 8.5"/><path d="M12.5 6H6.25A2.75 2.75 0 0 0 6.25 11.5H9.5"/>"#,
+            // Two arrows round a circle: other loops.
+            "again.svg" => r#"<path d="M12.6 6.5A4.8 4.8 0 0 0 3.9 5.4M3.5 2.8V5.6H6.3M3.4 9.5A4.8 4.8 0 0 0 12.1 10.6M12.5 13.2V10.4H9.7"/>"#,
+            // Two arrows, one each way: the other way round.
+            "reverse.svg" => r#"<path d="M3 5.5H12.5M10 3L12.5 5.5L10 8"/><path d="M13 10.5H3.5M6 8L3.5 10.5L6 13"/>"#,
+            "export.svg" => r#"<path d="M8 2.5V10M5 7L8 10L11 7M3 13H13"/>"#,
             _ => return gpui_kit::assets::AllAssets.load(path),
         };
         let svg = format!(
@@ -33,6 +41,24 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         gpui_kit::assets::AllAssets.list(path)
     }
+}
+
+/// A round button with one icon, as in Bref: `over` is its hover (red for what warns); `None`,
+/// a button that can do nothing now, greyed.
+pub fn icon_button(id: impl Into<ElementId>, path: &'static str, over: Option<Hsla>, t: Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(24.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .when_some(over, |d, over| d.cursor_pointer().hover(|s| s.bg(over)).active(|s| s.bg(t.pressed())))
+        .when(over.is_none(), |d| d.opacity(0.35))
+        // Keeps the press from what is under it (the map, a window handle): a drag there would
+        // take the pointer, and the release (the click) never comes back.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(svg().path(path).size(px(16.)).flex_none().text_color(t.text))
 }
 
 /// How long the pointer rests on something before its tooltip shows: gpui waits 500 ms, which
@@ -155,6 +181,21 @@ pub fn segmented<V: 'static>(
 
 /// Bref's button: 1 px border, radius 6, 13 px. `primary` fills it with the accent.
 pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, primary: bool, t: Theme) -> Stateful<Div> {
+    button_frame(id, primary, t).child(label.into())
+}
+
+/// `button` with an icon before its label.
+pub fn icon_label_button(id: impl Into<ElementId>, path: &'static str, label: impl Into<SharedString>, t: Theme) -> Stateful<Div> {
+    button_frame(id, false, t)
+        .pl(px(9.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(svg().path(path).size(px(14.)).flex_none().text_color(t.soft))
+        .child(label.into())
+}
+
+fn button_frame(id: impl Into<ElementId>, primary: bool, t: Theme) -> Stateful<Div> {
     div()
         .id(id)
         .flex_none()
@@ -172,7 +213,6 @@ pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, primary:
                 .hover(|d| d.bg(blend(t.text, t.accent, 0.12)))
         })
         .when(!primary, |d| d.border_color(t.border).text_color(t.text).hover(|d| d.bg(t.panel)))
-        .child(label.into())
 }
 
 /// Side padding of a page: the content takes the whole width, with Bref's margins.

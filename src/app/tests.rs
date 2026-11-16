@@ -270,9 +270,23 @@ fn the_start_is_dragged_and_a_new_distance_plans_again(cx: &mut TestAppContext) 
     cx.run_until_parked();
     assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()), Some(set));
     assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().len()), 1);
+    // The change is said under the map, and undo, on the map, names it.
+    use crate::views::loops::Gesture;
+    let change = |cx: &mut gpui::VisualTestContext, back: bool| shell.read_with(cx, |s, cx| s.loops.read(cx).next_change(back));
+    let said = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.loops.read(cx).said());
+    assert_eq!(change(cx, true), Some(Gesture::Pin));
+    assert!(said(cx).is_some_and(|s| s.starts_with("Point de passage ajouté · ") && s.ends_with("+Z pour annuler")), "{:?}", said(cx));
+    assert!(cx.debug_bounds("loops-undo").is_some() && cx.debug_bounds("loops-unpin").is_some());
     cx.simulate_keystrokes(&format!("{mod_key}-z"));
     cx.run_until_parked();
     assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().is_empty()));
+    assert_eq!((change(cx, true), change(cx, false)), (Some(Gesture::Start), Some(Gesture::Pin)));
+    assert!(said(cx).is_some_and(|s| s.starts_with("Annulé : point de passage ajouté")), "{:?}", said(cx));
+    assert!(cx.debug_bounds("loops-unpin").is_none());
+    // The line goes after three seconds.
+    cx.executor().advance_clock(std::time::Duration::from_secs(3));
+    cx.run_until_parked();
+    assert_eq!(said(cx), None);
     let at = screen(cx, set.0, set.1);
     // Dragged 500 m east along the street: loops from there.
     let to = screen(cx, lat, lon_at(1500.0));
@@ -284,6 +298,7 @@ fn the_start_is_dragged_and_a_new_distance_plans_again(cx: &mut TestAppContext) 
     let (la, lo) = shell.read_with(cx, |s, cx| s.loops.read(cx).start()).unwrap();
     assert!(crate::logic::fit::metres([la, lo], [lat, lon_at(1500.0)]) < 30.0, "{la} {lo}");
     assert!(generation(cx) > first);
+    assert_eq!(change(cx, true), Some(Gesture::StartMoved));
     let begins = shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[0].line[0]);
     assert!(crate::logic::fit::metres(begins, [lat, lon_at(1500.0)]) < 40.0, "{begins:?}");
     // A distance typed: nothing until the typing stops, then loops of that length.

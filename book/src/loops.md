@@ -47,8 +47,21 @@ the way are not both shown. Each loop says:
 `↑` and `↓` pick a loop. The chosen one is drawn thicker on the map, with its altitude profile
 below the list. Pointing at the profile points at the map.
 
-**Others** (`Ctrl + N`) proposes other loops from the same start. **Save as GPX** (`Ctrl + S`) writes
-the chosen loop where you say. The file carries the OpenStreetMap attribution its licence asks for.
+Under the list, **Others** (`Ctrl + N`) proposes other loops from the same start, **Reverse** runs
+the chosen loop the other way round, and **GPX** (`Ctrl + S`) writes it where you say. The file
+carries the OpenStreetMap attribution its licence asks for.
+
+## Changing a loop
+
+- A click on the map, the start set, asks the loops to pass by that point. The panel then shows
+  **Pass by** with the number of points; its cross takes them all away.
+- Drag the start, a point, or the chosen loop's line to move them; a right click takes a point away.
+- The cross on the **Start** line clears the start, the points and the loops, to begin elsewhere.
+
+Every change can be undone. The two arrows at the top left of the map undo and redo
+(`Ctrl + Z`, `Ctrl + Shift + Z`), and their tooltip names the change: "Undo: point to pass by
+added". After each change, and each undo, the line under the map says what happened for three
+seconds.
 
 ## How loops are found
 

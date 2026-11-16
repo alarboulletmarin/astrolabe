@@ -12,7 +12,7 @@ use crate::logic::slope;
 use crate::logic::route::{Places, Prefs, Zone};
 use crate::ui::chart::{Series, line_chart, nearest, range};
 use crate::ui::theme::blend;
-use crate::ui::{Plots, button, heading, icon, num, render_image, segmented};
+use crate::ui::{Plots, button, heading, icon, icon_label_button, num, render_image, segmented};
 use crate::views::Page;
 use crate::views::map::{MapState, map_widget};
 use gpui_kit::assets::IconName;
@@ -126,6 +126,60 @@ fn east_of(lat: f64, lon: f64, m: f64) -> [f64; 2] {
     [lat, lon + m / (111_195.0 * lat.to_radians().cos().max(0.01))]
 }
 
+/// A change undo can take back, named in its tooltip and in the line said after it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Gesture {
+    Start,
+    StartMoved,
+    StartCleared,
+    Pin,
+    PinMoved,
+    PinGone,
+    PinsGone,
+    LineReshaped,
+    PointGone,
+    Zone,
+    ZoneMoved,
+    ZoneResized,
+    ZoneGone,
+    ZonesGone,
+    Reversed,
+    RouteOpened,
+}
+
+impl Gesture {
+    /// What happened, as a phrase that starts in lower case.
+    pub fn label(self) -> &'static str {
+        match self {
+            Gesture::Start => tr("start set", "départ posé"),
+            Gesture::StartMoved => tr("start moved", "départ déplacé"),
+            Gesture::StartCleared => tr("start cleared", "départ effacé"),
+            Gesture::Pin => tr("point to pass by added", "point de passage ajouté"),
+            Gesture::PinMoved => tr("point to pass by moved", "point de passage déplacé"),
+            Gesture::PinGone => tr("point to pass by taken away", "point de passage retiré"),
+            Gesture::PinsGone => tr("points to pass by taken away", "points de passage retirés"),
+            Gesture::LineReshaped => tr("line reshaped", "tracé modifié"),
+            Gesture::PointGone => tr("point of the line taken away", "point du tracé retiré"),
+            Gesture::Zone => tr("zone to avoid added", "zone à éviter ajoutée"),
+            Gesture::ZoneMoved => tr("zone to avoid moved", "zone à éviter déplacée"),
+            Gesture::ZoneResized => tr("zone to avoid resized", "taille de la zone à éviter changée"),
+            Gesture::ZoneGone => tr("zone to avoid taken away", "zone à éviter retirée"),
+            Gesture::ZonesGone => tr("zones to avoid taken away", "zones à éviter retirées"),
+            Gesture::Reversed => tr("direction reversed", "sens inversé"),
+            Gesture::RouteOpened => tr("route opened", "parcours ouvert"),
+        }
+    }
+}
+
+/// The phrase with its first letter in capitals.
+fn capital(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// How long the line said after a change stays.
+const SAID_FOR: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// What undo puts back.
 #[derive(Clone)]
 struct Step {
@@ -223,8 +277,11 @@ pub struct LoopsView {
     draft: Option<Vec<[f64; 2]>>,
     /// Where the pointer took a point (barely moved, it was a click), and what was there before.
     grabbed_at: Option<(Point<Pixels>, Step)>,
-    undo: Vec<Step>,
-    redo: Vec<Step>,
+    /// What undo and redo put back, each with the change that left it.
+    undo: Vec<(Step, Gesture)>,
+    redo: Vec<(Step, Gesture)>,
+    /// The line said after a change, and when: it stays `SAID_FOR`.
+    said: Option<(SharedString, std::time::Instant)>,
     /// The name to keep the chosen loop under.
     name: Entity<InputState>,
     /// The kept route shown, if the loops are one: keeping again updates it.
@@ -302,6 +359,7 @@ impl LoopsView {
             grabbed_at: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            said: None,
             name,
             opened: None,
             _subscriptions: subs,
@@ -476,15 +534,51 @@ impl LoopsView {
         Step { start: self.start, pins: self.pins.clone(), zones: self.zones.clone(), found: self.snap_found(cx), selected: self.selected }
     }
 
-    /// Keeps what is there, for undo, before a change.
-    fn remember(&mut self, cx: &App) {
+    /// Keeps what is there, for undo, before the change `g`, and says it.
+    fn remember(&mut self, g: Gesture, cx: &mut Context<Self>) {
         let step = self.step_now(cx);
-        self.undo.push(step);
+        self.record(step, g, cx);
+    }
+
+    /// Keeps `step`, what was there before the change `g`, for undo, and says the change.
+    fn record(&mut self, step: Step, g: Gesture, cx: &mut Context<Self>) {
+        self.undo.push((step, g));
         // ponytail: the last 100 changes; nobody undoes further.
         if self.undo.len() > 100 {
             self.undo.remove(0);
         }
         self.redo.clear();
+        let key = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+        self.say(trf(format!("{} · {key}+Z to undo", capital(g.label())), format!("{} · {key}+Z pour annuler", capital(g.label()))), cx);
+    }
+
+    /// Shows `text` in the line under the map for `SAID_FOR`.
+    fn say(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let at = std::time::Instant::now();
+        self.said = Some((text.into(), at));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAID_FOR).await;
+            this.update(cx, |this, cx| {
+                if this.said.as_ref().is_some_and(|s| s.1 == at) {
+                    this.said = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The line said after the last change, while it shows.
+    #[cfg(test)]
+    pub fn said(&self) -> Option<String> {
+        self.said.as_ref().map(|s| s.0.to_string())
+    }
+
+    /// The change undo (`back`) or redo would take back or do again.
+    pub fn next_change(&self, back: bool) -> Option<Gesture> {
+        if back { self.undo.last() } else { self.redo.last() }.map(|s| s.1)
     }
 
     fn restore(&mut self, s: Step, cx: &mut Context<Self>) {
@@ -501,10 +595,17 @@ impl LoopsView {
 
     /// Undoes the last change of the start, the points or a loop (`back`), or does it again.
     pub fn undo(&mut self, back: bool, cx: &mut Context<Self>) {
-        let Some(s) = (if back { self.undo.pop() } else { self.redo.pop() }) else { return };
+        let Some((s, g)) = (if back { self.undo.pop() } else { self.redo.pop() }) else { return };
         let now = self.step_now(cx);
-        if back { self.redo.push(now) } else { self.undo.push(now) }
+        if back { self.redo.push((now, g)) } else { self.undo.push((now, g)) }
         self.restore(s, cx);
+        let key = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+        let text = if back {
+            trf(format!("Undone: {} · {key}+Shift+Z to redo", g.label()), format!("Annulé : {} · {key}+Maj+Z pour rétablir", g.label()))
+        } else {
+            trf(format!("Redone: {}", g.label()), format!("Rétabli : {}", g.label()))
+        };
+        self.say(text, cx);
     }
 
     fn grab(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
@@ -595,8 +696,14 @@ impl LoopsView {
             cx.notify();
             return;
         }
-        self.undo.push(before);
-        self.redo.clear();
+        let g = match h {
+            Handle::Start => Gesture::StartMoved,
+            Handle::Pin(_) => Gesture::PinMoved,
+            Handle::Zone(_) => Gesture::ZoneMoved,
+            Handle::ZoneEdge(_) => Gesture::ZoneResized,
+            Handle::Point(_) => Gesture::LineReshaped,
+        };
+        self.record(before, g, cx);
         let at = self.under(e.position);
         match h {
             Handle::Start => {
@@ -641,7 +748,7 @@ impl LoopsView {
                 if points.len() < 2 {
                     return;
                 }
-                self.remember(cx);
+                self.remember(Gesture::PointGone, cx);
                 let gone = points.remove(i);
                 let found = self.snap_found(cx);
                 let pinned = found.get(self.selected).is_some_and(|l| l.pinned.get(i) == Some(&true));
@@ -653,7 +760,7 @@ impl LoopsView {
             }
             Some(Handle::Pin(i)) => {
                 cx.stop_propagation();
-                self.remember(cx);
+                self.remember(Gesture::PinGone, cx);
                 self.pins.remove(i);
                 self.propose(false, cx);
             }
@@ -667,7 +774,7 @@ impl LoopsView {
                 });
                 if let Some(i) = inside {
                     cx.stop_propagation();
-                    self.remember(cx);
+                    self.remember(Gesture::ZoneGone, cx);
                     self.zones.remove(i);
                     self.propose(false, cx);
                 }
@@ -677,14 +784,14 @@ impl LoopsView {
 
     /// A click on the map, the start set: a point the loops must pass by.
     fn pin(&mut self, at: (f64, f64), cx: &mut Context<Self>) {
-        self.remember(cx);
+        self.remember(Gesture::Pin, cx);
         self.pins.push(at);
         self.propose(false, cx);
     }
 
     /// Forgets the points asked for, and plans without them.
     fn unpin(&mut self, cx: &mut Context<Self>) {
-        self.remember(cx);
+        self.remember(Gesture::PinsGone, cx);
         self.pins.clear();
         self.propose(false, cx);
     }
@@ -762,7 +869,7 @@ impl LoopsView {
     /// Shows a kept route, with its start, its points and its settings, to change it.
     pub fn open_route(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.data.read(cx).loops.routes.iter().find(|r| r.id == id).cloned() else { return };
-        self.remember(cx);
+        self.remember(Gesture::RouteOpened, cx);
         self.start = Some((r.start[0], r.start[1]));
         self.pins = r.pins.iter().map(|p| (p[0], p[1])).collect();
         self.trail = if r.prefs.trail < 0.25 { 0 } else if r.prefs.trail > 0.75 { 2 } else { 1 };
@@ -779,7 +886,7 @@ impl LoopsView {
 
     /// Forgets the start and the loops, to begin again elsewhere.
     fn clear(&mut self, cx: &mut Context<Self>) {
-        self.remember(cx);
+        self.remember(Gesture::StartCleared, cx);
         self.start = None;
         self.pins.clear();
         self.drag = None;
@@ -982,11 +1089,11 @@ impl Render for LoopsView {
             let at = self.map.view.position(sx, sy, w, h);
             if self.placing_zone {
                 self.placing_zone = false;
-                self.remember(cx);
+                self.remember(Gesture::Zone, cx);
                 self.zones.push(Zone { lat: at.0, lon: at.1, radius: ZONE_RADIUS });
                 self.propose(false, cx);
             } else if self.start.is_none() {
-                self.remember(cx);
+                self.remember(Gesture::Start, cx);
                 self.start = Some(at);
                 if self.data.read(cx).loops.graph.is_some() {
                     self.propose(false, cx);
@@ -1280,6 +1387,12 @@ impl Render for LoopsView {
             } else {
                 tr("Click: pass by here · drag a point or the line: move · right click: take away", "Clic : passer par ici · glisser un point ou le tracé : déplacer · clic droit : retirer")
             };
+            // Just after a change: what it was, and how to take it back.
+            let said = self.said.as_ref().filter(|s| s.1.elapsed() < SAID_FOR).map(|s| s.0.clone());
+            let (text, colour): (SharedString, Hsla) = match said {
+                Some(said) => (said, t.text),
+                None => (text.into(), t.soft),
+            };
             div()
                 .id("loops-hint")
                 .absolute()
@@ -1289,7 +1402,7 @@ impl Render for LoopsView {
                 .bottom(px(if found.is_empty() { 26.0 } else { (BAND + 24.0 + 10.0) as f32 }))
                 .flex()
                 .justify_center()
-                .child(div().min_w(px(0.)).truncate().px(px(8.)).py(px(3.)).rounded(px(6.)).bg(t.bg.opacity(0.9)).shadow_sm().text_size(px(12.)).text_color(t.soft).child(text))
+                .child(div().min_w(px(0.)).truncate().px(px(8.)).py(px(3.)).rounded(px(6.)).bg(t.bg.opacity(0.9)).shadow_sm().text_size(px(12.)).text_color(colour).child(text))
         });
         div()
             .size_full()
@@ -1298,6 +1411,7 @@ impl Render for LoopsView {
             .child(self.panel(&found, cx))
             .children(band)
             .children(hint)
+            .children(self.history_bar(cx))
             .child(
                 div()
                     .absolute()
@@ -1445,7 +1559,6 @@ impl LoopsView {
             } else if let Some(e) = plan_error {
                 body = body.child(small(e, t.bad()));
             }
-            let has_start = self.start.is_some();
             if let Some(start) = self.start {
                 if self.zones.iter().any(|z| crate::logic::fit::metres([z.lat, z.lon], [start.0, start.1]) < z.radius) {
                     body = body.child(small(tr("The start is in a zone to avoid: the loops leave it as soon as they can.", "Le départ est dans une zone à éviter : les boucles en sortent au plus vite.").into(), t.soft));
@@ -1453,50 +1566,37 @@ impl LoopsView {
             } else {
                 body = body.child(self.usual(cx));
             }
-            // The edits: a new start, the points away, and undo and redo, which can bring back a
-            // start taken away.
-            let n = self.pins.len();
-            let (can_undo, can_redo) = (!self.undo.is_empty(), !self.redo.is_empty());
-            let key = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
-            if has_start || can_undo || can_redo {
+            // What is set on the map, each on its line with a cross that takes it away: the
+            // start (and with it the points and the loops), the points to pass by.
+            if let Some(start) = self.start {
+                let n = self.pins.len();
+                let row = |id: &'static str, name: SharedString, value: String, tip: SharedString, remove: fn(&mut LoopsView, &mut Context<LoopsView>)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_size(px(12.))
+                        .child(div().w(px(70.)).flex_none().text_color(t.soft).child(name))
+                        .child(div().flex_1().min_w_0().truncate().child(value))
+                        .child(
+                            crate::ui::icon_button(id, "close.svg", Some(t.hover()), t)
+                                .debug_selector(move || id.into())
+                                .tooltip_show_delay(crate::ui::TIP_DELAY)
+                                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                                .on_click(cx.listener(move |this, _, _, cx| remove(this, cx))),
+                        )
+                };
+                let place = format!("{} · {}", decimal(format!("{:.4}", start.0)), decimal(format!("{:.4}", start.1)));
                 body = body.child(
                     div()
                         .flex()
-                        .flex_wrap()
-                        .gap(px(8.))
-                        .when(has_start, |d| {
-                            d.child(button("loops-clear", tr("New start", "Nouveau départ"), false, t).debug_selector(|| "loops-clear".into()).on_click(cx.listener(|this, _, _, cx| this.clear(cx))))
-                        })
-                        .when(can_undo, |d| {
-                            let tip = format!("{key}+Z");
-                            d.child(
-                                button("loops-undo", tr("Undo", "Annuler"), false, t)
-                                    .debug_selector(|| "loops-undo".into())
-                                    .tooltip_show_delay(crate::ui::TIP_DELAY)
-                                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                                    .on_click(cx.listener(|this, _, _, cx| this.undo(true, cx))),
-                            )
-                        })
-                        .when(can_redo, |d| {
-                            let tip = format!("{key}+{}+Z", tr("Shift", "Maj"));
-                            d.child(
-                                button("loops-redo", tr("Redo", "Rétablir"), false, t)
-                                    .debug_selector(|| "loops-redo".into())
-                                    .tooltip_show_delay(crate::ui::TIP_DELAY)
-                                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                                    .on_click(cx.listener(|this, _, _, cx| this.undo(false, cx))),
-                            )
-                        })
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(row("loops-clear", tr("Start", "Départ").into(), place, tr("New start: clears the start, the points and the loops", "Nouveau départ : efface le départ, les points et les boucles").into(), LoopsView::clear))
                         .when(n > 0, |d| {
-                            d.child(
-                                button(
-                                    "loops-unpin",
-                                    if n > 1 { tr("Take the points away", "Retirer les points") } else { tr("Take the point away", "Retirer le point") },
-                                    false,
-                                    t,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| this.unpin(cx))),
-                            )
+                            let count = if n > 1 { format!("{n} points") } else { "1 point".to_string() };
+                            let tip = if n > 1 { tr("Take the points away", "Retirer les points") } else { tr("Take the point away", "Retirer le point") };
+                            d.child(row("loops-unpin", tr("Pass by", "Passer par").into(), count, tip.into(), LoopsView::unpin))
                         }),
                 );
             }
@@ -1563,7 +1663,7 @@ impl LoopsView {
         if found.get(self.selected).is_none() {
             return;
         }
-        self.remember(cx);
+        self.remember(Gesture::Reversed, cx);
         let mut v = (*found).clone();
         v[self.selected] = v[self.selected].reversed();
         self.hover = None;
@@ -1721,7 +1821,7 @@ impl LoopsView {
                     .when(self.avoid_open, |d| {
                         d.child(industrial).child(lit).child(div().flex().flex_wrap().gap(px(8.)).child(draw).when(zones > 0, |d| {
                             d.child(button("loops-zones-clear", tr("Take the zones away", "Retirer les zones"), false, t).on_click(cx.listener(|this, _, _, cx| {
-                                this.remember(cx);
+                                this.remember(Gesture::ZonesGone, cx);
                                 this.zones.clear();
                                 this.propose(false, cx);
                             })))
@@ -1834,9 +1934,75 @@ impl LoopsView {
                 .flex()
                 .flex_wrap()
                 .gap(px(8.))
-                .child(button("loops-again", tr("Other loops", "Autres boucles"), false, t).on_click(cx.listener(|this, _, _, cx| this.propose(true, cx))))
-                .child(button("loops-reverse", tr("Other way round", "Sens inverse"), false, t).debug_selector(|| "loops-reverse".into()).on_click(cx.listener(|this, _, _, cx| this.reverse(cx))))
-                .child(button("loops-export", tr("Export as GPX", "Exporter en GPX"), false, t).on_click(cx.listener(|this, _, _, cx| this.export(cx)))),
+                .child(
+                    icon_label_button("loops-again", "again.svg", tr("Others", "Autres"), t)
+                        .tooltip_show_delay(crate::ui::TIP_DELAY)
+                        .tooltip(|window, cx| Tooltip::new(tr("Other loops, with the same settings", "D'autres boucles, avec les mêmes réglages")).build(window, cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.propose(true, cx))),
+                )
+                .child(
+                    icon_label_button("loops-reverse", "reverse.svg", tr("Reverse", "Inverser"), t)
+                        .debug_selector(|| "loops-reverse".into())
+                        .tooltip_show_delay(crate::ui::TIP_DELAY)
+                        .tooltip(|window, cx| Tooltip::new(tr("Run the chosen loop the other way round", "Parcourir la boucle choisie dans l'autre sens")).build(window, cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.reverse(cx))),
+                )
+                .child({
+                    let tip = format!("{} ({}+S)", tr("Save the chosen loop as a GPX file", "Enregistrer la boucle choisie en fichier GPX"), if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" });
+                    icon_label_button("loops-export", "export.svg", "GPX", t)
+                        .tooltip_show_delay(crate::ui::TIP_DELAY)
+                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.export(cx)))
+                }),
+        )
+    }
+
+    /// Undo and redo, at the top left of the map where the changes are made: grey when there is
+    /// nothing to take back or do again, and the tooltip names the change. Shown once there is
+    /// something to change: a start on a network, or a change made.
+    fn history_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let ready = self.data.read(cx).loops.graph.is_some();
+        if !(ready && self.start.is_some()) && self.undo.is_empty() && self.redo.is_empty() {
+            return None;
+        }
+        let t = self.snap.theme;
+        let key = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+        let tool = |back: bool| {
+            let next = self.next_change(back);
+            let (id, path) = if back { ("loops-undo", "undo.svg") } else { ("loops-redo", "redo.svg") };
+            let tip: SharedString = match (next, back) {
+                (Some(g), true) => trf(format!("Undo: {} ({key}+Z)", g.label()), format!("Annuler : {} ({key}+Z)", g.label())).into(),
+                (Some(g), false) => trf(format!("Redo: {} ({key}+Shift+Z)", g.label()), format!("Rétablir : {} ({key}+Maj+Z)", g.label())).into(),
+                (None, true) => tr("Nothing to undo", "Rien à annuler").into(),
+                (None, false) => tr("Nothing to redo", "Rien à rétablir").into(),
+            };
+            crate::ui::icon_button(id, path, next.is_some().then(|| t.hover()), t)
+                .debug_selector(move || id.into())
+                .tooltip_show_delay(crate::ui::TIP_DELAY)
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .on_click(cx.listener(move |this, _, _, cx| this.undo(back, cx)))
+        };
+        // Where the map is too narrow for it beside the controls at its top right: over the
+        // zoom buttons (three of 28 px), at the bottom left.
+        let narrow = (self.map.bounds.get().size.width / px(1.)) < PANEL as f32 + 28.0 + 380.0;
+        let bar = div().absolute();
+        let bar = if narrow {
+            bar.bottom(px(10.0 + self.map.inset.1 + 3.0 * 28.0 + 8.0 + 8.0)).left(px(PANEL as f32 + 24.0))
+        } else {
+            bar.top(px(14.0f32.max(crate::ui::top() - 14.0) + 40.0)).left(px(PANEL as f32 + 28.0))
+        };
+        Some(
+            bar
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .p(px(3.))
+                .bg(t.bg)
+                .rounded(px(8.))
+                .shadow_sm()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(tool(true))
+                .child(tool(false)),
         )
     }
 
@@ -1872,7 +2038,7 @@ impl LoopsView {
                     None => count,
                 };
                 button(("loops-usual", i), label, false, t).debug_selector(move || format!("loops-usual-{i}")).on_click(cx.listener(move |this, _, _, cx| {
-                    this.remember(cx);
+                    this.remember(Gesture::Start, cx);
                     this.start = Some((p[0], p[1]));
                     this.propose(false, cx);
                 }))

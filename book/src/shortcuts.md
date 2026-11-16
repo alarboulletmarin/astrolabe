@@ -16,6 +16,7 @@ On macOS, `Cmd + [` and `Cmd + ]` replace `Alt + ←` and `Alt + →`, and `Cmd`
 | Loops | `↑`, `↓` | the previous or next loop |
 | Loops | `Ctrl + N` | other loops from the same start |
 | Loops | `Ctrl + S` | save the chosen loop as GPX |
+| Loops | `Ctrl + Z`, `Ctrl + Shift + Z` | undo or redo the last change of the start, the points, the zones or the loop |
 | Loops | `Enter` in a field | propose loops |
 | Loops | click on the map | set the start and propose loops |
 | Maps | `Ctrl + wheel` | zoom around the pointer (the wheel alone scrolls the page) |

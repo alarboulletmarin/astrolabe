@@ -339,22 +339,7 @@ impl Shell {
     fn window_controls(&self, window: &Window, cx: &App) -> Div {
         let t = self.data.read(cx).theme;
         let controls = window.window_controls();
-        let button = |id: &'static str, path: &'static str, over: Hsla| {
-            div()
-                .id(id)
-                .size(px(24.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .cursor_pointer()
-                .hover(|s| s.bg(over))
-                .active(|s| s.bg(t.pressed()))
-                // Keeps the press from the group below: its window move hands the pointer to the
-                // compositor, and the release (the click) never comes back.
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(svg().path(path).size(px(16.)).flex_none().text_color(t.text))
-        };
+        let button = |id: &'static str, path: &'static str, over: Hsla| crate::ui::icon_button(id, path, Some(over), t);
         crate::ui::drag_window(
             div()
                 .absolute()
