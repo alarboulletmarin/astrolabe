@@ -97,6 +97,18 @@ impl Terrain {
     }
 
     /// Altitude at `[east, north]` local metres (bilinear, clamped to the grid); 0 on an empty grid.
+    /// The same ground on about half as many vertices each way, over the same extent: a quarter
+    /// of the triangles, for the pictures drawn while the eye moves.
+    pub fn coarser(&self) -> Terrain {
+        if self.cols < 3 || self.rows < 3 {
+            return self.clone();
+        }
+        let (cols, rows) = (self.cols.div_ceil(2), self.rows.div_ceil(2));
+        let (dx, dy) = ((self.cols - 1) as f64 * self.dx / (cols - 1) as f64, (self.rows - 1) as f64 * self.dy / (rows - 1) as f64);
+        let heights = (0..rows * cols).map(|k| self.height_at((k % cols) as f64 * dx, (k / cols) as f64 * dy) as f32).collect();
+        Terrain { cols, rows, heights, dx, dy, south: self.south, west: self.west, mx: self.mx, my: self.my }
+    }
+
     pub fn height_at(&self, x: f64, y: f64) -> f64 {
         if self.cols < 2 || self.rows < 2 || self.heights.len() < self.cols * self.rows {
             return 0.0;
@@ -366,7 +378,7 @@ pub fn extrude(ring: &[[f32; 2]], base: f32, top: f32, wall: [u8; 3], roof: [u8;
 }
 
 /// Where the eye looks from: orbiting `target` (local metres east, north, altitude).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     pub target: [f64; 3],
     /// 0 = looking north, growing clockwise (east).
@@ -868,6 +880,19 @@ mod tests {
     }
 
     #[test]
+    fn a_coarser_ground_keeps_its_extent_and_its_heights() {
+        let t = grid(21, |i, j| (i * 3 + j * 7) as f32);
+        let c = t.coarser();
+        assert_eq!((c.cols, c.rows), (11, 11));
+        assert_eq!((c.cols - 1) as f64 * c.dx, (t.cols - 1) as f64 * t.dx);
+        assert_eq!(c.heights[2 * 11 + 3], t.heights[4 * 21 + 6], "a vertex both have");
+        let even = grid(20, |i, _| i as f32).coarser();
+        assert_eq!(((even.cols - 1) as f64 * even.dx).round(), 1900.0, "an even count keeps its far edge");
+        assert_eq!(even.heights[even.cols - 1], 19.0);
+        assert_eq!(grid(2, |_, _| 5.0).coarser().cols, 2, "too small to thin");
+    }
+
+    #[test]
     fn a_finer_picture_shows_over_its_part_of_the_ground_without_a_seam() {
         let t = grid(21, |_, _| 0.0);
         let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.0, pitch: PITCH_MAX, dist: 3000.0, min_dist: 300.0, fov: 0.8 };
@@ -1278,6 +1303,15 @@ mod tests {
         let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
         println!("terrain render 1200x800, 500x500 vertices, smooth: {ms:.1} ms");
         assert!(ms < 60.0, "{ms} ms");
+        // While the eye moves: the rough ground, not smoothed.
+        let rough = t.coarser();
+        let start = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(render(&rough, &colors, &[], &cam, 1.5, &line, 1200, 800, CLEAR, false, None));
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
+        println!("the same on the rough ground, not smoothed: {ms:.1} ms");
+        assert!(ms < 25.0, "{ms} ms");
         // From close, over a town: 10 000 blocks of 20 m within 1.2 km of what the eye looks at.
         let cam = Camera { dist: 1200.0, pitch: 0.6, ..cam };
         let blocks: Vec<Face> = (0..10_000)

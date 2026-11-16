@@ -121,6 +121,8 @@ pub(super) struct Scene {
     /// The loop and theme it was made for.
     key: u64,
     terrain: Arc<Terrain>,
+    /// The same ground on a quarter of the triangles: what is drawn while the eye moves.
+    rough: Arc<Terrain>,
     /// The ground's box, `[south, west, north, east]`.
     bbox: [f64; 4],
     /// The light on the ground, from the elevation tiles at their full resolution.
@@ -137,6 +139,9 @@ pub(super) struct Scene {
     blocks_busy: bool,
     pub(super) cam: Camera,
     image: Option<Arc<RenderImage>>,
+    /// Pictures shown before, to be taken off the window's atlas (each would hold its memory on
+    /// the graphics card until then).
+    pub(super) stale: Vec<Arc<RenderImage>>,
     /// The eye and the size `image` was drawn with. While the pointer moves the ground the picture
     /// on screen is a drawing late; what is laid over it is placed with these, not with `cam`.
     shown: Option<(Camera, usize, usize)>,
@@ -225,7 +230,7 @@ impl Scene {
         let shade = Shade::from_tiles(bbox, z, EXAGGERATION, &|x, y| needed.get(&(x, y)).cloned())?;
         let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE }.lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, inset: None, inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
+        let mut s = Scene { key, rough: Arc::new(t.coarser()), terrain: Arc::new(t), stale: Vec::new(), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, inset: None, inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
         s.frame(line, size);
         Some(s)
     }
@@ -317,7 +322,11 @@ impl LoopsView {
         }
         let data = self.data.clone();
         let mut tile = |z: u8, x: u32, y: u32| data.update(cx, |d, cx| d.relief_tile((z, x, y), cx));
-        if let Some(s) = Scene::of(&l.line, key, self.snap.theme.dark, size, &mut tile) {
+        if let Some(mut s) = Scene::of(&l.line, key, self.snap.theme.dark, size, &mut tile) {
+            // The last loop's picture goes off the atlas with the next frame.
+            if let Some(old) = self.scene.take() {
+                s.stale.extend(old.stale.into_iter().chain(old.image));
+            }
             self.scene = Some(s);
         }
     }
@@ -438,10 +447,13 @@ impl LoopsView {
             colour[r].fill(ink);
         }
         let line: Vec<([f64; 3], [u8; 3])> = l.line.iter().zip(colour).map(|(p, c)| (s.place(*p), c)).collect();
+        // While the eye moves (the picture shown is from another eye), a quick one: the rough
+        // ground, not smoothed. Once it stays, the full one.
+        let fine = s.image.is_none() || s.shown.is_some_and(|(c, sw, sh)| c == s.cam && (sw, sh) == (w, h));
         let key = {
             let mut hsh = std::collections::hash_map::DefaultHasher::new();
             let c = s.cam;
-            (c.target.map(f64::to_bits), c.yaw.to_bits(), c.pitch.to_bits(), c.dist.to_bits(), w, h, s.key, s.draped, s.blocks.is_some()).hash(&mut hsh);
+            (c.target.map(f64::to_bits), c.yaw.to_bits(), c.pitch.to_bits(), c.dist.to_bits(), w, h, s.key, s.draped, s.blocks.is_some(), fine).hash(&mut hsh);
             s.inset.as_ref().map(|(i, _)| Arc::as_ptr(i) as usize).hash(&mut hsh);
             line.iter().for_each(|(_, c)| c.hash(&mut hsh));
             hsh.finish()
@@ -450,13 +462,13 @@ impl LoopsView {
             return;
         }
         s.busy = true;
-        let (terrain, texture, blocks, cam, inset) = (s.terrain.clone(), s.texture.clone(), s.blocks.clone(), s.cam, s.inset.as_ref().map(|(i, _)| i.clone()));
+        let (terrain, texture, blocks, cam, inset) = (if fine { s.terrain.clone() } else { s.rough.clone() }, s.texture.clone(), s.blocks.clone(), s.cam, s.inset.as_ref().map(|(i, _)| i.clone()));
         cx.spawn(async move |this, cx| {
             let img = cx
                 .background_executor()
                 .spawn(async move {
                     let solids = blocks.map(|b| b.seen(&cam)).unwrap_or_default();
-                    let px = terrain::render(&terrain, &texture, &solids, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], true, inset.as_deref());
+                    let px = terrain::render(&terrain, &texture, &solids, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], fine, inset.as_deref());
                     render_image(w as u32, h as u32, px).map(Arc::new)
                 })
                 .await;
@@ -465,7 +477,7 @@ impl LoopsView {
                     s.busy = false;
                     s.drawn = Some(key);
                     if img.is_some() {
-                        s.image = img;
+                        s.stale.extend(std::mem::replace(&mut s.image, img));
                         s.shown = Some((cam, w, h));
                     }
                 }

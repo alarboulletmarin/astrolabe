@@ -881,8 +881,11 @@ impl LoopsView {
 }
 
 impl Render for LoopsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.data.update(cx, |d, cx| d.open_loops(cx));
+        for image in self.scene.iter_mut().flat_map(|s| s.stale.drain(..)) {
+            window.drop_image(image).ok();
+        }
         let t = self.snap.theme;
         let found = self.snap_found(cx);
         if self.selected >= found.len() {
