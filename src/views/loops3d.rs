@@ -520,17 +520,14 @@ impl LoopsView {
                 .absolute()
                 .size_full(),
             )
-            .child(div().absolute().bottom(px(6.)).left(px(PANEL as f32 + 44.0)).child(crate::ui::pill(
-                tr("Drag: move · right button or Shift: turn · wheel: zoom", "Glisser : se déplacer · bouton droit ou Maj : tourner · molette : zoomer"),
-                (t.bg, t.dim),
-            )))
             .child({
                 let (label, tip) = match s.fly.as_ref() {
                     Some(f) if f.playing => (tr("Pause", "Pause"), tr("Space: pause", "Espace : mettre en pause")),
                     Some(f) if f.at > 0.0 && f.at < l.along.last().copied().unwrap_or(0.0) as f64 => (tr("Resume", "Reprendre"), tr("Space: go on", "Espace : reprendre")),
                     _ => (tr("Fly over", "Survoler"), tr("Follow the loop from above", "Suivre la boucle vue d'en haut")),
                 };
-                div().absolute().bottom(px(34.)).left(px(PANEL as f32 + 44.0)).child(
+                // Above the profile band, at its right end (the help is in the middle).
+                div().absolute().bottom(px((super::BAND + 24.0 + 10.0) as f32)).right(px(14.)).child(
                     crate::ui::button("loops-fly", label, false, t)
                         .bg(t.bg)
                         .tooltip_show_delay(crate::ui::TIP_DELAY)
@@ -545,8 +542,12 @@ impl LoopsView {
                 div()
                     .id("loops-3d-credit")
                     .absolute()
-                    .bottom(px(30.))
+                    // Under the profile band, where the map has its own.
+                    .bottom(px(4.))
                     .right(px(14.))
+                    .px(px(4.))
+                    .rounded(px(4.))
+                    .bg(t.bg.opacity(0.8))
                     .text_size(px(11.))
                     .text_color(t.dim)
                     .cursor_pointer()

@@ -1194,8 +1194,10 @@ impl Render for LoopsView {
         let band = (!found.is_empty()).then(|| self.band(&found, cx));
         // What a click does now, said where one clicks.
         let ready = self.data.read(cx).loops.graph.is_some();
-        let hint = (ready && !three).then(|| {
-            let text = if self.placing_zone {
+        let hint = (ready && (!three || !found.is_empty())).then(|| {
+            let text = if three {
+                tr("Drag: move · right button or Shift: turn · wheel: zoom", "Glisser : se déplacer · bouton droit ou Maj : tourner · molette : zoomer")
+            } else if self.placing_zone {
                 tr("Click on the map to place the zone to avoid", "Clique sur la carte pour poser la zone à éviter")
             } else if self.start.is_none() {
                 tr("Click on the map to set the start", "Clique sur la carte pour poser le départ")
@@ -1208,11 +1210,12 @@ impl Render for LoopsView {
                 .id("loops-hint")
                 .absolute()
                 .left(px(PANEL as f32 + 28.0))
-                .right(px(14.))
+                // In 3D the fly-over button is at the right end of the row.
+                .right(px(if three { 120. } else { 14. }))
                 .bottom(px(if found.is_empty() { 26.0 } else { (BAND + 24.0 + 10.0) as f32 }))
                 .flex()
                 .justify_center()
-                .child(div().px(px(8.)).py(px(3.)).rounded(px(6.)).bg(t.bg.opacity(0.9)).shadow_sm().text_size(px(12.)).text_color(t.soft).child(text))
+                .child(div().min_w(px(0.)).truncate().px(px(8.)).py(px(3.)).rounded(px(6.)).bg(t.bg.opacity(0.9)).shadow_sm().text_size(px(12.)).text_color(t.soft).child(text))
         });
         div()
             .size_full()
@@ -1845,7 +1848,8 @@ impl LoopsView {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(div().flex_1().min_w(px(0.)).child(self.profile(found, cx)))
-            .child(div().id("loops-climbs").w(px(300.)).flex_none().overflow_y_scroll().child(self.climbs(found, cx)))
+            // A narrow window shares the band: the climbs keep at most 300 px, their lines cut short.
+            .child(div().id("loops-climbs").w(relative(0.42)).max_w(px(300.)).flex_none().overflow_y_scroll().child(self.climbs(found, cx)))
     }
 
     /// The chosen loop's climbs; one pointed at is outlined on the map and the profile.
@@ -1873,7 +1877,7 @@ impl LoopsView {
                     cx.notify();
                 }))
                 .child(num(decimal(format!("km {:.1}", l.along[c.from] / 1000.0))).text_size(px(12.)).text_color(t.soft))
-                .child(num(format!("{} · +{} · {} ({} max)", fmt_km(c.dist as f64), fmt_m(c.gain as f64), pct(c.grade), pct(c.steepest))).text_size(px(12.)))
+                .child(num(format!("{} · +{} · {} ({} max)", fmt_km(c.dist as f64), fmt_m(c.gain as f64), pct(c.grade), pct(c.steepest))).text_size(px(12.)).min_w(px(0.)).truncate())
         });
         div()
             .flex()
@@ -1914,7 +1918,7 @@ impl LoopsView {
             .flex()
             .flex_col()
             .gap(px(4.))
-            .child(div().flex().justify_between().text_size(px(12.)).text_color(t.soft).child(tr("Profile", "Profil")).child(num(label)))
+            .child(div().flex().justify_between().gap(px(8.)).text_size(px(12.)).text_color(t.soft).child(tr("Profile", "Profil")).child(num(label).min_w(px(0.)).truncate()))
             .child(
                 div()
                     .id("loop-profile")
