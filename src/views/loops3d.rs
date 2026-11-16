@@ -30,18 +30,43 @@ const FADE: f32 = 0.16;
 /// The map laid on the ground is at least this many pixels along its longer side (and less
 /// than twice as many): about one per pixel of the screen.
 const MAP_PIXELS: f64 = 1024.0;
-/// The finer map laid where the eye looks close: this many pixels a side, of a zoom up to the
-/// 2D map's finest.
+/// The finer photos laid where the eye is close: this many pixels a side each, of a zoom up to
+/// about 60 cm a pixel; at most `LEVELS` of them, each twice as coarse and twice as wide as the
+/// one before, from the ground nearest the eye outwards.
 const INSET_PIXELS: f64 = 1536.0;
 const INSET_MAX_ZOOM: u8 = 18;
+const LEVELS: i32 = 4;
 /// The grey ground and its roads, before the map's tiles: this many texels along its longer side.
 const GROUND_PIXELS: usize = 1536;
 /// The loop fills this share of the free area's width, or of its height.
 const FILL: f64 = 0.8;
 
 /// What an inset was made for: its zoom, the point (local metres) it is centred on, and whether
-/// the map's tiles were all there (otherwise: the roads over the coarse ground).
+/// the photos were all there (otherwise: the roads over the grey ground).
 type InsetAt = (u8, [f64; 2], bool);
+
+/// The finer photos the eye wants, finest first: each its zoom, the point (local metres) it is
+/// centred on and its half side in metres. The finest is as fine as the screen where the ground
+/// is nearest the eye (the bottom of the view); each next one twice as coarse and twice as wide,
+/// down to the photo over the whole ground (`drape`). Each lies mostly ahead of that ground: the
+/// view is in front of it.
+fn levels(cam: &Camera, cos: f64, drape: u8, height: f64) -> Vec<(u8, [f64; 2], f64)> {
+    let below = (cam.pitch + cam.fov / 2.0).min(89f64.to_radians());
+    let up = cam.dist * cam.pitch.sin();
+    let (sy, cy) = cam.yaw.sin_cos();
+    let back = cam.dist * cam.pitch.cos() - up / below.tan();
+    let near = [cam.target[0] - sy * back, cam.target[1] - cy * back];
+    let per_px = up / below.sin() * 2.0 * (cam.fov / 2.0).tan() / height.max(1.0);
+    let finest = ((156_543.0 * cos / per_px).log2().ceil() as i32).min(INSET_MAX_ZOOM as i32);
+    (0..LEVELS)
+        .map(|k| finest - k)
+        .take_while(|z| *z > drape as i32)
+        .map(|z| {
+            let half = INSET_PIXELS / 2.0 * 156_543.0 * cos / 2f64.powi(z);
+            (z as u8, [near[0] + sy * half / 2.0, near[1] + cy * half / 2.0], half)
+        })
+        .collect()
+}
 
 /// How wide a road is drawn on the 3D ground, in metres, and whether it is a path (drawn thin,
 /// in a darker grey, as on the map).
@@ -182,14 +207,14 @@ pub(super) struct Scene {
     bbox: [f64; 4],
     /// The light on the ground, from the elevation tiles at their full resolution.
     shade: Arc<Shade>,
-    /// Grey by altitude until the map's tiles are all there, then the map (`draped`): as it
-    /// is, and with the roads drawn on it and lit (`texture`).
+    /// The ground grey by altitude (`base`, unlit); laid on it and lit (`texture`): the roads of
+    /// the region's map until the photos are all there, then the photos (`draped`).
     base: Arc<Texture>,
     texture: Arc<Texture>,
     draped: bool,
-    /// The finer map where the eye looks close, with its zoom and the point (local metres) it is
-    /// centred on; and the one being made.
-    inset: Option<(Arc<Inset>, InsetAt)>,
+    /// The finer photos where the eye is close (see `levels`), each with what it was made for;
+    /// and whether one is being made.
+    insets: Vec<(Arc<Inset>, InsetAt)>,
     inset_busy: bool,
     /// The buildings beside the loop, once read (`None` until then, and in the tests).
     blocks: Option<Arc<Blocks>>,
@@ -255,12 +280,14 @@ fn tiles(bbox: [f64; 4], zoom: u8) -> Vec<(u32, u32)> {
     (t(y0 - 1.0)..=t(y1 + 1.0)).flat_map(|y| (t(x0 - 1.0)..=t(x1 + 1.0)).map(move |x| (x, y))).collect()
 }
 
-/// The ground's colour at a height while the map is awaited: grey, darker as it rises (lighter
-/// in the dark theme), the sea a shade apart.
+/// The ground's colour at a height while the photos are awaited, and where there is none: grey,
+/// darker as it rises (lighter in the dark theme); the sea of the blue of the photos' (out at
+/// sea they have none), darker in the dark theme as they are. Blue, green, red.
 fn tint(h: f32, lo: f32, hi: f32, dark: bool) -> [u8; 3] {
-    let v = if h <= 0.5 {
-        if dark { 44.0 } else { 208.0 }
-    } else {
+    if h <= 0.5 {
+        return if dark { [45, 30, 20] } else { [63, 41, 26] };
+    }
+    let v = {
         let t = ((h - lo.max(0.0)) / (hi - lo.max(0.0)).max(1.0)).clamp(0.0, 1.0);
         if dark { 70.0 + 80.0 * t } else { 238.0 - 78.0 * t }
     };
@@ -288,7 +315,7 @@ impl Scene {
         let base = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE };
         let texture = base.clone().lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, rough: Arc::new(t.coarser()), terrain: Arc::new(t), stale: Vec::new(), bbox, shade: Arc::new(shade), base: Arc::new(base), texture: Arc::new(texture), draped: false, inset: None, inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
+        let mut s = Scene { key, rough: Arc::new(t.coarser()), terrain: Arc::new(t), stale: Vec::new(), bbox, shade: Arc::new(shade), base: Arc::new(base), texture: Arc::new(texture), draped: false, insets: Vec::new(), inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
         s.frame(line, size);
         Some(s)
     }
@@ -420,90 +447,83 @@ impl LoopsView {
         }
     }
 
-    /// Lays the map on the ground, in its colours, once all its tiles are there. Until then, and
-    /// offline, the ground stays grey.
+    /// Lays the aerial photos on the ground once they are all there; where there is none (abroad,
+    /// at sea) the grey ground shows. Until then, and offline, the ground stays grey.
     fn ensure_drape(&mut self, cx: &mut Context<Self>) {
-        let (graph, dark) = (self.data.read(cx).loops.graph.clone(), self.snap.theme.dark);
         let Some(s) = self.scene.as_mut().filter(|s| !s.draped) else { return };
         let z = map_zoom(s.bbox);
         // Every tile asked for at once, so that they come together.
         let got: Vec<_> = tiles(s.bbox, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
         let Some(have) = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<std::collections::HashMap<(u32, u32), Arc<Vec<u8>>>>>() else { return };
         // ponytail: resampled and lit on the main thread, once per loop; in the background if it shows.
-        if let Some(t) = Texture::from_tiles(s.bbox, z, FADE, &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) {
-            s.base = Arc::new(t.clone());
-            s.texture = Arc::new(with_roads(t, graph.as_deref(), s.bbox, s.extent().0, dark).lit(&s.shade));
+        if let Some(t) = Texture::from_tiles(s.bbox, z, FADE, Some((&s.base, [0.0, 0.0, 1.0, 1.0])), &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) {
+            s.texture = Arc::new(t.lit(&s.shade));
             s.draped = true;
         }
     }
 
-    /// Lays a finer map around where the eye looks, when the map over the whole ground is coarser
-    /// than the screen there: the streets stay sharp close up. Made again (in the background) when
-    /// the eye looks a quarter of it away or comes nearer; the last one shows until then.
+    /// Lays finer photos where the eye is close (see `levels`): the ground nearest the eye as
+    /// sharp as the screen, coarser further on. One is made at a time (in the background), the
+    /// finest first, again when the eye has moved a quarter of it away; the last ones show until
+    /// then. While a level's photos are coming, the roads of the region's map over the grey ground.
     fn ensure_inset(&mut self, size: (f64, f64), cx: &mut Context<Self>) {
         let (graph, dark) = (self.data.read(cx).loops.graph.clone(), self.snap.theme.dark);
         let Some(s) = self.scene.as_mut().filter(|s| !s.inset_busy) else { return };
-        let t = &s.terrain;
+        let t = s.terrain.clone();
         let (gw, gh) = ((t.cols - 1) as f64 * t.dx, (t.rows - 1) as f64 * t.dy);
-        // Metres of ground a pixel of the screen covers, a little before where the eye looks:
-        // the ground nearer the eye matters more.
-        let per_px = 0.6 * s.cam.dist * 2.0 * (s.cam.fov / 2.0).tan() / size.1.max(1.0);
-        if gw.max(gh) / s.texture.w.max(s.texture.h) as f64 <= per_px * 1.5 {
-            return;
-        }
         let cos = ((s.bbox[0] + s.bbox[2]) / 2.0).to_radians().cos();
-        let z = ((156_543.0 * cos / per_px).log2().ceil() as u8).clamp(map_zoom(s.bbox) + 1, INSET_MAX_ZOOM.max(map_zoom(s.bbox) + 1));
-        let half = INSET_PIXELS / 2.0 * 156_543.0 * cos / 2f64.powi(z as i32);
-        let centre = [s.cam.target[0], s.cam.target[1]];
-        let (lat, lon) = (t.south + centre[1] / t.my, t.west + centre[0] / t.mx);
-        let (dlat, dlon) = (half / t.my, half / t.mx);
-        let b = [(lat - dlat).max(s.bbox[0]), (lon - dlon).max(s.bbox[1]), (lat + dlat).min(s.bbox[2]), (lon + dlon).min(s.bbox[3])];
-        if b[0] >= b[2] || b[1] >= b[3] {
-            return;
-        }
-        // The map's tiles are asked for at every frame until they are all there; until then the
-        // roads are drawn over the coarse ground, sharp at once.
-        let got: Vec<_> = tiles(b, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
-        let complete = got.iter().all(|(_, t)| t.is_some());
-        let Some(s) = self.scene.as_mut() else { return };
-        if let Some((_, (iz, c, done))) = &s.inset
-            && *iz >= z
-            && (c[0] - centre[0]).abs().max((c[1] - centre[1]).abs()) < half / 2.0
-            && (*done || !complete)
-        {
-            return;
-        }
-        if !complete && graph.is_none() {
-            return;
-        }
-        let have: std::collections::HashMap<(u32, u32), Arc<Vec<u8>>> = got.into_iter().filter_map(|(k, t)| Some((k, t?))).collect();
-        let t = &s.terrain;
-        let uv = [(b[1] - t.west) * t.mx / gw, (b[0] - t.south) * t.my / gh, (b[3] - t.west) * t.mx / gw, (b[2] - t.south) * t.my / gh].map(|v| v as f32);
-        let (bw, bh) = ((b[3] - b[1]) * t.mx, (b[2] - b[0]) * t.my);
-        let texel = 156_543.0 * cos / 2f64.powi(z as i32);
-        let (pw, ph) = (((bw / texel) as usize).clamp(2, 2048), ((bh / texel) as usize).clamp(2, 2048));
-        s.inset_busy = true;
-        let (shade, key, base) = (s.shade.clone(), s.key, s.base.clone());
-        cx.spawn(async move |this, cx| {
-            let inset = cx
-                .background_executor()
-                .spawn(async move {
-                    let p = if complete { Texture::from_tiles(b, z, 0.0, &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) } else { Some(base.crop(uv, pw, ph)) };
-                    p.map(|p| Inset { texture: with_roads(p, graph.as_deref(), b, bw, dark).lit_in(&shade, uv), uv })
-                })
-                .await;
-            this.update(cx, |v, cx| {
-                if let Some(s) = v.scene.as_mut().filter(|s| s.key == key) {
-                    s.inset_busy = false;
-                    if let Some(i) = inset {
-                        s.inset = Some((Arc::new(i), (z, centre, complete)));
+        let (bbox, wanted) = (s.bbox, levels(&s.cam, cos, map_zoom(s.bbox), size.1));
+        for (z, centre, half) in wanted.iter().copied() {
+            let (lat, lon) = (t.south + centre[1] / t.my, t.west + centre[0] / t.mx);
+            let (dlat, dlon) = (half / t.my, half / t.mx);
+            let b = [(lat - dlat).max(bbox[0]), (lon - dlon).max(bbox[1]), (lat + dlat).min(bbox[2]), (lon + dlon).min(bbox[3])];
+            if b[0] >= b[2] || b[1] >= b[3] {
+                continue;
+            }
+            // The photos are asked for at every frame until they are all there, the finest level's
+            // first.
+            let got: Vec<_> = tiles(b, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
+            let complete = got.iter().all(|(_, t)| t.is_some());
+            let Some(s) = self.scene.as_mut() else { return };
+            if s.insets.iter().any(|(_, (iz, c, done))| *iz == z && (c[0] - centre[0]).abs().max((c[1] - centre[1]).abs()) < half / 2.0 && (*done || !complete)) {
+                continue;
+            }
+            if !complete && graph.is_none() {
+                continue;
+            }
+            let have: std::collections::HashMap<(u32, u32), Arc<Vec<u8>>> = got.into_iter().filter_map(|(k, t)| Some((k, t?))).collect();
+            let uv = [(b[1] - t.west) * t.mx / gw, (b[0] - t.south) * t.my / gh, (b[3] - t.west) * t.mx / gw, (b[2] - t.south) * t.my / gh].map(|v| v as f32);
+            let (bw, bh) = ((b[3] - b[1]) * t.mx, (b[2] - b[0]) * t.my);
+            let texel = 156_543.0 * cos / 2f64.powi(z as i32);
+            let (pw, ph) = (((bw / texel) as usize).clamp(2, 2048), ((bh / texel) as usize).clamp(2, 2048));
+            s.inset_busy = true;
+            let (shade, key, base, graph) = (s.shade.clone(), s.key, s.base.clone(), graph.clone());
+            let zooms: Vec<u8> = wanted.iter().map(|w| w.0).collect();
+            cx.spawn(async move |this, cx| {
+                let inset = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let p = if complete { Texture::from_tiles(b, z, 0.0, Some((&base, uv)), &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) } else { Some(with_roads(base.crop(uv, pw, ph), graph.as_deref(), b, bw, dark)) };
+                        p.map(|p| Inset { texture: p.lit_in(&shade, uv), uv })
+                    })
+                    .await;
+                this.update(cx, |v, cx| {
+                    if let Some(s) = v.scene.as_mut().filter(|s| s.key == key) {
+                        s.inset_busy = false;
+                        if let Some(i) = inset {
+                            // It takes its level's place; levels no longer wanted go.
+                            s.insets.retain(|(_, (iz, _, _))| *iz != z && zooms.contains(iz));
+                            s.insets.push((Arc::new(i), (z, centre, complete)));
+                            s.insets.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+                        }
+                        cx.notify();
                     }
-                    cx.notify();
-                }
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+            return;
+        }
     }
 
     /// Stands the buildings beside the loop on the ground, once they are read (from the cache or
@@ -559,7 +579,7 @@ impl LoopsView {
             let mut hsh = std::collections::hash_map::DefaultHasher::new();
             let c = s.cam;
             (c.target.map(f64::to_bits), c.yaw.to_bits(), c.pitch.to_bits(), c.dist.to_bits(), w, h, s.key, s.draped, s.blocks.is_some(), fine).hash(&mut hsh);
-            (Arc::as_ptr(&s.texture) as usize, s.inset.as_ref().map(|(i, _)| Arc::as_ptr(i) as usize)).hash(&mut hsh);
+            (Arc::as_ptr(&s.texture) as usize, s.insets.iter().map(|(i, _)| Arc::as_ptr(i) as usize).collect::<Vec<_>>()).hash(&mut hsh);
             line.iter().for_each(|(_, c)| c.hash(&mut hsh));
             hsh.finish()
         };
@@ -567,13 +587,14 @@ impl LoopsView {
             return;
         }
         s.busy = true;
-        let (terrain, texture, blocks, cam, inset) = (if fine { s.terrain.clone() } else { s.rough.clone() }, s.texture.clone(), s.blocks.clone(), s.cam, s.inset.as_ref().map(|(i, _)| i.clone()));
+        let (terrain, texture, blocks, cam, insets) = (if fine { s.terrain.clone() } else { s.rough.clone() }, s.texture.clone(), s.blocks.clone(), s.cam, s.insets.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>());
         cx.spawn(async move |this, cx| {
             let img = cx
                 .background_executor()
                 .spawn(async move {
                     let solids = blocks.map(|b| b.seen(&cam)).unwrap_or_default();
-                    let px = terrain::render(&terrain, &texture, &solids, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], fine, inset.as_deref());
+                    let insets: Vec<&Inset> = insets.iter().map(|i| i.as_ref()).collect();
+                    let px = terrain::render(&terrain, &texture, &solids, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], fine, &insets);
                     render_image(w as u32, h as u32, px).map(Arc::new)
                 })
                 .await;
@@ -719,7 +740,8 @@ impl LoopsView {
                         .on_click(cx.listener(|this, _, _, cx| this.fly(cx))),
                 )
             })
-            // The ground carries the map's tiles: their makers are named, as on the map.
+            // The ground carries the IGN's photos, and the buildings and roads of OpenStreetMap:
+            // their makers are named, as on the map.
             .child(
                 div()
                     .id("loops-3d-credit")
@@ -734,7 +756,7 @@ impl LoopsView {
                     .text_color(t.dim)
                     .cursor_pointer()
                     .on_click(|_, _, cx| cx.open_url("https://www.openstreetmap.org/copyright"))
-                    .child(tr("© OpenStreetMap contributors", "© les contributeurs d'OpenStreetMap")),
+                    .child(tr("Photos IGN · © OpenStreetMap contributors", "Photos IGN · © les contributeurs d'OpenStreetMap")),
             )
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab_3d(e, e.modifiers.shift, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab_3d(e, true, cx)))
@@ -1040,8 +1062,37 @@ mod tests {
     }
 
     #[test]
+    fn the_photos_get_finer_toward_the_eye() {
+        use super::{INSET_MAX_ZOOM, levels};
+        use crate::logic::terrain::Camera;
+        // Looking north from 3 km, 30° down, on a view 1000 pixels high.
+        let cam = Camera { target: [5000.0, 5000.0, 0.0], yaw: 0.0, pitch: 30f64.to_radians(), dist: 3000.0, min_dist: 100.0, fov: 0.8 };
+        let l = levels(&cam, 0.7, 11, 1000.0);
+        assert_eq!(l.len(), 4, "{l:?}");
+        // The finest first: about the screen's pixel where the ground is nearest (1.6 m at 1.9 km).
+        assert_eq!(l[0].0, 17);
+        for w in l.windows(2) {
+            assert_eq!(w[0].0, w[1].0 + 1);
+            assert!((w[1].2 / w[0].2 - 2.0).abs() < 1e-9);
+        }
+        // Between the eye (2.4 km south of the target) and the target, ahead of the nearest ground.
+        let eye = 5000.0 - 3000.0 * 30f64.to_radians().cos();
+        assert!(l.iter().all(|(_, c, _)| (c[0] - 5000.0).abs() < 1e-6 && c[1] > eye), "{l:?}");
+        assert!(l[0].1[1] < 5000.0 && l[0].1[1] < l[1].1[1]);
+        // From far, the photo over the whole ground is enough; from very close, the finest zoom.
+        assert!(levels(&Camera { dist: 200_000.0, ..cam }, 0.7, 11, 1000.0).is_empty());
+        assert_eq!(levels(&Camera { dist: 50.0, ..cam }, 0.7, 11, 1000.0)[0].0, INSET_MAX_ZOOM);
+        // Looking straight down: around the target.
+        let down = levels(&Camera { pitch: 85f64.to_radians(), ..cam }, 0.7, 11, 1000.0);
+        assert!((down[0].1[1] - 5000.0).abs() < down[0].2, "{down:?}");
+    }
+
+    #[test]
     fn the_ground_darkens_as_it_rises() {
-        assert_eq!(tint(0.0, 0.0, 500.0, false), [208; 3]);
+        // The sea blue, deeper in the dark; the land grey.
+        assert_eq!(tint(0.0, 0.0, 500.0, false), [63, 41, 26]);
+        assert!(tint(0.0, 0.0, 500.0, true)[0] < 63);
+        assert!(tint(10.0, 0.0, 500.0, false).iter().all(|c| *c == tint(10.0, 0.0, 500.0, false)[0]));
         assert!(tint(10.0, 0.0, 500.0, false)[0] > tint(400.0, 0.0, 500.0, false)[0]);
         assert!(tint(10.0, 0.0, 500.0, true)[0] < tint(400.0, 0.0, 500.0, true)[0]);
         // Flat land, or below the sea: no division by nothing.

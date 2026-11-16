@@ -91,7 +91,9 @@ pub struct Data {
     pub fetch: Fetch,
     tiles: HashMap<(u8, u32, u32), Tile>,
     tiles_busy: usize,
-    /// Map tiles in the colours of the ground in 3D (`map::ground`), as pixels.
+    /// Aerial photos being downloaded for the ground in 3D (another server: a few at a time).
+    photos_busy: usize,
+    /// Aerial photos for the ground in 3D (`map::photo`), as pixels.
     ground: HashMap<(u8, u32, u32), Option<Arc<Vec<u8>>>>,
     /// Garmin's address (a local stand-in in the tests).
     api: String,
@@ -169,6 +171,7 @@ impl Data {
             fetch: Fetch::default(),
             tiles: HashMap::new(),
             tiles_busy: 0,
+            photos_busy: 0,
             ground: HashMap::new(),
             api: garmin::BASE.into(),
             loops: loops::Loops::default(),
@@ -616,8 +619,8 @@ impl Data {
         None
     }
 
-    /// The 256 × 256 pixels (BGRA) of a map tile for the ground in 3D, if ready; otherwise asks
-    /// for it, within the same two downloads at a time as `tile`.
+    /// The 256 × 256 pixels (BGRA) of an aerial photo's tile for the ground in 3D (alpha 0 where
+    /// there is none), if ready; otherwise asks for it, six downloads at a time.
     pub fn ground_tile(&mut self, k: (u8, u32, u32), cx: &mut Context<Self>) -> Option<Arc<Vec<u8>>> {
         // The tests never go online.
         if cfg!(test) {
@@ -626,27 +629,27 @@ impl Data {
         if let Some(t) = self.ground.get(&k) {
             return t.clone();
         }
-        if self.tiles_busy >= 2 {
+        if self.photos_busy >= 6 {
             return None;
         }
-        // ponytail: drops every tile past 300 (80 MB), an LRU if moving between loops shows refetches.
-        if self.ground.len() > 300 {
+        // ponytail: drops every tile past 450 (120 MB: the ground and four finer levels fit), an
+        // LRU if moving between loops shows refetches.
+        if self.ground.len() > 450 {
             self.ground.retain(|_, t| t.is_none());
         }
         self.ground.insert(k, None);
-        self.tiles_busy += 1;
-        let template = self.settings.get("tiles").filter(|s| !s.is_empty()).cloned().unwrap_or(tiles::DEFAULT_TILES.into());
+        self.photos_busy += 1;
         let dark = self.theme.dark;
         cx.spawn(async move |this, cx| {
             let px = cx
                 .background_executor()
                 .spawn(async move {
-                    let png = tiles::tile(&template, k.0, k.1, k.2).ok()?;
-                    map::ground(&png, dark).filter(|(w, h, _)| (*w, *h) == (256, 256)).map(|(_, _, px)| Arc::new(px))
+                    let png = tiles::tile(tiles::PHOTO_TILES, k.0, k.1, k.2).ok()?;
+                    map::photo(&png, dark).filter(|(w, h, _)| (*w, *h) == (256, 256)).map(|(_, _, px)| Arc::new(px))
                 })
                 .await;
             this.update(cx, |d, cx| {
-                d.tiles_busy -= 1;
+                d.photos_busy -= 1;
                 // A tile that can't be had stays empty, so it isn't asked again at every frame;
                 // one fetched for the other theme is dropped.
                 if px.is_some() && d.theme.dark == dark {

@@ -18,7 +18,7 @@ An astrolabe is the old instrument of astronomers and sailors: you take the heig
 - **Journal**: every activity, week by week, with a search, a filter by sport and the columns you choose, down to the gap to your usual pace and the time in each heart rate zone.
 - **Activity**: the map of the track, pace, heart rate and elevation curves pointing at each other, splits and laps.
 - **Calendar**, **Statistics** (any measure, grouping, period and sports), **Form** (load, fatigue, freshness, stated without advice), **Records** (road, trail, cycling, swimming) and a **Heatmap** of all your tracks.
-- **Loops**: click a start, ask for a distance, and get running or trail loops on OpenStreetMap's paths, with their climb, profile and a GPX file. Computed on your machine, offline once the region is downloaded.
+- **Loops**: click a start, ask for a distance, and get running or trail loops on OpenStreetMap's paths, with their climb, profile and a GPX file; GPX tracks from elsewhere can be imported. In 3D, the ground carries aerial photos in France. Computed on your machine, offline once the region is downloaded.
 - Light and dark, English and French, following your system.
 
 The [guide](book/src/pages.md) describes each page.
@@ -62,4 +62,4 @@ Work happens on `develop`; `main` holds what is released. [ARCHITECTURE.md](ARCH
 
 ## License
 
-[MIT](LICENSE). The IBM Plex fonts are under the [SIL Open Font License](assets/fonts/LICENSE-IBM-Plex.txt). Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors, under the [ODbL](https://opendatacommons.org/licenses/odbl/). Elevation from [Mapzen Terrain Tiles](https://github.com/tilezen/joerd/blob/master/docs/attribution.md) (SRTM, Copernicus EU-DEM and others).
+[MIT](LICENSE). The IBM Plex fonts are under the [SIL Open Font License](assets/fonts/LICENSE-IBM-Plex.txt). Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors, under the [ODbL](https://opendatacommons.org/licenses/odbl/). Elevation from [Mapzen Terrain Tiles](https://github.com/tilezen/joerd/blob/master/docs/attribution.md) (SRTM, Copernicus EU-DEM and others). Aerial photos of France in 3D from the [IGN](https://geoservices.ign.fr/bdortho) (BD ORTHO), under the [Licence Ouverte 2.0](https://www.etalab.gouv.fr/licence-ouverte-open-licence/).
