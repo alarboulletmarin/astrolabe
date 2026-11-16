@@ -950,7 +950,11 @@ impl Render for LoopsView {
         }
         let region = self.data.read(cx).loops.region;
         // The region at first; then each new set of loops, all of them in sight.
-        let chosen = found.get(self.selected);
+        // The selection this frame paints: a click handled below may select another loop (a
+        // point asked plans again from the first), and the chosen line, its grade and its
+        // arrows must all be of the same loop.
+        let selected = self.selected;
+        let chosen = found.get(selected);
         let generation = self.data.read(cx).loops.generation;
         let bbox = if found.is_empty() {
             Some(region.bbox)
@@ -1004,7 +1008,7 @@ impl Render for LoopsView {
             let top = (v0.cy - s0.1 / 2.0) * k - (view.cy - h / 2.0);
             img(raster.clone()).absolute().left(px(left as f32)).top(px(top as f32)).w(px((s0.0 * k) as f32)).h(px((s0.1 * k) as f32)).into_any_element()
         });
-        let lines: Vec<(Vec<[f64; 2]>, bool)> = found.iter().enumerate().map(|(i, l)| (l.line.clone(), i == self.selected)).collect();
+        let lines: Vec<(Vec<[f64; 2]>, bool)> = found.iter().enumerate().map(|(i, l)| (l.line.clone(), i == selected)).collect();
         // Which way the chosen loop runs: a chevron every 800 m, pointing to a point a little ahead.
         let arrows: Vec<([f64; 2], [f64; 2])> = chosen
             .map(|l| {
@@ -1023,7 +1027,7 @@ impl Render for LoopsView {
             })
             .unwrap_or_default();
         // The loop pointed at in the list, brought forward.
-        let pointed = self.card_hover.filter(|i| *i != self.selected).and_then(|i| found.get(i)).map(|l| l.line.clone());
+        let pointed = self.card_hover.filter(|i| *i != selected).and_then(|i| found.get(i)).map(|l| l.line.clone());
         // Loops of the last settings, while those of the new ones are looked for: faded.
         let fade = if self.data.read(cx).loops.planning { 0.45 } else { 1.0 };
         let start = self.start;

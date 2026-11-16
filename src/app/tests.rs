@@ -311,6 +311,47 @@ fn the_start_is_dragged_and_a_new_distance_plans_again(cx: &mut TestAppContext) 
     assert!(!shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.is_empty()));
 }
 
+/// A click on the map while a loop other than the first is chosen, its grade shown: the click
+/// selects the first loop again, and the frame that handles it paints one loop, not the grade of
+/// the one chosen before on the line of the first (out of bounds when that one is shorter).
+#[gpui::test]
+fn a_point_asked_with_another_loop_chosen_paints_one_loop(cx: &mut TestAppContext) {
+    use crate::logic::loops::Loop;
+    use gpui::Modifiers;
+    let (shell, cx) = start(cx, 3);
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    let (lat, lon) = (43.70, 7.26);
+    shell.update_in(cx, |s, _, cx| s.loops.update(cx, |l, cx| {
+        l.look_at(lat, lon, 15.0);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let screen = |cx: &mut gpui::VisualTestContext, la: f64, lo: f64| shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(la, lo));
+    // No network: the first click only sets the start.
+    let at = screen(cx, lat, lon);
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    assert!(shell.read_with(cx, |s, cx| s.loops.read(cx).start()).is_some());
+    // Two loops, flat then climbing 8 %, the first shorter: the second chosen.
+    let climbing = |n: usize| {
+        let line: Vec<[f64; 2]> = (0..n).map(|i| [lat + i as f64 * 1e-4, lon]).collect();
+        let eles = (0..n).map(|i| Some(100.0 + i.saturating_sub(n / 2) as f32 * 0.9)).collect();
+        Loop::from_track(line, eles, None)
+    };
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| d.loops.found = std::sync::Arc::new(vec![climbing(40), climbing(120)])));
+    shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| l.step(1, cx)));
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).selected()), 1);
+    // A point asked: the first loop is selected again, in the frame that paints the second.
+    let set = shell.read_with(cx, |s, cx| s.loops.read(cx).start()).unwrap();
+    let at = screen(cx, set.0, set.1);
+    cx.simulate_click(gpui::point(at.x + gpui::px(60.), at.y - gpui::px(60.)), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).pins().len()), 1);
+}
+
 /// Points on the Loops page: a click asks the loops to pass by a point; undo and redo; a point
 /// of the loop dragged, one taken away by a right click, one made by dragging the line.
 #[gpui::test]
