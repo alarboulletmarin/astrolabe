@@ -43,6 +43,21 @@ pub fn blend(top: Hsla, under: Hsla, share: f32) -> Hsla {
 }
 
 impl Theme {
+    /// A hovered button: a little of the text over what is under it, so it shows on any surface.
+    pub fn hover(&self) -> Hsla {
+        self.text.opacity(0.07)
+    }
+
+    /// A pressed button, a step darker than `hover`.
+    pub fn pressed(&self) -> Hsla {
+        self.text.opacity(0.13)
+    }
+
+    /// Hover of the close button: red, translucent like `hover`.
+    pub fn danger_hover(&self) -> Hsla {
+        Hsla { h: 0., s: 0.7, l: 0.5, a: 0.2 }
+    }
+
     /// Bref Dark and Bref Light.
     pub fn for_appearance(a: WindowAppearance) -> Theme {
         let dark = matches!(a, WindowAppearance::Dark | WindowAppearance::VibrantDark);

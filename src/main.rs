@@ -31,7 +31,7 @@ fn few_arenas() {
 fn main() {
     few_arenas();
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
+        .with_assets(ui::Assets)
         .run(|cx| {
             gpui_kit::init(cx);
             ui::theme::init_fonts(cx);

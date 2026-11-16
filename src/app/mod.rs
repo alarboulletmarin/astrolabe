@@ -333,47 +333,49 @@ impl Shell {
             .child(div().min_w_0().child(text))
     }
 
-    /// Minimise, maximise, close: a floating pill at the top right, which also moves the window.
+    /// Minimise, maximise, close, as in Bref: a bare group at the top right, with no background,
+    /// border or shadow of its own, so it sits on whatever is under it. The group also moves the
+    /// window.
     fn window_controls(&self, window: &Window, cx: &App) -> Div {
         let t = self.data.read(cx).theme;
         let controls = window.window_controls();
-        let button = |id: &'static str, name: IconName| {
+        let button = |id: &'static str, path: &'static str, over: Hsla| {
             div()
                 .id(id)
                 .size(px(24.))
-                .rounded(px(6.))
                 .flex()
                 .items_center()
                 .justify_center()
+                .rounded_full()
                 .cursor_pointer()
-                .hover(|d| d.bg(t.border))
-                // Keeps the press from the pill below: its window move hands the pointer to the
+                .hover(|s| s.bg(over))
+                .active(|s| s.bg(t.pressed()))
+                // Keeps the press from the group below: its window move hands the pointer to the
                 // compositor, and the release (the click) never comes back.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(icon(name, t.soft, 14.))
+                .child(svg().path(path).size(px(16.)).flex_none().text_color(t.text))
         };
         crate::ui::drag_window(
             div()
                 .absolute()
                 .top(px(8.))
                 .right(px(8.))
+                .h(px(34.))
                 .flex()
                 .items_center()
-                .gap(px(2.))
-                .p(px(3.))
-                .rounded(px(10.))
-                .bg(t.panel)
-                .border_1()
-                .border_color(t.border)
-                .shadow(vec![BoxShadow { color: hsla(0., 0., 0., 0.18), offset: point(px(0.), px(1.)), blur_radius: px(6.), spread_radius: px(0.), inset: false }])
+                .gap(px(8.))
+                .px(px(8.))
                 .occlude(),
         )
-        .when(controls.minimize, |d| d.child(button("win-min", IconName::Minus).on_click(|_, window, _| window.minimize_window())))
-        .when(controls.maximize, |d| {
-            let name = if window.is_maximized() { IconName::Copy } else { IconName::Square };
-            d.child(button("win-max", name).on_click(|_, window, _| window.zoom_window()))
+        .when(controls.minimize, |d| {
+            d.child(button("win-min", "window-minimize.svg", t.hover()).on_click(|_, window, _| window.minimize_window()))
         })
-        .child(button("win-close", IconName::X).on_click(|_, window, _| window.remove_window()))
+        .when(controls.maximize, |d| {
+            let path = if window.is_maximized() { "window-restore.svg" } else { "window-maximize.svg" };
+            d.child(button("win-max", path, t.hover()).on_click(|_, window, _| window.zoom_window()))
+        })
+        // Closing is the one button that warns: its hover is red.
+        .child(button("win-close", "window-close.svg", t.danger_hover()).on_click(|_, window, _| window.remove_window()))
     }
 }
 

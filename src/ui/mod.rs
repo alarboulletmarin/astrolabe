@@ -11,6 +11,30 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::{prelude::FluentBuilder, *};
 
+/// The bundled icon catalog, plus the window buttons' own icons (1.2 px strokes on a 16 px grid,
+/// the same as Bref's).
+pub struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        let shapes = match path {
+            "window-minimize.svg" => r#"<path d="M4 8H12"/>"#,
+            "window-maximize.svg" => r#"<path d="M4.5 4.5H11.5V11.5H4.5Z"/>"#,
+            "window-restore.svg" => r#"<path d="M3.5 6.5H9.5V12.5H3.5Z"/><path d="M10 8.5H12.5V3.5H7.5V6"/>"#,
+            "window-close.svg" => r#"<path d="M4.5 4.5L11.5 11.5M11.5 4.5L4.5 11.5"/>"#,
+            _ => return gpui_kit::assets::AllAssets.load(path),
+        };
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="black" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">{shapes}</svg>"#
+        );
+        Ok(Some(svg.into_bytes().into()))
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        gpui_kit::assets::AllAssets.list(path)
+    }
+}
+
 /// How long the pointer rests on something before its tooltip shows: gpui waits 500 ms, which
 /// reads as a tooltip that does not come.
 pub const TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
