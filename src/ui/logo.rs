@@ -1,65 +1,64 @@
-//! The logo: an astrolabe seen from the front. A graduated ring (the limbe) hung from its throne,
-//! and the alidade, the sighting rule, turning on the pivot. Drawn in a 100 × 100 box; the same
-//! figures are in `assets/icon.svg`.
+//! The logo: an astrolabe's plate from the front. The limb (a ring), the almucantars (circles of
+//! equal altitude, off the center toward the zenith, cut by the limb) and the zenith, the accent.
+//! Drawn in a 100 × 100 box; the same figures are in `assets/icon.svg`, and the bold ones for small
+//! sizes in `assets/icon-small.svg`.
 
 use gpui_kit::*;
 use std::f32::consts::PI;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Role {
-    Ink,
-    Accent,
-}
-
 pub struct Stroke {
     pub points: Vec<[f32; 2]>,
-    pub role: Role,
     pub width: f32,
 }
 
-const CENTER: [f32; 2] = [50.0, 55.0];
-const RING: f32 = 36.0;
-/// Angle of the alidade, upward to the right.
-const SIGHT: f32 = -35.0 * PI / 180.0;
+const CENTER: [f32; 2] = [50.0, 50.0];
+const LIMB: f32 = 42.0;
+const ZENITH: [f32; 2] = [50.0, 39.2];
 
-fn at(r: f32, angle: f32) -> [f32; 2] {
-    [CENTER[0] + r * angle.cos(), CENTER[1] + r * angle.sin()]
+/// One drawing: limb width, almucantar width, the almucantars as (center y, radius), zenith radius.
+struct Figure {
+    limb: f32,
+    line: f32,
+    circles: &'static [(f32, f32)],
+    zenith: f32,
 }
 
-fn circle(c: [f32; 2], r: f32) -> Vec<[f32; 2]> {
-    (0..=64).map(|i| [c[0] + r * (i as f32 * PI / 32.0).cos(), c[1] + r * (i as f32 * PI / 32.0).sin()]).collect()
+const FINE: Figure = Figure { limb: 7.0, line: 2.4, circles: &[(35.55, 16.37), (37.9, 9.6), (38.97, 3.95), (30.76, 25.7)], zenith: 4.0 };
+/// Fewer, thicker lines, for a size where the fine ones would blur together.
+const BOLD: Figure = Figure { limb: 9.0, line: 5.0, circles: &[(36.3, 14.52), (38.8, 5.3), (28.87, 28.79)], zenith: 6.0 };
+
+fn figure(bold: bool) -> &'static Figure {
+    if bold { &BOLD } else { &FINE }
 }
 
-/// Every line of the drawing. `fine`: the ticks every 10° too, for a size where they can be told
-/// apart; otherwise the twelve of the hours.
-pub fn strokes(fine: bool) -> Vec<Stroke> {
-    let ink = |points, width| Stroke { points, role: Role::Ink, width };
-    let mut out = vec![
-        ink(circle(CENTER, RING), 5.0), ink(circle([50.0, 10.0], 7.5), 3.5),
-        // The rete's ecliptic, off the center: what a stopwatch does not have.
-        ink(circle([50.0, 61.0], 14.0), 2.6),
-    ];
-    for i in 0..36 {
-        let major = i % 3 == 0;
-        if major || fine {
-            let a = i as f32 * PI / 18.0;
-            out.push(ink(vec![at(if major { 22.0 } else { 27.5 }, a), at(31.0, a)], if major { 3.4 } else { 1.8 }));
-        }
-    }
-    // The alidade, and a vane across each end.
-    let (a, b) = (at(-RING + 6.0, SIGHT), at(RING - 6.0, SIGHT));
-    let across = |p: [f32; 2]| {
-        let n = [-SIGHT.sin() * 7.0, SIGHT.cos() * 7.0];
-        vec![[p[0] - n[0], p[1] - n[1]], [p[0] + n[0], p[1] + n[1]]]
-    };
-    let accent = |points, width| Stroke { points, role: Role::Accent, width };
-    out.extend([accent(vec![a, b], 6.0), accent(across(a), 4.0), accent(across(b), 4.0)]);
+/// The circle (center (50, `cy`), radius `r`) up to the limb's center line. What passes the limb's
+/// inner edge lies under the limb, drawn after it.
+fn almucantar(cy: f32, r: f32) -> Vec<[f32; 2]> {
+    // At angle t, the distance² to the center is r² + d² + 2·d·r·sin t, with d < 0: the point is
+    // inside the limb when sin t is at least `low`.
+    let d = cy - CENTER[1];
+    let low = (LIMB * LIMB - r * r - d * d) / (2.0 * d * r);
+    let (from, to) = if low <= -1.0 { (0.0, 2.0 * PI) } else { (low.asin(), PI - low.asin()) };
+    arc([CENTER[0], cy], r, from, to)
+}
+
+fn arc(c: [f32; 2], r: f32, from: f32, to: f32) -> Vec<[f32; 2]> {
+    (0..=64).map(|i| from + (to - from) * i as f32 / 64.0).map(|t| [c[0] + r * t.cos(), c[1] + r * t.sin()]).collect()
+}
+
+/// Every ink line, in the order they are painted: the almucantars, then the limb over their ends.
+pub fn strokes(bold: bool) -> Vec<Stroke> {
+    let f = figure(bold);
+    let mut out: Vec<Stroke> = f.circles.iter().map(|&(cy, r)| Stroke { points: almucantar(cy, r), width: f.line }).collect();
+    out.push(Stroke { points: arc(CENTER, LIMB, 0.0, 2.0 * PI), width: f.limb });
     out
 }
 
-/// The logo at `size` pixels, in the ink and accent colors of the theme.
+/// The logo at `side` pixels, in the ink and accent colors of the theme.
 pub fn logo(side: f32, ink: Hsla, accent: Hsla) -> Canvas<()> {
-    let strokes = strokes(side >= 48.0);
+    let bold = side < 48.0;
+    let strokes = strokes(bold);
+    let zenith = figure(bold).zenith;
     canvas(
         |_, _, _| {},
         move |b, _, window, _| {
@@ -71,11 +70,11 @@ pub fn logo(side: f32, ink: Hsla, accent: Hsla) -> Canvas<()> {
                 path.move_to(p(s.points[0]));
                 s.points[1..].iter().for_each(|q| path.line_to(p(*q)));
                 if let Ok(path) = path.build() {
-                    window.paint_path(path, if s.role == Role::Ink { ink } else { accent });
+                    window.paint_path(path, ink);
                 }
             }
-            let r = px(k * 5.0);
-            window.paint_quad(fill(Bounds::new(point(p(CENTER).x - r, p(CENTER).y - r), size(r * 2.0, r * 2.0)), accent).corner_radii(r));
+            let (c, r) = (p(ZENITH), px(k * zenith));
+            window.paint_quad(fill(Bounds::new(point(c.x - r, c.y - r), size(r * 2.0, r * 2.0)), accent).corner_radii(r));
         },
     )
     .size(px(side))
@@ -83,12 +82,16 @@ pub fn logo(side: f32, ink: Hsla, accent: Hsla) -> Canvas<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Role, strokes};
+    use super::{CENTER, LIMB, strokes};
+
+    fn dist(p: [f32; 2]) -> f32 {
+        (p[0] - CENTER[0]).hypot(p[1] - CENTER[1])
+    }
 
     #[test]
     fn everything_is_drawn_inside_the_box() {
-        for fine in [false, true] {
-            for s in strokes(fine) {
+        for bold in [false, true] {
+            for s in strokes(bold) {
                 for p in &s.points {
                     assert!(p[0] - s.width / 2.0 >= 0.0 && p[0] + s.width / 2.0 <= 100.0 && p[1] - s.width / 2.0 >= 0.0 && p[1] + s.width / 2.0 <= 100.0, "{p:?}");
                 }
@@ -97,11 +100,20 @@ mod tests {
     }
 
     #[test]
-    fn the_hours_always_show_and_the_fine_ticks_come_with_size() {
-        let ticks = |fine| strokes(fine).iter().filter(|s| s.role == Role::Ink && s.points.len() == 2).count();
-        assert_eq!(ticks(false), 12);
-        assert_eq!(ticks(true), 36);
-        // The alidade is the accent: one rule and two vanes.
-        assert_eq!(strokes(false).iter().filter(|s| s.role == Role::Accent).count(), 3);
+    fn the_almucantars_stop_under_the_limb() {
+        for bold in [false, true] {
+            let s = strokes(bold);
+            let (limb, lines) = s.split_last().unwrap();
+            assert!(limb.points.iter().all(|&p| (dist(p) - LIMB).abs() < 0.01));
+            for line in lines {
+                assert!(line.points.iter().all(|&p| dist(p) <= LIMB + 0.01));
+            }
+            // The widest one is cut, and its two ends sit on the limb's center line.
+            let cut: Vec<_> = lines.iter().filter(|l| (dist(l.points[0]) - LIMB).abs() < 0.01).collect();
+            assert_eq!(cut.len(), 1);
+            assert!((dist(*cut[0].points.last().unwrap()) - LIMB).abs() < 0.01);
+        }
+        assert_eq!(strokes(false).len(), 5);
+        assert_eq!(strokes(true).len(), 4);
     }
 }
