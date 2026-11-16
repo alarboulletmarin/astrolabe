@@ -5,7 +5,10 @@
 use super::store::{cache_dir, write_atomic};
 use super::{USER_AGENT, agent, http_error, service_error};
 use std::fs;
+use std::io::Read;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, SystemTime};
 
 pub const DEFAULT_TILES: &str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 
@@ -84,7 +87,7 @@ fn fetch_with(client: &ureq::Agent, template: &str, z: u8, x: u32, y: u32) -> Re
     // One folder per server, so changing it never mixes two styles.
     let server: String = template.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     let path = cache_dir().join("tiles").join(server).join(format!("{z}/{x}/{y}"));
-    if let Ok(b) = fs::read(&path) {
+    if let Some(b) = read_used(&path) {
         return Ok(b);
     }
     let bytes = client.get(&url).call()?.body_mut().read_to_vec()?;
@@ -92,9 +95,88 @@ fn fetch_with(client: &ureq::Agent, template: &str, z: u8, x: u32, y: u32) -> Re
     Ok(bytes)
 }
 
+/// The most the map and photo tiles keep on disk. Past it, `trim_cache` takes away the least
+/// lately used down to four fifths of it (a route's photos fetched ahead are some 125 MB for
+/// 70 km: the last few routes' stay).
+const CACHE_MAX: u64 = 500 << 20;
+
+/// Reads a cached tile, marking it as used (its time of change, once a day at most: the cache
+/// is trimmed by it).
+fn read_used(path: &Path) -> Option<Vec<u8>> {
+    let mut f = fs::File::open(path).ok()?;
+    let mut b = Vec::new();
+    f.read_to_end(&mut b).ok()?;
+    let old = f.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e > Duration::from_secs(86_400)));
+    if old {
+        f.set_modified(SystemTime::now()).ok();
+    }
+    Some(b)
+}
+
+/// Keeps the map and photo tiles on disk under `CACHE_MAX` (see there). Blocks a moment
+/// (about 0.1 s for 30 000 tiles).
+pub fn trim_cache() {
+    trim(&cache_dir().join("tiles"), CACHE_MAX);
+}
+
+/// Past `max` bytes of files under `dir`, removes the least lately changed down to four fifths
+/// of it. The folders stay.
+fn trim(dir: &Path, max: u64) {
+    let mut files = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_dir() {
+                dirs.push(e.path());
+            } else {
+                files.push((m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len(), e.path()));
+            }
+        }
+    }
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    if total <= max {
+        return;
+    }
+    files.sort_unstable_by_key(|f| f.0);
+    for (_, len, path) in files {
+        if total <= max / 5 * 4 {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total -= len;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn the_cache_keeps_the_tiles_used_last() {
+        let dir = std::env::temp_dir().join(format!("astrolabe-trim-{}", std::process::id()));
+        let at = |name: &str| dir.join(name);
+        let day = |n: u64| SystemTime::now() - Duration::from_secs(86_400 * n);
+        for (name, age) in [("a/1", 5), ("a/2", 4), ("b/1", 3), ("b/2", 2), ("3", 1)] {
+            write_atomic(&at(name), &[0; 100], false).unwrap();
+            fs::File::options().write(true).open(at(name)).unwrap().set_modified(day(age)).unwrap();
+        }
+        // Read: used again, the newest now.
+        assert_eq!(read_used(&at("a/1")).unwrap().len(), 100);
+        assert!(read_used(&at("none")).is_none());
+        // Under the limit: nothing goes.
+        trim(&dir, 500);
+        assert!(at("a/2").exists());
+        // Over it: the least lately used, down to four fifths (here 320 bytes: three stay).
+        trim(&dir, 400);
+        let left: Vec<_> = ["a/1", "a/2", "b/1", "b/2", "3"].into_iter().filter(|n| at(n).exists()).collect();
+        assert_eq!(left, ["a/1", "b/2", "3"]);
+        // An empty folder, or none.
+        trim(&dir.join("nowhere"), 0);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn photos_fetched_ahead_stop_once_cancelled() {

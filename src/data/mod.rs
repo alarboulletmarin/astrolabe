@@ -127,6 +127,7 @@ impl Data {
         let mut data = Self::blank(theme);
         crate::lang::choose(data.settings.get("language").map(String::as_str));
         data.start(secrets::load_key, cx);
+        cx.background_executor().spawn(async { tiles::trim_cache() }).detach();
         data
     }
 
@@ -626,7 +627,12 @@ impl Data {
         if cfg!(test) {
             return;
         }
-        cx.background_executor().spawn(async move { tiles::photos_ahead(&keys, 8, &cancel) }).detach();
+        cx.background_executor()
+            .spawn(async move {
+                tiles::photos_ahead(&keys, 8, &cancel);
+                tiles::trim_cache();
+            })
+            .detach();
     }
 
     /// An aerial photo's tile for the ground in 3D, as the server gives it (JPEG; empty where it
