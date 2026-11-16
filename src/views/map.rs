@@ -30,11 +30,13 @@ pub struct MapState {
     pub hint: Option<Instant>,
     /// Room taken over the map on the left and at the bottom (a panel): the controls go beside it.
     pub inset: (f32, f32),
+    /// The IGN's aerial photos instead of the map.
+    pub photos: bool,
 }
 
 impl MapState {
     pub fn new() -> Self {
-        MapState { view: View::default(), bounds: Rc::new(Cell::new(Bounds::default())), drag: None, fitted: None, fit_at: None, click: None, hint: None, inset: (0.0, 0.0) }
+        MapState { view: View::default(), bounds: Rc::new(Cell::new(Bounds::default())), drag: None, fitted: None, fit_at: None, click: None, hint: None, inset: (0.0, 0.0), photos: false }
     }
 
     /// Fits the map to `bbox` when `subject` changed (or on demand), or when the map was resized
@@ -68,7 +70,7 @@ pub fn map_widget<V: 'static>(
     wheel_needs_ctrl: bool,
     cx: &mut Context<V>,
 ) -> Stateful<Div> {
-    let (view, bounds, dragging, hint, inset) = (m.view, m.bounds.clone(), m.drag.is_some(), m.hint, m.inset);
+    let (view, bounds, dragging, hint, inset, photos) = (m.view, m.bounds.clone(), m.drag.is_some(), m.hint, m.inset, m.photos);
     let t = data.read(cx).theme;
     let b = bounds.get();
     let (w, h) = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
@@ -78,10 +80,14 @@ pub fn map_widget<V: 'static>(
         let d = |x: &(u8, u32, u32, f64, f64, f64)| ((x.3 + x.5 / 2.0 - w / 2.0).powi(2) + (x.4 + x.5 / 2.0 - h / 2.0).powi(2)) as i64;
         d(a).cmp(&d(c))
     });
+    // With the photos, the map under them: it shows while they come, and where they have none
+    // (abroad, out at sea).
+    let layers: &[bool] = if photos { &[false, true] } else { &[false] };
     let imgs: Vec<AnyElement> = tiles
         .into_iter()
-        .filter_map(|(z, x, y, left, top, size)| {
-            let image = data.update(cx, |d, cx| d.tile((z, x, y), cx))?;
+        .flat_map(|(z, x, y, left, top, size)| layers.iter().map(move |p| (*p, z, x, y, left, top, size)))
+        .filter_map(|(photo, z, x, y, left, top, size)| {
+            let image = data.update(cx, |d, cx| d.tile((z, x, y), photo, cx))?;
             // Half a pixel more on each side hides the seams between scaled tiles.
             Some(
                 img(image)
@@ -241,7 +247,7 @@ pub fn map_widget<V: 'static>(
                 .text_color(t.soft)
                 .cursor_pointer()
                 .on_click(|_, _, cx| cx.open_url("https://www.openstreetmap.org/copyright"))
-                .child(tr("© OpenStreetMap contributors", "© les contributeurs d'OpenStreetMap")),
+                .child(if photos { tr("Photos IGN · © OpenStreetMap contributors", "Photos IGN · © les contributeurs d'OpenStreetMap") } else { tr("© OpenStreetMap contributors", "© les contributeurs d'OpenStreetMap") }),
         )
 }
 

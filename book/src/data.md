@@ -4,8 +4,9 @@ Astrolabe keeps everything on your machine and sends nothing anywhere but Garmin
 activities) and the map tile server (to draw the maps). If you use [Loops](loops.md), it also
 downloads the region's OpenStreetMap extract from Geofabrik, once, and elevation tiles from the
 Amazon open data bucket (`elevation-tiles-prod`). Neither one learns your start or your loops: Geofabrik
-sees which region, the tile server which tiles. In 3D, the ground's aerial photos come from the IGN
-(`data.geopf.fr`), along the route shown: that server sees the tiles around it, and so where it goes.
+sees which region, the tile server which tiles. The aerial photos (**Photo** on the Loops page) come
+from the IGN (`data.geopf.fr`): that server sees the tiles on screen, and in 3D those along the route
+shown, and so where it goes.
 An address typed as the start goes to OpenStreetMap's place search (`nominatim.openstreetmap.org`),
 which so learns it; coordinates typed are read on your machine.
 

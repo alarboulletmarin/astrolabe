@@ -89,8 +89,10 @@ pub struct Data {
     /// Settings that aren't secrets (the tile server).
     pub settings: HashMap<String, String>,
     pub fetch: Fetch,
-    tiles: HashMap<(u8, u32, u32), Tile>,
-    tiles_busy: usize,
+    /// The map's tiles, by (aerial photo or not, zoom, x, y), and how many of each kind are
+    /// being downloaded.
+    tiles: HashMap<(bool, u8, u32, u32), Tile>,
+    tiles_busy: [usize; 2],
     /// Aerial photos being downloaded for the ground in 3D (another server: a few at a time).
     photos_busy: usize,
     /// Aerial photos for the ground in 3D, as the server gives them (JPEG; empty where it has
@@ -172,7 +174,7 @@ impl Data {
             settings: store::load_settings(),
             fetch: Fetch::default(),
             tiles: HashMap::new(),
-            tiles_busy: 0,
+            tiles_busy: [0; 2],
             photos_busy: 0,
             ground: HashMap::new(),
             api: garmin::BASE.into(),
@@ -580,16 +582,18 @@ impl Data {
         })
     }
 
-    /// The tile if it's ready; otherwise asks for it (two downloads at a time, as the tile policy asks).
-    pub fn tile(&mut self, k: (u8, u32, u32), cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
+    /// The map's tile if it's ready, or the IGN's aerial photo there (`photo`); otherwise asks for
+    /// it: two downloads at a time, as OpenStreetMap's tile policy asks, or six of the IGN's.
+    pub fn tile(&mut self, (z, x, y): (u8, u32, u32), photo: bool, cx: &mut Context<Self>) -> Option<Arc<RenderImage>> {
         // The tests never go online: their maps draw on a blank background.
         if cfg!(test) {
             return None;
         }
+        let k = (photo, z, x, y);
         match self.tiles.get(&k) {
             Some(Tile::Ready(img)) => return Some(img.clone()),
             Some(_) => return None,
-            None if self.tiles_busy >= 2 => return None,
+            None if self.tiles_busy[photo as usize] >= if photo { 6 } else { 2 } => return None,
             None => {}
         }
         // ponytail: drops every tile past 600, an LRU if memory or refetches show up.
@@ -597,20 +601,24 @@ impl Data {
             self.tiles.retain(|_, t| matches!(t, Tile::Loading));
         }
         self.tiles.insert(k, Tile::Loading);
-        self.tiles_busy += 1;
+        self.tiles_busy[photo as usize] += 1;
         let template = self.settings.get("tiles").filter(|s| !s.is_empty()).cloned().unwrap_or(tiles::DEFAULT_TILES.into());
-        let (bg, fg) = (rgb(self.theme.bg), rgb(self.theme.text));
+        let (bg, fg, dark) = (rgb(self.theme.bg), rgb(self.theme.text), self.theme.dark);
         cx.spawn(async move |this, cx| {
             let img = cx
                 .background_executor()
                 .spawn(async move {
-                    let png = tiles::tile(&template, k.0, k.1, k.2).ok()?;
-                    let (w, h, px) = map::tint(&png, bg, fg)?;
+                    let (w, h, px) = if photo {
+                        // Where the IGN has none (abroad, out at sea): transparent, the map's ground shows.
+                        map::photo(&tiles::photo(z, x, y).ok()??, dark)?
+                    } else {
+                        map::tint(&tiles::tile(&template, z, x, y).ok()?, bg, fg)?
+                    };
                     Some(Arc::new(render_image(w, h, px)?))
                 })
                 .await;
             this.update(cx, |d, cx| {
-                d.tiles_busy -= 1;
+                d.tiles_busy[photo as usize] -= 1;
                 d.tiles.insert(k, img.map_or(Tile::Failed, Tile::Ready));
                 cx.notify();
             })

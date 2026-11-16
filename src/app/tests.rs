@@ -1210,3 +1210,19 @@ fn a_typed_start_is_found_and_brought_into_view(cx: &mut TestAppContext) {
     typed(cx, "   ");
     assert_eq!(asked.lock().unwrap().len(), n);
 }
+
+/// Photo or plain map in 2D too, before any loop: kept in the settings, shared with the 3D.
+#[gpui::test]
+fn the_map_shows_photos_in_2d(cx: &mut TestAppContext) {
+    let (shell, cx) = start(cx, 3);
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    let state = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| (s.loops.read(cx).map_photos(), s.data.read(cx).settings.get("loops.photos").cloned()));
+    // Photos by default.
+    assert_eq!(state(cx), (true, None));
+    click(cx, "loops-ground-1");
+    assert_eq!(state(cx), (false, Some("0".into())));
+    click(cx, "loops-ground-0");
+    assert_eq!(state(cx), (true, Some("1".into())));
+}

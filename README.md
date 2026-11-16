@@ -25,7 +25,7 @@ An astrolabe is the old instrument of astronomers and sailors: you take the heig
 
 ## Your data stay yours
 
-- Activities and their files live in the app's data folder, readable by you only. Nothing goes anywhere but Garmin and the map tile server; and, for loops, Geofabrik and the elevation tile server, which never see your start or your loops, in 3D the IGN's photo server, which sees the photo tiles along the route shown, and OpenStreetMap's place search, which sees an address typed as a start.
+- Activities and their files live in the app's data folder, readable by you only. Nothing goes anywhere but Garmin and the map tile server; and, for loops, Geofabrik and the elevation tile server, which never see your start or your loops, the IGN's photo server, which sees the photo tiles on screen (in 3D, along the route shown), and OpenStreetMap's place search, which sees an address typed as a start.
 - The Garmin key goes to your system's keyring, or to a file the app encrypts itself where there is none. It is never written in the clear.
 - Files are written whole or not at all; a damaged one is set aside, never thrown away.
 

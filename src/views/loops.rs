@@ -250,7 +250,8 @@ pub struct LoopsView {
     card_hover: Option<usize>,
     /// The chosen loop drawn in the colours of its grade.
     show_slope: bool,
-    /// The IGN's photos on the 3D ground (else the plain ground with the roads).
+    /// The IGN's photos on the map and on the 3D ground (else the map, and the plain ground with
+    /// the roads).
     pub(super) photos: bool,
     /// The climb pointed at in the list.
     climb_hover: Option<usize>,
@@ -1055,6 +1056,12 @@ impl LoopsView {
         self.name.update(cx, |s, cx| s.set_value(name, window, cx));
     }
 
+    /// Whether the map shows the aerial photos.
+    #[cfg(test)]
+    pub fn map_photos(&self) -> bool {
+        self.map.photos
+    }
+
     #[cfg(test)]
     pub fn hover(&self) -> Option<usize> {
         self.hover
@@ -1194,6 +1201,7 @@ impl Render for LoopsView {
         });
         self.map.inset = (PANEL as f32 + 14.0, band as f32);
         self.map.fit(generation, bbox, focus.is_some());
+        self.map.photos = self.photos;
 
         let b = self.map.bounds.get();
         let (w, h) = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
@@ -1543,11 +1551,9 @@ impl Render for LoopsView {
                     .flex()
                     .gap(px(6.))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .when(three, |d| {
-                        d.child(div().bg(t.bg).rounded(px(8.)).shadow_sm().child(segmented("loops-ground", vec![(tr("Photo", "Photo").into(), self.photos), (tr("Plain", "Plan").into(), !self.photos)], t, cx, |this: &mut LoopsView, i, _, cx| {
+                    .child(div().bg(t.bg).rounded(px(8.)).shadow_sm().child(segmented("loops-ground", vec![(tr("Photo", "Photo").into(), self.photos), (tr("Plain", "Plan").into(), !self.photos)], t, cx, |this: &mut LoopsView, i, _, cx| {
                             this.set_photos(i == 0, cx);
                         })))
-                    })
                     .when(!three, |d| {
                         d.child(div().bg(t.bg).rounded(px(8.)).shadow_sm().child(segmented("loops-relief", vec![(tr("Shading", "Ombrage").into(), self.show_relief), (tr("None", "Sans").into(), !self.show_relief)], t, cx, |this: &mut LoopsView, i, _, _| {
                             this.show_relief = i == 0;

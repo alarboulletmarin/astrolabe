@@ -163,6 +163,7 @@ pub fn segmented<V: 'static>(
             let pick = on_pick.clone();
             div()
                 .id((id, i))
+                .debug_selector(move || format!("{id}-{i}"))
                 .px(px(9.))
                 .py(px(2.))
                 .rounded(px(6.))

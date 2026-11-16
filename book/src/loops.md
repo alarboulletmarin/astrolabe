@@ -59,6 +59,10 @@ the way are not both shown. Each loop says:
 in the band along the bottom of the map. Pointing at the profile shows the place on the map, as a
 ring; pointing at the loop on the map shows it on the profile.
 
+At the map's top right, **Photo** shows the IGN's aerial photos instead of the map (**Plain**),
+in 2D as in 3D; where the IGN has none (abroad, far out at sea), the map shows. **Shading** lays
+the relief over either.
+
 Under the list, **Others** (`Ctrl + N`) proposes other loops from the same start, **Reverse** runs
 the chosen loop the other way round, and **GPX** (`Ctrl + S`) writes it where you say. The file
 carries the OpenStreetMap attribution its licence asks for.
