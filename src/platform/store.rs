@@ -189,8 +189,14 @@ pub fn load_routes() -> Result<Vec<crate::logic::loops::Route>, String> {
     let err = match fs::read(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("{unreadable} : {e}")),
-        Ok(b) => match serde_json::from_slice(&b) {
-            Ok(r) => return Ok(r),
+        Ok(b) => match serde_json::from_slice::<Vec<crate::logic::loops::Route>>(&b) {
+            Ok(mut r) => {
+                // Tracks imported before they were marked: no waypoints, no seed, never planned.
+                for x in &mut r {
+                    x.shape.track |= x.shape.waypoints.is_empty() && x.shape.seed == 0;
+                }
+                return Ok(r);
+            }
             Err(e) => e.to_string(),
         },
     };

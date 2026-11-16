@@ -753,6 +753,13 @@ fn a_loop_is_kept_and_opened_again(cx: &mut TestAppContext) {
     assert_eq!(a.shape.line.len(), b.shape.line.len());
     assert!(a.shape.line.iter().zip(&b.shape.line).all(|(p, q)| crate::logic::fit::metres(*p, *q) < 0.001));
     assert_eq!((a.name.as_str(), a.shape.dist, a.pins.len()), (b.name.as_str(), b.shape.dist, b.pins.len()));
+    // A planned loop is read back as planned; a track kept before tracks were marked, as a track.
+    assert!(!a.shape.track);
+    let mut old = a.clone();
+    (old.shape.waypoints, old.shape.seed) = (Vec::new(), 0);
+    let json = serde_json::to_string(&[old]).unwrap().replace(r#","track":false"#, "");
+    std::fs::write(crate::platform::store::data_dir().join("routes.json"), json).unwrap();
+    assert!(crate::platform::store::load_routes().unwrap()[0].shape.track);
     std::fs::remove_dir_all(&root).ok();
 }
 
