@@ -551,7 +551,7 @@ impl LoopsView {
     }
 
     /// Lays the aerial photos on the ground once they are all there; where there is none (abroad,
-    /// at sea) the grey ground shows. Until then, and offline, the ground stays grey.
+    /// at sea) the grey ground shows. Until then the ground stays grey.
     fn ensure_drape(&mut self, cx: &mut Context<Self>) {
         let Some(s) = self.scene.as_mut().filter(|s| !s.draped && self.photos) else { return };
         let z = map_zoom(s.bbox);

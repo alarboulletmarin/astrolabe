@@ -1,4 +1,4 @@
-//! The local store: what was synced, so the app opens instantly and offline.
+//! The local store: what was synced, so the app opens instantly.
 
 use crate::logic::activity::Activity;
 use crate::logic::fit::Derived;

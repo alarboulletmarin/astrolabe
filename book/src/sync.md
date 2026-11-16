@@ -1,4 +1,4 @@
-# Synchronising and working offline
+# Synchronising
 
 ## What a synchronisation does
 
@@ -25,15 +25,6 @@ why; a click starts it again.
 | five files fail in a row | the downloads stop, with the last error; the next sync resumes |
 | you click **Stop** in the settings | the downloads stop after the file in progress |
 | the network is down | the sync fails with *Network* and the reason; everything already downloaded stays |
-
-## Offline
-
-Everything Astrolabe has downloaded works without a network: the journal, the activities, their
-curves, the records, the statistics, the form. Map tiles come from the network the first time and
-are kept on disk; a place never shown before stays blank until the network is back.
-
-Only the activities added on Garmin since the last synchronisation are missing. When the network
-comes back, a click on the sync button fetches them.
 
 ## What isn't fetched again
 

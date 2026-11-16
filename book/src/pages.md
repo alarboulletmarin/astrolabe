@@ -56,7 +56,7 @@ lists the activities that pass there.
 
 A click on the map sets a start; the page proposes up to five loops of the distance you ask (exact or
 a range), on streets or trails, with their climb, altitude profile and a GPX file. The map is shaded
-with the relief. The region's paths are downloaded once, then everything works offline. See
+with the relief. The region's paths are downloaded once. See
 [Planning loops](loops.md).
 
 ## Settings

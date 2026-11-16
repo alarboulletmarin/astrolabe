@@ -34,5 +34,4 @@ resume at the next synchronisation. Nothing is lost. See [Synchronising](sync.md
 ## 4. Next launches
 
 Astrolabe opens on what it already has, then synchronises in the background: only the activities
-added since the last time are asked for. Without a network, everything already downloaded stays
-available.
+added since the last time are asked for.

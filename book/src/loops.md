@@ -3,8 +3,7 @@
 The **Loops** page (`Ctrl + L`, `Cmd + L` on macOS) proposes running and trail loops from a start you
 choose, on the real paths of OpenStreetMap. You get the distance, the climb and descent, the altitude
 profile, and a GPX file for your watch or another app. Everything is computed on your machine: there
-is no account, no credits, no routing service and no tracking. Once the region is downloaded, it
-works offline.
+is no account, no credits, no routing service and no tracking.
 
 ## The region, once
 

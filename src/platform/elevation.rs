@@ -1,5 +1,5 @@
 //! Elevation tiles (Terrarium PNG, from the AWS open data bucket), cached on disk like the map
-//! tiles: a place is fetched once, then read offline.
+//! tiles: a place is fetched once, then read from the disk.
 
 use super::store::{cache_dir, write_atomic};
 use super::{agent, service_error};

@@ -1416,8 +1416,8 @@ impl LoopsView {
                     tr("The region's paths are on disk: build the network to plan loops.", "Les chemins de la région sont sur le disque : construis le réseau pour tracer des boucles.").to_string()
                 } else {
                     trf(
-                        format!("To plan loops, Astrolabe downloads the paths of {region} once from Geofabrik (OpenStreetMap, a few hundred MB), and the elevation tiles that cover them. Then everything is computed here, offline."),
-                        format!("Pour tracer des boucles, Astrolabe télécharge une fois les chemins de {region} chez Geofabrik (OpenStreetMap, quelques centaines de Mo), et les tuiles d'altitude qui les couvrent. Ensuite tout est calculé ici, hors ligne."),
+                        format!("To plan loops, Astrolabe downloads the paths of {region} once from Geofabrik (OpenStreetMap, a few hundred MB), and the elevation tiles that cover them. Then everything is computed here."),
+                        format!("Pour tracer des boucles, Astrolabe télécharge une fois les chemins de {region} chez Geofabrik (OpenStreetMap, quelques centaines de Mo), et les tuiles d'altitude qui les couvrent. Ensuite tout est calculé ici."),
                     )
                 },
                 t.soft,
