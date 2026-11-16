@@ -607,6 +607,11 @@ fn the_loop_is_seen_in_3d(cx: &mut TestAppContext) {
     wait(cx, 2);
     let again = state(cx);
     assert!(again.1 == Some(true) && again.0 < Some(line.len() / 2), "{again:?}");
+    // A space typed in a field is the field's: the flight goes on.
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| l.focus_name(window, cx)));
+    cx.simulate_keystrokes("space");
+    wait(cx, 2);
+    assert_eq!(state(cx).1, Some(true));
     // Back on the map the flight stops.
     shell.update(cx, |s, cx| s.loops.update(cx, |l, cx| {
         l.show_3d(false);

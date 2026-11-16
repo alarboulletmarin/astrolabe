@@ -46,8 +46,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", LoopPrev, Some("Loops")),
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-n" } else { "ctrl-n" }, LoopsAgain, Some("Loops")),
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-s" } else { "ctrl-s" }, LoopExport, Some("Loops")),
-        // Pauses a flight over the loop; without one the key goes on to whoever wants it.
-        KeyBinding::new("space", LoopFly, Some("Loops")),
+        // Pauses a flight over the loop; without one the key goes on to whoever wants it. Never
+        // in a field: a space typed there is the field's.
+        KeyBinding::new("space", LoopFly, Some("Loops && !Input")),
         // In a field, the field's own undo comes first: its context is nearer.
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-z" } else { "ctrl-z" }, LoopUndo, Some("Loops")),
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-shift-z" } else { "ctrl-shift-z" }, LoopRedo, Some("Loops")),

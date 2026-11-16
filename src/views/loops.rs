@@ -770,6 +770,12 @@ impl LoopsView {
         self.km.update(cx, |s, cx| s.focus(window, cx));
     }
 
+    /// Puts the cursor in the name field, as a click in it would.
+    #[cfg(test)]
+    pub fn focus_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.name.update(cx, |s, cx| s.focus(window, cx));
+    }
+
     /// Types the name to keep a loop under.
     #[cfg(test)]
     pub fn name_as(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
