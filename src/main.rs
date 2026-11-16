@@ -12,7 +12,24 @@ mod views;
 
 use gpui_kit::*;
 
+/// glibc gives each thread that allocates its own pool, up to eight per core: the 3D view's
+/// pictures and photos, made on many threads and freed on another, then leave about 300 MB of
+/// holes in pools no thread comes back to. Two pools hold the same at no measured cost. Before
+/// any thread starts.
+fn few_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        const M_ARENA_MAX: i32 = -8;
+        // SAFETY: a glibc setting, called before any other thread exists.
+        unsafe { mallopt(M_ARENA_MAX, 2) };
+    }
+}
+
 fn main() {
+    few_arenas();
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(|cx| {
