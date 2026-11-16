@@ -4,10 +4,11 @@
 USAGE
     scripts/demo-data.py DIR [--days N] [--seed S] [--today YYYY-MM-DD] [--lang en|fr] [--theme light|dark]
 
-DIR receives `astrolabe/activities.json`, `astrolabe/derived.json` and `astrolabe/settings`:
-point the app at it with XDG_DATA_HOME=DIR (Linux). The activities, their tracks (loops around
-Annecy), heart rates and efforts are invented; the same seed gives the same folder. No file of
-activity is written, so an activity's page shows its map but asks Garmin for its curves.
+DIR receives `astrolabe/activities.json`, `astrolabe/derived.json`, `astrolabe/settings` and a
+FIT file per activity in `astrolabe/fit/`: point the app at it with XDG_DATA_HOME=DIR (Linux).
+The activities, their tracks (loops around Annecy), curves, laps and efforts are invented; the
+same seed gives the same folder. The app derives the map lines, profiles and efforts from the
+FIT files at launch, as it does after an upgrade.
 
     scripts/demo-data.py /tmp/demo --today 2026-10-25
     XDG_DATA_HOME=/tmp/demo cargo run
@@ -17,30 +18,33 @@ import datetime as dt
 import json
 import math
 import random
+import struct
+import zipfile
 from pathlib import Path
 
 CENTRE = (45.899, 6.129)
 EFFORTS = [400.0, 1000.0, 1609.344, 5000.0, 10_000.0, 15_000.0, 20_000.0, 21_097.5, 42_195.0, 50_000.0, 100_000.0, 1500.0, 40_000.0]
-VERSION = 2  # logic/fit.rs: VERSION
 PROFILE = 48  # logic/fit.rs: PROFILE
 BAND = 5.0  # logic/fit.rs: BAND
 
 # (type key, names, km range, speed in km/h, climb per km, mean heart rate)
 SPORTS = {
-    "running": (["Morning run", "Easy run", "Tempo", "Long run", "Intervals", "Lakeside loop"], (5, 22), (10.5, 13.5), (5, 20), 148),
+    "running": ([], (5, 22), (10.5, 13.5), (5, 20), 148),
     "trail_running": (["Trail", "Ridge loop", "Forest trail"], (8, 28), (7, 9.5), (35, 70), 152),
     "road_biking": (["Ride", "Lake tour", "Hill ride"], (30, 95), (25, 31), (8, 20), 132),
     "lap_swimming": (["Pool"], (1.5, 3.2), (2.6, 3.2), (0, 0), 128),
     "walking": (["Walk"], (3, 8), (4.5, 5.5), (2, 10), 98),
     "hiking": (["Hike", "Summit"], (8, 18), (3.5, 4.5), (50, 90), 118),
 }
+# A run's name by its length: under 10 km, under 18, longer.
+RUN_NAMES = [["Intervals", "Easy run", "Tempo"], ["Morning run", "Lakeside loop", "Tempo"], ["Long run"]]
 # The usual week: weekday (0 = Monday) and sport. Some sessions are skipped; one week in five is lighter.
 PLAN = [(1, "running"), (2, "lap_swimming"), (3, "running"), (5, "road_biking"), (6, "running"), (6, "walking")]
 
 def loop(rng, km):
     """A closed, wobbly loop of about `km` that starts and ends at home, a point every 50 m, as [lat, lon]."""
     radius = km * 1000 / (2 * math.pi) / 1.15
-    phi = rng.uniform(0, 2 * math.pi)
+    phi = rng.uniform(0.55 * math.pi, 0.95 * math.pi)  # away from the lake, south-east of home
     phase = [rng.uniform(0, 2 * math.pi) for _ in range(3)]
     n = max(8, int(km * 20))
     metres_lat = 111_320
@@ -79,6 +83,124 @@ def bands(rng, seconds, mean):
     return [round(seconds * w / total, 1) for w in weights]
 
 
+FIT_EPOCH = dt.datetime(1989, 12, 31)
+CRC_TABLE = [0x0000, 0xCC01, 0xD801, 0x1400, 0xF001, 0x3C00, 0x2800, 0xE401, 0xA001, 0x6C00, 0x7800, 0xB401, 0x5000, 0x9C01, 0x8801, 0x4400]
+# (global message, local type, [(field number, struct format, FIT base type)])
+FILE_ID = (0, 0, [(0, "B", 0x00), (1, "H", 0x84), (4, "I", 0x86)])
+RECORD = (20, 1, [(253, "I", 0x86), (0, "i", 0x85), (1, "i", 0x85), (2, "H", 0x84), (3, "B", 0x02), (5, "I", 0x86), (6, "H", 0x84)])
+LAP = (19, 2, [(253, "I", 0x86), (2, "I", 0x86), (7, "I", 0x86), (8, "I", 0x86), (9, "I", 0x86), (15, "B", 0x02), (21, "H", 0x84)])
+INVALID = {"i": 0x7FFFFFFF, "I": 0xFFFFFFFF, "H": 0xFFFF, "B": 0xFF}
+
+
+def crc16(data):
+    crc = 0
+    for byte in data:
+        for nibble in (byte & 0xF, byte >> 4):
+            tmp = CRC_TABLE[crc & 0xF]
+            crc = (crc >> 4) & 0x0FFF
+            crc ^= tmp ^ CRC_TABLE[nibble]
+    return crc
+
+
+def fit_file(start, samples, laps):
+    """A FIT activity: `samples` are (seconds, lat, lon, alt, hr, metres, m/s), lat and lon None
+    without GPS; `laps` are (start s, seconds, metres, mean hr, ascent)."""
+    out = bytearray()
+
+    def define(msg):
+        num, local, fields = msg
+        out.extend(struct.pack("<BBBHB", 0x40 | local, 0, 0, num, len(fields)))
+        for n, fmt, base in fields:
+            out.extend(struct.pack("<BBB", n, struct.calcsize(fmt), base))
+
+    def write(msg, values):
+        _, local, fields = msg
+        out.append(local)
+        for (_, fmt, _), v in zip(fields, values):
+            out.extend(struct.pack("<" + fmt, INVALID[fmt] if v is None else v))
+
+    t0 = int((start - FIT_EPOCH).total_seconds())
+    semi = 2**31 / 180
+    define(FILE_ID)
+    write(FILE_ID, [4, 255, t0])
+    define(RECORD)
+    for t, lat, lon, alt, hr, d, v in samples:
+        write(RECORD, [t0 + round(t), None if lat is None else round(lat * semi), None if lon is None else round(lon * semi),
+                       round((alt + 500) * 5), round(hr), round(d * 100), round(v * 1000)])
+    define(LAP)
+    for s, secs, metres, hr, ascent in laps:
+        write(LAP, [t0 + round(s + secs), t0 + round(s), round(secs * 1000), round(secs * 1000), round(metres * 100), round(hr), round(ascent)])
+    head = struct.pack("<BBHI4s", 14, 0x20, 2132, len(out), b".FIT")
+    head += struct.pack("<H", crc16(head))
+    body = head + bytes(out)
+    return body + struct.pack("<H", crc16(body))
+
+
+def curves(rng, key, name, line, km, seconds, climb, mean_hr):
+    """Samples every 3 s along `line`: slower uphill, the heart following the effort with a lag,
+    warming up over the first minutes. Returns the samples and the laps."""
+    total = km * 1000
+    if line:
+        steps = [fit_metres(a, b) for a, b in zip(line, line[1:])]
+        scale = total / sum(steps)
+        cum = [0.0]
+        for m in steps:
+            cum.append(cum[-1] + m * scale)
+    # Hills: a few random waves, flat at both ends (a loop), scaled to `climb` metres of ascent.
+    base = rng.uniform(440, 700)
+    waves = [(n, rng.uniform(0.2, 1) / n, rng.uniform(0, 2 * math.pi)) for n in range(1, 9)]
+    shape = lambda x: math.sin(math.pi * x) * sum(a * math.sin(2 * math.pi * n * x + ph) for n, a, ph in waves)
+    grid = [shape(i / 500) for i in range(501)]
+    lift = -min(grid)
+    rise = sum(max(0, b - a) for a, b in zip(grid, grid[1:])) or 1
+
+    def alt(d):
+        return base + (shape(d / total) + lift) * climb / rise
+
+    def grade(d):
+        return (alt(min(d + 20, total)) - alt(max(d - 20, 0))) / 40
+
+    steep = {"road_biking": 8, "lap_swimming": 0, "running": 4}.get(key, 6)
+    # Intervals: 400 m fast, 200 m easy, after a 2 km warm-up and before a 1.5 km cool-down.
+    fast = lambda d: name == "Intervals" and 2000 < d < total - 1500 and (d - 2000) % 600 < 400
+
+    def weight(d):
+        return min(3.0, max(0.5, 1 + steep * grade(d))) * (0.8 if fast(d) else 1.12 if name == "Intervals" else 1)
+
+    mean_w = sum(weight(total * i / 400) for i in range(400)) / 400
+    v0 = total / seconds * mean_w
+    pos, i, t, d, hr = None, 0, 0.0, 0.0, mean_hr - 35
+    samples, wobble = [], 0.0
+    while d < total:
+        if line:
+            while i < len(cum) - 2 and cum[i + 1] < d:
+                i += 1
+            f = (d - cum[i]) / max(cum[i + 1] - cum[i], 1e-9)
+            pos = [line[i][k] + (line[i + 1][k] - line[i][k]) * f for k in (0, 1)]
+        wobble = 0.9 * wobble + rng.gauss(0, 0.02)
+        v = v0 / weight(d) * (1 + wobble)
+        target = mean_hr + max(-12, min(12, 100 * grade(d))) - max(0, 25 * (1 - t / 600)) + (10 if fast(d) else 0)
+        hr += (target - hr) * 0.06 + rng.gauss(0, 0.4)
+        samples.append((t, pos and pos[0], pos and pos[1], alt(d) + rng.gauss(0, 0.3), hr, d, v))
+        t += 3
+        d += v * 3
+    samples.append((t, line[-1][0] if line else None, line[-1][1] if line else None, alt(total), hr, total, v))
+    every = {"road_biking": 5000, "lap_swimming": 500}.get(key, 1000)
+    laps, lap = [], [samples[0]]
+    for s in samples[1:]:
+        lap.append(s)
+        if s[5] - lap[0][5] >= every or s is samples[-1]:
+            ascent = sum(max(0, b[3] - a[3]) for a, b in zip(lap[::10], lap[10::10]))
+            laps.append((lap[0][0], s[0] - lap[0][0], s[5] - lap[0][5], sum(x[4] for x in lap) / len(lap), ascent))
+            lap = [s]
+    return samples, laps
+
+
+def fit_metres(a, b):
+    lat = math.radians((a[0] + b[0]) / 2)
+    return math.hypot((b[0] - a[0]) * 111_320, (b[1] - a[1]) * 111_320 * math.cos(lat))
+
+
 def outing(rng, aid, day, key, fitness):
     names, km_range, speed_range, climb_range, hr = SPORTS[key]
     # Five usual loops per sport, ridden a little differently each time (a few metres of GPS noise).
@@ -93,7 +215,7 @@ def outing(rng, aid, day, key, fitness):
     start = dt.datetime.combine(day, dt.time(hour, rng.randrange(0, 60, 5)))
     act = {
         "activityId": aid,
-        "activityName": rng.choice(names),
+        "activityName": rng.choice(RUN_NAMES[(km >= 10) + (km >= 18)] if key == "running" else names),
         "startTimeLocal": start.strftime("%Y-%m-%d %H:%M:%S"),
         "activityType": {"typeKey": key},
         "distance": round(km * 1000, 1),
@@ -115,9 +237,13 @@ def outing(rng, aid, day, key, fitness):
         "profile": profile(rng, climb),
         "hr_bands": bands(rng, seconds, mean_hr),
         "max_hr": round(mean_hr + rng.uniform(12, 25)),
-        "version": VERSION,
+        # Older than the app: derived again from the FIT file at launch.
+        "version": 0,
     }
-    return act, derived
+    samples, laps = curves(rng, key, act["activityName"], derived["line"], km, seconds, climb, mean_hr)
+    act["duration"] = round(samples[-1][0], 1)
+    act["averageHR"] = round(sum(x[4] for x in samples) / len(samples))
+    return act, derived, fit_file(start, samples, laps)
 
 
 def main():
@@ -131,7 +257,7 @@ def main():
     a = p.parse_args()
 
     rng = random.Random(a.seed)
-    acts, derived = [], {}
+    acts, derived, fits = [], {}, {}
     aid = 10_000_000_000
     for back in range(a.days, -1, -1):
         day = a.today - dt.timedelta(days=back)
@@ -151,23 +277,38 @@ def main():
             if back > 6 and (rng.random() < (0.45 if light else 0.15) or (key == "walking" and rng.random() < 0.5)):
                 continue
             aid += rng.randint(1, 40)
-            act, d = outing(rng, aid, day, key, fitness)
+            act, d, fit = outing(rng, aid, day, key, fitness)
             acts.append(act)
             derived[str(aid)] = d
+            fits[aid] = fit
+        # A run on the last day when the usual week has nothing that day (a Monday).
+        if back == 0 and day.weekday() not in {w for w, _ in PLAN}:
+            aid += rng.randint(1, 40)
+            act, d, fit = outing(rng, aid, day, "running", fitness)
+            act["startTimeLocal"] = act["startTimeLocal"][:11] + "07:10:00"
+            acts.append(act)
+            derived[str(aid)] = d
+            fits[aid] = fit
     # Hikes in summer.
     for year in sorted({a.today.year - 1, a.today.year}):
         for day in (dt.date(year, 7, 14), dt.date(year, 8, 10)):
             if day <= a.today:
                 aid += 7
-                act, d = outing(rng, aid, day, "hiking", 1.0)
+                act, d, fit = outing(rng, aid, day, "hiking", 1.0)
                 acts.append(act)
                 derived[str(aid)] = d
+                fits[aid] = fit
     acts.sort(key=lambda x: x["startTimeLocal"], reverse=True)
 
     out = a.dir / "astrolabe"
     out.mkdir(parents=True, exist_ok=True)
     (out / "activities.json").write_text(json.dumps(acts))
     (out / "derived.json").write_text(json.dumps(derived))
+    (out / "fit").mkdir(exist_ok=True)
+    for aid, fit in fits.items():
+        # Garmin serves the file in a ZIP; the app keeps it so.
+        with zipfile.ZipFile(out / "fit" / f"{aid}.zip", "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(f"{aid}_ACTIVITY.fit", fit)
     (out / "settings").write_text(f"language={a.lang}\ntheme={a.theme}\n")
     print(f"{len(acts)} made-up activities in {out}")
 
