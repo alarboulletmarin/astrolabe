@@ -31,9 +31,33 @@ The system packages needed on each platform are listed in the [install guide](bo
 - **Health data stay local**: the key goes to the system keyring or to the encrypted file, never in the clear; local files are written atomically and readable by the user alone; nothing is destroyed on disk. Tests never touch the real keyring.
 - **A deliberate shortcut** carries a `// ponytail:` comment that names its limit and what would come next.
 
+## Tests
+
+- Pure functions are tested in their own module (`src/logic/` needs neither gpui nor disk).
+- Every user path is tested on GPUI's test platform in `src/app/tests.rs`. A new feature adds its path there.
+- FIT parsing runs on the files of `tests/fixtures`. Add a small file there rather than reading one from your own account.
+- Sync flows run against a local stand-in for Garmin; no test touches the network or the real keyring.
+- Ignored benchmarks time a large made-up history. Run them with `cargo test --release --locked -- --ignored --nocapture`; their results are in the guide's [Performance](book/src/performance.md) page.
+
 ## Documentation
 
-A visible feature updates the [user guide](book/src/introduction.md) (and the README when it changes what the app is), and the changelog. Do not add screenshots made from real data: tracks, places and health figures are private. `scripts/demo-data.py DIR` writes a made-up athlete's folder; open it with `XDG_DATA_HOME=DIR`.
+Each kind of reader has one place:
+
+| Reader | Place |
+|---|---|
+| someone deciding whether to try Astrolabe | `README.md` and the website, `docs/index.html`: what it is, why, how to install. Short. |
+| a user | the user guide, `book/src/` (an [mdBook](https://rust-lang.github.io/mdBook/)), one page per screen or subject |
+| a contributor | `CONTRIBUTING.md`, `ARCHITECTURE.md`, `RELEASING.md` |
+
+A visible feature updates:
+
+- the page of the guide on its subject, or a new page listed in `book/src/SUMMARY.md`; and `book/src/shortcuts.md` for a key;
+- the README and the feature list of `docs/index.html`, only for a feature worth a line there;
+- `CHANGELOG.md`.
+
+Write the guide in short sentences, one idea per bullet, keys in backticks, button and command names in bold, interface labels as they appear in English (the interface follows the system language, English or French). Describe what the code does, and name no other app. Do not add screenshots made from real data: tracks, places and health figures are private. Where a screenshot belongs, leave a `<!-- screenshot: … -->` comment. `scripts/demo-data.py DIR` writes a made-up athlete's folder; open it with `XDG_DATA_HOME=DIR`.
+
+CI builds the guide and checks every link (`.github/workflows/docs.yml`); pushes to `main` publish it with the website.
 
 ## Commits and pull requests
 

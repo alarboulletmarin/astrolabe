@@ -1,0 +1,45 @@
+name: Bug report
+description: Something does not work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Never paste your Garmin key, a token or real activity data (tracks, places, health figures) here. Describe the problem instead.
+  - type: textarea
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the Journal…
+        2. Click…
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Astrolabe version
+      description: The release you installed (see the releases page), or the output of `git describe` when built from source.
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: System
+      options:
+        - Linux (Wayland)
+        - Linux (X11)
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: How Astrolabe was installed
+      placeholder: Arch package, installer, zip, dmg, built from source…
+  - type: textarea
+    attributes:
+      label: Anything else
+      description: The sport or kind of activity involved, a message shown by the app. No personal data.
