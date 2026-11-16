@@ -17,6 +17,7 @@ pkgbase = astrolabe
 	optdepends = vulkan-driver: a Vulkan driver for your GPU is required to open the window
 	optdepends = gnome-keyring: where the Garmin key is kept (or kwallet, keepassxc); without one, an encrypted file is used
 	options = !debug
+	options = !lto
 	source = astrolabe-0.1.0.tar.gz::https://github.com/alarboulletmarin/astrolabe/archive/refs/tags/v0.1.0.tar.gz
 	sha256sums = SKIP
 

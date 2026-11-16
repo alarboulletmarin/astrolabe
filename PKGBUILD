@@ -11,7 +11,8 @@ makedepends=('cargo' 'fontconfig' 'freetype2')
 optdepends=('vulkan-driver: a Vulkan driver for your GPU is required to open the window'
             'gnome-keyring: where the Garmin key is kept (or kwallet, keepassxc); without one, an encrypted file is used')
 # The binary is stripped at build time: a -debug package would be empty.
-options=('!debug')
+# makepkg's lto turns the C objects (ring, wayland) into GCC bitcode, which rust-lld cannot link.
+options=('!debug' '!lto')
 # Pinned by scripts/release.sh once the release tarball exists.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')

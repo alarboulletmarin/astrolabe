@@ -14,7 +14,8 @@ optdepends=('vulkan-driver: a Vulkan driver for your GPU is required to open the
             'gnome-keyring: where the Garmin key is kept (or kwallet, keepassxc); without one, an encrypted file is used')
 # The binary is stripped at build time: a -debug package would be empty, and its
 # file would clash between astrolabe and astrolabe-git.
-options=('!debug')
+# makepkg's lto turns the C objects (ring, wayland) into GCC bitcode, which rust-lld cannot link.
+options=('!debug' '!lto')
 provides=('astrolabe')
 conflicts=('astrolabe')
 source=("git+$url.git")
