@@ -15,7 +15,7 @@ optdepends=('vulkan-driver: a Vulkan driver for your GPU is required to open the
 options=('!debug' '!lto')
 # Pinned by scripts/release.sh once the release tarball exists.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('8f54969fcb7f1fe25c0daa0c5db8f3db94a00e215387c18d53a3267956c5c495')
 
 prepare() {
     cd "$pkgname-$pkgver"

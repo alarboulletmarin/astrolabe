@@ -19,6 +19,6 @@ pkgbase = astrolabe
 	options = !debug
 	options = !lto
 	source = astrolabe-0.1.0.tar.gz::https://github.com/alarboulletmarin/astrolabe/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 8f54969fcb7f1fe25c0daa0c5db8f3db94a00e215387c18d53a3267956c5c495
 
 pkgname = astrolabe
