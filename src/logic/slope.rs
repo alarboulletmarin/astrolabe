@@ -12,8 +12,9 @@ const DROP: f32 = 10.0;
 const MIN_GAIN: f32 = 25.0;
 const MIN_GRADE: f32 = 0.03;
 
-/// The grade at each point, rise over run across `SPAN` metres around it (`None` where an
-/// altitude is missing).
+/// The grade at each point, rise over run across `SPAN` metres around it, and at least from the
+/// point before to the one after (a track with sparse points) (`None` where an altitude is
+/// missing).
 pub fn grades(along: &[f32], eles: &[Option<f32>]) -> Vec<Option<f32>> {
     let n = along.len().min(eles.len());
     let (mut lo, mut hi) = (0, 0);
@@ -25,6 +26,7 @@ pub fn grades(along: &[f32], eles: &[Option<f32>]) -> Vec<Option<f32>> {
             while hi + 1 < n && along[hi + 1] - along[i] <= SPAN / 2.0 {
                 hi += 1;
             }
+            let (lo, hi) = (lo.min(i.saturating_sub(1)), hi.max((i + 1).min(n - 1)));
             let run = along[hi] - along[lo];
             match (eles[lo], eles[hi]) {
                 (Some(a), Some(b)) if run > 1.0 => Some((b - a) / run),
@@ -151,6 +153,22 @@ mod tests {
         let along: Vec<f32> = (0..n).map(|i| i as f32 * 10.0).collect();
         let eles = along.iter().map(|d| Some(eles(*d))).collect();
         (along, eles)
+    }
+
+    #[test]
+    fn sparse_points_still_have_a_grade() {
+        // A point every 200 m (a track from elsewhere), up 8 % for 2 km.
+        let along: Vec<f32> = (0..11).map(|i| i as f32 * 200.0).collect();
+        let eles: Vec<Option<f32>> = along.iter().map(|d| Some(100.0 + 0.08 * d)).collect();
+        let g = grades(&along, &eles);
+        assert!(g.iter().all(|g| g.is_some_and(|g| (g - 0.08).abs() < 1e-4)), "{g:?}");
+        let c = climbs(&along, &eles);
+        assert_eq!(c.len(), 1);
+        assert!((c[0].steepest - 0.08).abs() < 1e-4, "{c:?}");
+        assert!(runs(&along, &eles).iter().all(|r| r.2 == 2));
+        // One point, two: no panic.
+        assert_eq!(grades(&[0.0], &[Some(1.0)]), [None]);
+        assert_eq!(grades(&[0.0, 300.0], &[Some(0.0), Some(30.0)]), [Some(0.1), Some(0.1)]);
     }
 
     #[test]

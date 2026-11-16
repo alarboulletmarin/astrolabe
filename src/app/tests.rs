@@ -181,6 +181,62 @@ fn a_click_on_the_map_plans_loops_and_one_is_saved_as_gpx(cx: &mut TestAppContex
     assert_ne!(shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[0].seed), first);
 }
 
+/// GPX files imported join the routes kept, the last one shown; one that can't be read is named.
+#[gpui::test]
+fn a_gpx_track_is_imported_as_a_route(cx: &mut TestAppContext) {
+    let (shell, cx) = start(cx, 3);
+    let town = crate::logic::graph::tests::town();
+    // Two of the town's streets end to end: a track of a few hundred metres.
+    let pts = |e: u32| town.line(e).iter().map(|(p, _)| [p[0] as f64 / 1e7, p[1] as f64 / 1e7]).collect::<Vec<_>>();
+    let line: Vec<[f64; 2]> = pts(0).into_iter().chain(pts(0).into_iter().rev().skip(1)).collect();
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| d.loops.graph = Some(std::sync::Arc::new(town))));
+    let dir = std::env::temp_dir().join(format!("astrolabe-import-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let named = dir.join("watch.gpx");
+    std::fs::write(&named, crate::logic::gpx::write("Tour du parc ✓", &line, &vec![Some(50.0); line.len()])).unwrap();
+    let unnamed = dir.join("sans nom.gpx");
+    let body: String = line[..line.len() - 1].iter().map(|p| format!("<trkpt lat=\"{}\" lon=\"{}\"/>", p[0], p[1])).collect();
+    std::fs::write(&unnamed, format!("<gpx><trk><trkseg>{body}</trkseg></trk></gpx>")).unwrap();
+    let broken = dir.join("broken.gpx");
+    std::fs::write(&broken, "<gpx>nothing</gpx>").unwrap();
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    click(cx, "loops-import");
+    assert!(cx.did_prompt_for_paths());
+    let chosen = vec![named.clone(), broken.clone(), unnamed.clone()];
+    cx.simulate_path_prompt_response(move |_| Some(chosen));
+    cx.run_until_parked();
+    let (names, shown, note) = shell.read_with(cx, |s, cx| {
+        let d = s.data.read(cx);
+        (d.loops.routes.iter().map(|r| r.name.clone()).collect::<Vec<_>>(), d.loops.found.first().cloned(), d.note.clone())
+    });
+    assert_eq!(names, ["Tour du parc ✓", "sans nom"], "named after the track, else after the file");
+    let shown = shown.expect("the last one shown");
+    assert_eq!(shown.line.len(), line.len() - 1);
+    assert!(shown.track, "marked as brought from a file");
+    assert!(shown.dist > 100.0, "{}", shown.dist);
+    assert!(note.is_some_and(|n| n.contains("broken.gpx")), "the file that could not be read is named");
+    assert_eq!(cx.debug_bounds("route-1").is_some(), true, "both in the list");
+    // Opening the first one shows its track, with its altitudes.
+    click(cx, "route-1");
+    let first = shell.read_with(cx, |s, cx| s.data.read(cx).loops.found[0].clone());
+    assert_eq!((first.eles[0], first.up, first.down), (Some(50.0), 0.0, 0.0));
+    // A dialog closed without a file: nothing changes.
+    click(cx, "loops-import");
+    cx.simulate_path_prompt_response(|_| None);
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, cx| s.data.read(cx).loops.routes.len()), 2);
+    // The same file again: the route already kept is shown, not a second one.
+    click(cx, "loops-import");
+    let again = named.clone();
+    cx.simulate_path_prompt_response(move |_| Some(vec![again]));
+    cx.run_until_parked();
+    let (n, shown) = shell.read_with(cx, |s, cx| (s.data.read(cx).loops.routes.len(), s.data.read(cx).loops.found[0].eles[0]));
+    assert_eq!((n, shown), (2, Some(50.0)));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// The Loops page after the first click: a second click doesn't move the start, dragging it
 /// does and plans from there, and a distance typed plans again once the typing stops.
 #[gpui::test]

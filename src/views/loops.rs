@@ -518,11 +518,13 @@ impl LoopsView {
             cx.notify();
             return;
         }
-        // On the chosen loop's line: a new point there, to drag.
+        // On the chosen loop's line: a new point there, to drag. Not on a track brought from a
+        // file: routed again, it would no longer be that track.
+        let found = self.snap_found(cx);
         if h.is_none()
             && let Some(at) = self.line_at(e.position, cx)
+            && !found[self.selected].track
         {
-            let found = self.snap_found(cx);
             let l = &found[self.selected];
             let mut points = self.points(cx);
             let i = insert_at(&l.line, &points, at);
@@ -700,6 +702,58 @@ impl LoopsView {
         self.opened = Some(id);
         self.data.update(cx, |d, cx| d.keep_route(route, cx));
         cx.notify();
+    }
+
+    /// Asks for GPX files and keeps each one's track as a route, the last one shown.
+    fn import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(tr("Import", "Importer").into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                this.update_in(cx, |v, window, cx| v.import_paths(paths, window, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Reads GPX files (in the background) and keeps each one's track as a route, named after
+    /// it (else after the file); the last one is shown. Altitudes a file lacks are read from the
+    /// elevation tiles on disk.
+    pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let graph = self.data.read(cx).loops.graph.clone();
+        let prefs = self.prefs();
+        cx.spawn_in(window, async move |this, cx| {
+            let read = cx.background_executor().spawn(async move { paths.iter().map(|p| read_track(p, graph.as_deref())).collect::<Vec<_>>() }).await;
+            this.update_in(cx, |v, window, cx| {
+                let mut last = None;
+                let mut next = v.data.read(cx).loops.routes.iter().map(|r| r.id + 1).max().unwrap_or(0).max(chrono::Utc::now().timestamp_millis().max(0) as u64);
+                let mut bad = Vec::new();
+                for r in read {
+                    match r {
+                        // The same track again: the route already kept.
+                        Ok((_, l)) if let Some(r) = v.data.read(cx).loops.routes.iter().find(|r| !r.trashed && same_line(&r.shape.line, &l.line)) => last = Some(r.id),
+                        Ok((name, l)) => {
+                            let route = Route { id: next, name, start: l.line[0], pins: Vec::new(), prefs, shape: l, trashed: false };
+                            v.data.update(cx, |d, cx| d.keep_route(route, cx));
+                            last = Some(next);
+                            next += 1;
+                        }
+                        Err(file) => bad.push(file),
+                    }
+                }
+                if !bad.is_empty() {
+                    let files = bad.join(", ");
+                    v.data.update(cx, |d, cx| {
+                        d.note = Some(trf(format!("no track could be read in {files}"), format!("aucune trace lisible dans {files}")));
+                        cx.notify();
+                    });
+                }
+                if let Some(id) = last {
+                    v.open_route(id, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Shows a kept route, with its start, its points and its settings, to change it.
@@ -1214,7 +1268,7 @@ impl Render for LoopsView {
                 tr("Click on the map to place the zone to avoid", "Clique sur la carte pour poser la zone à éviter")
             } else if self.start.is_none() {
                 tr("Click on the map to set the start", "Clique sur la carte pour poser le départ")
-            } else if found.is_empty() {
+            } else if found.is_empty() || chosen.is_some_and(|l| l.track) {
                 tr("Click: pass by here · drag the start to move it", "Clic : passer par ici · glisser le départ pour le déplacer")
             } else {
                 tr("Click: pass by here · drag a point or the line: move · right click: take away", "Clic : passer par ici · glisser un point ou le tracé : déplacer · clic droit : retirer")
@@ -1292,6 +1346,32 @@ fn slope_ramp(t: &crate::ui::theme::Theme, three: bool) -> [Hsla; 5] {
     let [b, c] = if t.dark { [0.68, 0.84] } else { [0.5, 0.78] };
     let flat = if three { blend(t.accent, t.bg, if t.dark { 0.5 } else { 0.32 }) } else { blend(t.text, t.bg, 0.5) };
     [flat, blend(t.accent, t.bg, b), blend(t.accent, t.bg, c), t.accent, blend(t.text, t.accent, 0.55)]
+}
+
+/// The same points, but for what a save and a read back change (about 10 cm).
+fn same_line(a: &[[f64; 2]], b: &[[f64; 2]]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(p, q)| (p[0] - q[0]).abs() < 1e-6 && (p[1] - q[1]).abs() < 1e-6)
+}
+
+/// A GPX file's track as a loop, with its name (the file's when it has none); altitudes it lacks
+/// from the elevation tiles on disk. `Err`: the file's name, when it can't be read or holds no
+/// track.
+fn read_track(path: &std::path::Path, g: Option<&crate::logic::graph::Graph>) -> Result<(String, Loop), String> {
+    use crate::logic::elevation;
+    let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let t = std::fs::read(path).ok().and_then(|b| crate::logic::gpx::read(&String::from_utf8_lossy(&b))).ok_or_else(|| file.clone())?;
+    let mut eles = t.eles;
+    // The tests never read the user's tiles.
+    if !cfg!(test) && eles.iter().any(Option::is_none) {
+        let mut dem = elevation::Dem::new(16, |x, y| crate::platform::elevation::cached(elevation::ZOOM, x, y).and_then(|b| elevation::decode(&b)));
+        for (e, p) in eles.iter_mut().zip(&t.line) {
+            if e.is_none() {
+                *e = dem.at(p[0], p[1]);
+            }
+        }
+    }
+    let stem = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or(file);
+    Ok((t.name.unwrap_or(stem), Loop::from_track(t.line, eles, g)))
 }
 
 /// What the colours of the grade say.
@@ -1648,7 +1728,9 @@ impl LoopsView {
         let scale = range(&all);
         let longest = found.iter().map(|l| l.along.last().copied().unwrap_or(0.0)).fold(1.0f32, f32::max);
         let pace = effort_pace(&self.data.read(cx).acts);
-        let wished = self.wished_climb(cx);
+        // A track brought from a file wasn't planned: what was asked doesn't apply to it.
+        let planned = !found.iter().all(|l| l.track);
+        let wished = self.wished_climb(cx).filter(|_| planned);
         let rows = found.iter().enumerate().map(|(i, l)| {
             let on = i == self.selected;
             let xs: Arc<Vec<f32>> = Arc::new(l.along.clone());
@@ -1687,7 +1769,9 @@ impl LoopsView {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .justify_between()
+                        .gap_x(px(10.))
                         .child(
                             div()
                                 .flex()
@@ -1713,16 +1797,16 @@ impl LoopsView {
                 )
                 .child(mini)
                 .child(surfaces(l, i, t))
-                .child(div().text_size(px(11.)).text_color(t.soft).child(format!(
+                .when(!l.track, |d| d.child(div().text_size(px(11.)).text_color(t.soft).child(format!(
                     "{} {}{}",
                     pct(l.back),
                     tr("out and back", "aller-retour"),
                     l.mine.map(|m| format!(" · {} {}", pct(m), tr("on my tracks", "sur mes traces"))).unwrap_or_default()
-                )))
+                ))))
         });
         // What was asked and could not be had, said rather than left to guess.
         let mut unmet: Vec<String> = Vec::new();
-        if self.avoid_paved && found.iter().all(|l| l.paved > 0.5) {
+        if planned && self.avoid_paved && found.iter().all(|l| l.paved > 0.5) {
             unmet.push(tr("Few unpaved ways around the start: the asphalt could not be avoided.", "Peu de chemins non revêtus autour du départ : le bitume n'a pas pu être évité.").into());
         }
         if let Some(w) = wished {
@@ -1803,12 +1887,20 @@ impl LoopsView {
             })
     }
 
-    /// The routes kept: a click opens one, the cross takes it away.
+    /// The routes kept: a click opens one, the cross takes it away; tracks from elsewhere join
+    /// them by importing a GPX file.
     fn routes(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.snap.theme;
         let routes: Vec<Route> = self.data.read(cx).loops.routes.iter().filter(|r| !r.trashed).cloned().collect();
+        let import = div().flex().child(
+            button("loops-import", tr("Import a GPX…", "Importer un GPX…"), false, t)
+                .debug_selector(|| "loops-import".into())
+                .tooltip_show_delay(crate::ui::TIP_DELAY)
+                .tooltip(|window, cx| Tooltip::new(tr("A track from a watch or another app, kept with the routes", "Une trace d'une montre ou d'une autre application, gardée avec les parcours")).build(window, cx))
+                .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
+        );
         if routes.is_empty() {
-            return div();
+            return div().child(import);
         }
         let rows = routes.into_iter().rev().enumerate().map(|(i, r)| {
             let (id, on) = (r.id, self.opened == Some(r.id));
@@ -1848,6 +1940,7 @@ impl LoopsView {
             .gap(px(4.))
             .child(div().text_size(px(12.)).text_color(t.soft).child(tr("Routes kept", "Parcours gardés")))
             .children(rows)
+            .child(div().pt(px(4.)).child(import))
     }
 
     /// Along the bottom of the map, right of the panel: the chosen loop's profile and its climbs,

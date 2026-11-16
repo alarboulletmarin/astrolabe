@@ -112,6 +112,10 @@ pub struct Loop {
     /// were asked for (the others were drawn to make the length).
     pub waypoints: Vec<[f64; 2]>,
     pub pinned: Vec<bool>,
+    /// Brought from a file (a GPX track), not planned: what was asked of the planning doesn't
+    /// apply to it.
+    #[serde(default)]
+    pub track: bool,
     /// The graph's edges it uses, with the length used on each, for comparing loops (not kept:
     /// the graph's numbering changes when it is built again).
     #[serde(skip)]
@@ -119,6 +123,29 @@ pub struct Loop {
 }
 
 impl Loop {
+    /// A track brought from elsewhere (a GPX file) as a loop: its length, climb and descent from
+    /// its own points; its shares of trail and asphalt from the roads of `g` within 30 m of each
+    /// stretch (none counted off them). What only planning knows is left at nothing.
+    pub fn from_track(line: Vec<[f64; 2]>, eles: Vec<Option<f32>>, g: Option<&Graph>) -> Loop {
+        let mut along = Vec::with_capacity(line.len());
+        let (mut dist, mut trail, mut paved) = (0.0f64, 0.0f64, 0.0f64);
+        for (i, p) in line.iter().enumerate() {
+            if i > 0 {
+                let (a, len) = (line[i - 1], crate::logic::fit::metres(line[i - 1], *p));
+                dist += len;
+                let mid = [(a[0] + p[0]) / 2.0, (a[1] + p[1]) / 2.0];
+                if let Some(c) = g.and_then(|g| g.snap(mid[0], mid[1], 30.0, |_| true).map(|s| g.edges[s.edge as usize].class)) {
+                    trail += if c.is_trail() { len } else { 0.0 };
+                    paved += if c.is_paved() { len } else { 0.0 };
+                }
+            }
+            along.push(dist as f32);
+        }
+        let (up, down) = crate::logic::elevation::climb(eles.iter().flatten().copied());
+        let share = |m: f64| (m / dist.max(1.0)) as f32;
+        Loop { line, eles, along, dist, up: up as f64, down: down as f64, trail: share(trail), paved: share(paved), back: 0.0, mine: None, seed: 0, score: 0.0, waypoints: Vec::new(), pinned: Vec::new(), track: true, edges: Vec::new() }
+    }
+
     /// The same loop run the other way round.
     pub fn reversed(&self) -> Loop {
         let total = self.along.last().copied().unwrap_or(0.0);
@@ -644,7 +671,7 @@ fn measure(l: &Local, req: &Request, seed: u64, t: &Try) -> Loop {
         mine = Some(on as f32);
     }
     let waypoints = t.waypoints.iter().map(|v| l.position(*v)).collect();
-    Loop { line, eles, along, dist: t.dist, up, down, trail, paved, back, mine, seed, score, waypoints, pinned: t.pinned.clone(), edges: edges.into_iter().collect() }
+    Loop { line, eles, along, dist: t.dist, up, down, trail, paved, back, mine, seed, score, waypoints, pinned: t.pinned.clone(), track: false, edges: edges.into_iter().collect() }
 }
 
 #[cfg(test)]
@@ -655,6 +682,30 @@ mod tests {
     fn req(target: Target, seed: u64) -> Request {
         // On the south street, 100 m from the corner.
         Request { lat: 43.70, lon: 7.25 + 100.0 / (111_195.0 * 0.7230), target, prefs: Prefs::default(), climb: None, seed, count: 3, via: Vec::new(), places: Places::default() }
+    }
+
+    #[test]
+    fn a_track_from_elsewhere_is_measured_on_its_own_points() {
+        let g = town();
+        // Along the town's first edge, there and back, with altitudes up 30 m and down.
+        let road: Vec<[f64; 2]> = g.line(0).iter().map(|(p, _)| [p[0] as f64 / 1e7, p[1] as f64 / 1e7]).collect();
+        let line: Vec<[f64; 2]> = road.iter().chain(road.iter().rev().skip(1)).copied().collect();
+        let n = line.len();
+        let eles: Vec<Option<f32>> = (0..n).map(|i| Some(100.0 + 30.0 * (1.0 - (i as f32 - (n / 2) as f32).abs() / (n / 2) as f32))).collect();
+        let l = Loop::from_track(line.clone(), eles, Some(&g));
+        assert!(l.track);
+        let one_way = crate::logic::fit::metres(road[0], road[road.len() - 1]);
+        assert!((l.dist - 2.0 * one_way).abs() < 1.0 || l.dist >= 2.0 * one_way, "{} vs {one_way}", l.dist);
+        assert_eq!((l.along.len(), l.along[0], *l.along.last().unwrap() as f64 as f32), (n, 0.0, l.dist as f32));
+        assert!((l.up - 30.0).abs() < 1.0 && (l.down - 30.0).abs() < 1.0, "{} {}", l.up, l.down);
+        let class = g.edges[0].class;
+        assert_eq!(l.trail, if class.is_trail() { 1.0 } else { 0.0 });
+        assert_eq!(l.paved, if class.is_paved() { 1.0 } else { 0.0 });
+        // Far from any road, or without the graph: nothing counted; no altitude: no climb.
+        let away: Vec<[f64; 2]> = line.iter().map(|p| [p[0] + 1.0, p[1]]).collect();
+        let off = Loop::from_track(away, vec![None; n], Some(&g));
+        assert_eq!((off.trail, off.paved, off.up, off.down), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(Loop::from_track(line, vec![None; n], None).paved, 0.0);
     }
 
     #[test]
