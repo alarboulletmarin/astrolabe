@@ -342,7 +342,23 @@ fn the_start_is_dragged_and_a_new_distance_plans_again(cx: &mut TestAppContext) 
     cx.run_until_parked();
     let generation = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.data.read(cx).loops.generation);
     let first = generation(cx);
-    assert!(first > 0 && shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.len()) >= 2);
+    // Said in full when it fails: which step didn't happen (the click, the plan, the loops).
+    let why = shell.read_with(cx, |s, cx| {
+        let d = s.data.read(cx);
+        let l = s.loops.read(cx);
+        format!(
+            "clicked {at:?}, start {:?}, said {:?}, generation {first}, planning {}, plan error {:?}, error {:?}, graph {:?} nodes, found {}, region {}",
+            l.start(),
+            l.place_said(),
+            d.loops.planning,
+            d.loops.plan_error,
+            d.loops.error,
+            d.loops.graph.as_ref().map(|g| g.nodes()),
+            d.loops.found.len(),
+            d.loops.region.id,
+        )
+    });
+    assert!(first > 0 && shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.len()) >= 2, "{why}");
     let set = shell.read_with(cx, |s, cx| s.loops.read(cx).start()).unwrap();
     // The map fitted the loops: the start is somewhere else on screen now.
     let at = screen(cx, set.0, set.1);
