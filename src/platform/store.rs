@@ -267,6 +267,50 @@ pub fn save_graph(region: &str, bytes: &[u8]) -> Result<(), String> {
     write_atomic(&graph_path(region), bytes, false).map_err(|e| format!("{} : {e}", crate::lang::tr("Path network not saved", "Réseau de chemins non enregistré")))
 }
 
+/// The regions downloaded, in the order they were added; `None` before any list was kept (the
+/// first region may be there from before the list).
+pub fn load_regions() -> Result<Option<Vec<crate::logic::regions::Region>>, String> {
+    match fs::read(data_dir().join("regions.json")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+        Ok(b) => serde_json::from_slice(&b).map(Some).map_err(|e| e.to_string()),
+    }
+    .map_err(|e| format!("{} : {e}", crate::lang::tr("Regions unreadable", "Régions illisibles")))
+}
+
+pub fn save_regions(r: &[crate::logic::regions::Region]) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(r).map_err(|e| e.to_string())?;
+    write_atomic(&data_dir().join("regions.json"), &bytes, true).map_err(|e| format!("{} : {e}", crate::lang::tr("Regions not saved", "Régions non enregistrées")))
+}
+
+/// What is on disk of a region: its extract's size and when it was downloaded, and whether its
+/// path network is built.
+pub fn region_files(region: &str) -> (Option<u64>, Option<std::time::SystemTime>, bool) {
+    let m = fs::metadata(extract_path(region)).ok().filter(|m| m.len() > 0);
+    (m.as_ref().map(|m| m.len()), m.and_then(|m| m.modified().ok()), graph_path(region).is_file())
+}
+
+/// Deletes a region's extract, path network and buildings read from it (asked, and confirmed,
+/// by the user). The elevation tiles stay: they are shared.
+pub fn delete_region(region: &str) -> Result<(), String> {
+    let failed = |e: std::io::Error| format!("{} : {e}", crate::lang::tr("Region not removed", "Région non retirée"));
+    for p in [extract_path(region), graph_path(region)] {
+        match fs::remove_file(&p) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(e)),
+            _ => {}
+        }
+    }
+    let buildings = cache_dir().join("buildings");
+    for e in fs::read_dir(&buildings).into_iter().flatten().flatten() {
+        // One folder per region and extract size: `{region}-{size}`.
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.rsplit_once('-').is_some_and(|(r, size)| r == region && size.parse::<u64>().is_ok()) {
+            fs::remove_dir_all(e.path()).map_err(failed)?;
+        }
+    }
+    Ok(())
+}
+
 /// Where the save dialog opens: the Downloads folder, else the home folder.
 pub fn export_dir() -> PathBuf {
     #[cfg(test)]

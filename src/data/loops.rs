@@ -43,7 +43,15 @@ impl Job {
 }
 
 pub struct Loops {
-    pub region: &'static Region,
+    /// The region the loops are planned in (its extract and graph), one of `regions` once one
+    /// is downloaded.
+    pub region: Arc<Region>,
+    /// The regions downloaded, in the order they were added; read once (`read_regions`).
+    pub regions: Vec<Arc<Region>>,
+    regions_read: bool,
+    /// The regions Geofabrik offers, once asked for (`load_catalog`), or why they can't be had.
+    pub catalog: Option<Result<Arc<Vec<Region>>, String>>,
+    catalog_busy: bool,
     pub graph: Option<Arc<Graph>>,
     /// The disk was looked at (once, when the page first shows).
     pub looked: bool,
@@ -80,7 +88,11 @@ pub struct Loops {
 impl Default for Loops {
     fn default() -> Self {
         Loops {
-            region: &regions::REGIONS[0],
+            region: Arc::new(regions::first()),
+            regions: Vec::new(),
+            regions_read: false,
+            catalog: None,
+            catalog_busy: false,
             graph: None,
             looked: false,
             extract: None,
@@ -117,12 +129,17 @@ impl Data {
         if self.loops.looked {
             return;
         }
+        self.read_regions();
         self.loops.looked = true;
-        self.loops.region = regions::find(self.settings.get("loops.region").map_or("", String::as_str));
-        let id = self.loops.region.id;
+        let id = self.loops.region.id.clone();
         cx.spawn(async move |this, cx| {
-            let (size, stored, routes) = cx.background_executor().spawn(async move { (store::extract_size(id), store::load_graph(id), store::load_routes()) }).await;
+            let asked = id.clone();
+            let (size, stored, routes) = cx.background_executor().spawn(async move { (store::extract_size(&id), store::load_graph(&id), store::load_routes()) }).await;
             this.update(cx, |d, cx| {
+                // Another region chosen meanwhile: it reads its own.
+                if d.loops.region.id != asked {
+                    return;
+                }
                 d.loops.extract = size;
                 match routes {
                     Ok(r) => d.loops.routes = r,
@@ -143,6 +160,143 @@ impl Data {
                         }
                     }
                 }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The regions downloaded, read once (a small file). Before the list was kept, the first
+    /// region is in it when its extract is on disk. The region used is the one last chosen.
+    pub fn read_regions(&mut self) {
+        if self.loops.regions_read {
+            return;
+        }
+        self.loops.regions_read = true;
+        let list = match store::load_regions() {
+            Ok(Some(list)) => list,
+            Ok(None) => {
+                let first = regions::first();
+                if store::extract_size(&first.id).is_some() { vec![first] } else { Vec::new() }
+            }
+            Err(e) => {
+                self.status = Status::Failed(e);
+                Vec::new()
+            }
+        };
+        self.loops.regions = list.into_iter().map(Arc::new).collect();
+        let chosen = self.settings.get("loops.region").cloned().unwrap_or_default();
+        if let Some(r) = self.loops.regions.iter().find(|r| r.id == chosen).or(self.loops.regions.first()) {
+            self.loops.region = r.clone();
+        }
+    }
+
+    fn keep_regions(&mut self, cx: &mut Context<Self>) {
+        let list: Vec<Region> = self.loops.regions.iter().map(|r| (**r).clone()).collect();
+        self.persist(cx, move || store::save_regions(&list));
+    }
+
+    /// The region downloaded that holds a position, the smallest if several do.
+    pub fn region_for(&self, lat: f64, lon: f64) -> Option<Arc<Region>> {
+        self.loops.regions.iter().filter(|r| r.holds(lat, lon)).min_by(|a, b| a.area().total_cmp(&b.area())).cloned()
+    }
+
+    /// Plans in `r` from now on: its graph is read (or built) in place of the other's. Not while
+    /// a download or a build runs: `false`, said.
+    pub fn use_region(&mut self, r: Arc<Region>, cx: &mut Context<Self>) -> bool {
+        if r.id == self.loops.region.id {
+            return true;
+        }
+        if self.loops.job.is_some() {
+            self.note = Some(tr("a region is being prepared: wait for it, or stop it", "une région est en préparation : attends-la, ou arrête-la").into());
+            cx.notify();
+            return false;
+        }
+        self.set_setting("loops.region", r.id.clone(), cx);
+        self.loops.region = r;
+        self.loops.graph = None;
+        self.loops.extract = None;
+        self.loops.error = None;
+        self.loops.found = Arc::default();
+        self.loops.plan_error = None;
+        self.loops.buildings.clear();
+        self.loops.looked = false;
+        self.open_loops(cx);
+        cx.notify();
+        true
+    }
+
+    /// Adds a region from the catalog: kept in the list, used, and downloaded.
+    pub fn add_region(&mut self, r: Region, cx: &mut Context<Self>) {
+        let r = match self.loops.regions.iter().find(|k| k.id == r.id) {
+            Some(k) => k.clone(),
+            None => {
+                let r = Arc::new(r);
+                self.loops.regions.push(r.clone());
+                self.keep_regions(cx);
+                r
+            }
+        };
+        if self.use_region(r, cx) {
+            self.download_region(cx);
+        }
+    }
+
+    /// Downloads a region's extract again, and builds its graph again.
+    pub fn update_region(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(r) = self.loops.regions.iter().find(|r| r.id == id).cloned() else { return };
+        if self.use_region(r, cx) {
+            self.download_region(cx);
+        }
+    }
+
+    /// Deletes a region's files (confirmed by the user) and takes it off the list; the region
+    /// used goes to the next one if it was this one.
+    pub fn remove_region(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.loops.job.is_some() && self.loops.region.id == id {
+            self.note = Some(tr("the region is being prepared: stop it first", "la région est en préparation : arrête-la d'abord").into());
+            cx.notify();
+            return;
+        }
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let gone = id.clone();
+            let res = cx.background_executor().spawn(async move { store::delete_region(&gone) }).await;
+            this.update(cx, |d, cx| {
+                match res {
+                    Ok(()) => {
+                        d.loops.regions.retain(|r| r.id != id);
+                        d.keep_regions(cx);
+                        if d.loops.region.id == id {
+                            let next = d.loops.regions.first().cloned().unwrap_or_else(|| Arc::new(regions::first()));
+                            // The files are gone: the same region reads nothing again.
+                            d.loops.region = Arc::new(Region { id: String::new(), ..(*next).clone() });
+                            d.use_region(next, cx);
+                        }
+                        d.note = Some(tr("region removed", "région retirée").into());
+                    }
+                    Err(e) => d.status = Status::Failed(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Fetches the regions Geofabrik offers, once (kept a month in the cache).
+    pub fn load_catalog(&mut self, cx: &mut Context<Self>) {
+        if self.loops.catalog_busy || matches!(self.loops.catalog, Some(Ok(_))) {
+            return;
+        }
+        self.loops.catalog_busy = true;
+        let base = self.loops.osm_base.clone();
+        cx.spawn(async move |this, cx| {
+            let res = cx.background_executor().spawn(async move { platform::osm::catalog(&base) }).await;
+            this.update(cx, |d, cx| {
+                d.loops.catalog_busy = false;
+                d.loops.catalog = Some(res.map(Arc::new));
                 cx.notify();
             })
             .ok();
@@ -179,15 +333,20 @@ impl Data {
         // Another extract: its buildings are read again.
         self.loops.buildings.clear();
         self.tick_loops(cx);
-        let (base, region) = (self.loops.osm_base.clone(), self.loops.region);
+        let (base, region) = (self.loops.osm_base.clone(), self.loops.region.clone());
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let res = cx.background_executor().spawn(async move { platform::osm::download(&base, region, &done, &total, &cancel) }).await;
+            let res = cx.background_executor().spawn(async move { platform::osm::download(&base, &region, &done, &total, &cancel) }).await;
             this.update(cx, |d, cx| {
                 d.loops.job = None;
                 match res {
                     Ok(n) => {
                         d.loops.extract = Some(n);
+                        // Downloaded from the Loops page: in the list from now on.
+                        if !d.loops.regions.iter().any(|r| r.id == d.loops.region.id) {
+                            d.loops.regions.push(d.loops.region.clone());
+                            d.keep_regions(cx);
+                        }
                         d.build_graph(cx);
                     }
                     Err(e) => d.loops_failed(e),
@@ -219,22 +378,22 @@ impl Data {
         self.loops.job = Some(job);
         self.loops.error = None;
         self.tick_loops(cx);
-        let (id, base) = (self.loops.region.id, self.loops.elevation_base.clone());
+        let (id, base) = (self.loops.region.id.clone(), self.loops.elevation_base.clone());
         cx.notify();
         cx.spawn(async move |this, cx| {
             let res = cx
                 .background_executor()
                 .spawn(async move {
-                    let size = store::extract_size(id).unwrap_or(0);
+                    let size = store::extract_size(&id).unwrap_or(0);
                     let progress = build.clone();
                     let mut read = |pass: u32, f: &mut dyn FnMut(&str, Vec<u8>) -> Result<(), String>| {
                         stage.store(pass as u64, Ordering::Relaxed);
-                        platform::osm::read_extract(id, &progress.bytes, f)
+                        platform::osm::read_extract(&id, &progress.bytes, f)
                     };
                     let mut g = match graph::build(&mut read, size, threads(), &cancel, &build) {
                         Ok(g) => g,
                         Err(e) if e.starts_with("PBF:") => {
-                            let kept = store::set_aside_extract(id);
+                            let kept = store::set_aside_extract(&id);
                             let unreadable = tr("Extract unreadable", "Extrait illisible");
                             return Err(trf(
                                 format!("{unreadable} ({e}), kept as {kept}: download it again."),
@@ -255,7 +414,7 @@ impl Data {
                     stage.store(6, Ordering::Relaxed);
                     let mut dem = Dem::new(64, |x, y| platform::elevation::cached(elevation::ZOOM, x, y).and_then(|b| elevation::decode(&b)));
                     g.set_elevation(&mut dem);
-                    store::save_graph(id, &g.encode())?;
+                    store::save_graph(&id, &g.encode())?;
                     Ok((g, failed, last))
                 })
                 .await;
@@ -497,10 +656,11 @@ impl Data {
         }
         self.loops.buildings_busy = true;
         let missing: Vec<(u32, u32)> = tiles.iter().copied().filter(|t| !self.loops.buildings.contains_key(t)).collect();
-        let id = self.loops.region.id;
+        let id = self.loops.region.id.clone();
         cx.spawn(async move |this, cx| {
             let asked = missing.clone();
-            let read = cx.background_executor().spawn(async move { platform::osm::buildings(id, &missing, threads()) }).await;
+            let region = id.clone();
+            let read = cx.background_executor().spawn(async move { platform::osm::buildings(&region, &missing, threads()) }).await;
             this.update(cx, |d, cx| {
                 d.loops.buildings_busy = false;
                 let mut read = read.unwrap_or_default();

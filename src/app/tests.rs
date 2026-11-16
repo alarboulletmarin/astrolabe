@@ -1203,7 +1203,7 @@ fn a_typed_start_is_found_and_brought_into_view(cx: &mut TestAppContext) {
     assert!(said(cx).1.is_some_and(|e| e.contains("Provence")));
     assert_eq!(start_of(cx), before);
     typed(cx, "paris");
-    assert!(said(cx).1.is_some_and(|e| e.contains("Provence")));
+    assert!(said(cx).1.is_some_and(|e| e.contains("Maps") || e.contains("Cartes")), "{:?}", said(cx));
     assert_eq!(start_of(cx), before);
     // Empty: nothing asked.
     let n = asked.lock().unwrap().len();

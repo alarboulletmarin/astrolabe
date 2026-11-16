@@ -423,6 +423,92 @@ fn a_region_is_downloaded_once_and_planned_offline(cx: &mut TestAppContext) {
     assert_eq!(servers.asked("/terrarium/"), tiles, "no tile asked again");
 }
 
+/// Regions from Geofabrik's index (a stand-in): added (downloaded and built), used, read back,
+/// updated, removed with their files; the index kept for when the server can't be reached.
+#[gpui::test]
+fn regions_are_added_used_and_removed(cx: &mut TestAppContext) {
+    let root = folder("regions");
+    let extract = town_extract();
+    // Two regions holding the town: a big one and a small one inside it.
+    let index = r#"{"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"id": "provence-alpes-cote-d-azur", "parent": "france", "name": "Provence Alpes-Cote-d'Azur", "urls": {"pbf": "https://download.geofabrik.de/europe/france/provence-alpes-cote-d-azur-latest.osm.pbf"}},
+         "geometry": {"type": "Polygon", "coordinates": [[[4.2, 42.9], [7.7, 43.5], [6.0, 45.1], [4.2, 42.9]]]}},
+        {"type": "Feature", "properties": {"id": "monaco", "parent": "europe", "name": "Monaco", "urls": {"pbf": "https://download.geofabrik.de/europe/monaco-latest.osm.pbf"}},
+         "geometry": {"type": "Polygon", "coordinates": [[[7.2, 43.6], [7.4, 43.6], [7.4, 43.8], [7.2, 43.6]]]}}
+    ]}"#;
+    let tile = crate::logic::elevation::tests::terrarium(|x, _| 100.0 + x as f32 * 0.5);
+    let servers = Garmin::new(move |path| match path {
+        "/index-v1.json" => (200, index.as_bytes().to_vec()),
+        p if p.ends_with(".osm.pbf") => (200, extract.clone()),
+        p if p.contains("/terrarium/12/") => (200, tile.clone()),
+        _ => (404, vec![]),
+    });
+    let data = open_loops(cx, &servers.url, &servers.url);
+    let state = |data: &Entity<Data>, cx: &mut TestAppContext| {
+        data.read_with(cx, |d, _| (d.loops.region.id.clone(), d.loops.regions.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), d.loops.graph.as_ref().map(|g| g.nodes())))
+    };
+    // Nothing downloaded: no region in the list, the first one shown.
+    assert_eq!(state(&data, cx), ("provence-alpes-cote-d-azur".into(), vec![], None));
+    data.update(cx, |d, cx| d.load_catalog(cx));
+    settle(cx);
+    let catalog = data.read_with(cx, |d, _| d.loops.catalog.clone()).unwrap().unwrap();
+    assert_eq!(catalog.len(), 2);
+    assert_eq!(servers.asked("index-v1.json"), 1);
+    // The small one added: downloaded, built, used.
+    let monaco = catalog[1].clone();
+    data.update(cx, |d, cx| d.add_region(monaco.clone(), cx));
+    settle(cx);
+    assert_eq!(state(&data, cx), ("monaco".into(), vec!["monaco".into()], Some(173)));
+    // The big one too: used now; the smaller one holds the town.
+    data.update(cx, |d, cx| d.add_region(catalog[0].clone(), cx));
+    settle(cx);
+    assert_eq!(state(&data, cx), ("provence-alpes-cote-d-azur".into(), vec!["monaco".into(), "provence-alpes-cote-d-azur".into()], Some(173)));
+    assert_eq!(data.read_with(cx, |d, _| d.region_for(43.70, 7.26).map(|r| r.id.clone())), Some("monaco".into()));
+    assert_eq!(data.read_with(cx, |d, _| d.region_for(44.5, 5.0).map(|r| r.id.clone())), Some("provence-alpes-cote-d-azur".into()));
+    assert_eq!(data.read_with(cx, |d, _| d.region_for(48.85, 2.35)), None);
+    // Each downloaded once.
+    assert_eq!(servers.asked(".osm.pbf"), 2);
+    assert_eq!(osm_files(&root).len(), 4);
+
+    // Reopened: the same list, the one last used.
+    let again = open_loops(cx, &servers.url, &servers.url);
+    assert_eq!(state(&again, cx), ("provence-alpes-cote-d-azur".into(), vec!["monaco".into(), "provence-alpes-cote-d-azur".into()], Some(173)));
+    // Another used: its graph read back, nothing downloaded.
+    let monaco = again.read_with(cx, |d, _| d.loops.regions[0].clone());
+    assert!(again.update(cx, |d, cx| d.use_region(monaco, cx)));
+    settle(cx);
+    assert_eq!(state(&again, cx).0, "monaco");
+    assert_eq!(state(&again, cx).2, Some(173));
+    assert_eq!(servers.asked(".osm.pbf"), 2);
+    // Updated: downloaded again.
+    again.update(cx, |d, cx| d.update_region("monaco", cx));
+    settle(cx);
+    assert_eq!(servers.asked(".osm.pbf"), 3);
+    assert_eq!(state(&again, cx).2, Some(173));
+
+    // Removed: its files go, the next region is used.
+    again.update(cx, |d, cx| d.remove_region("monaco", cx));
+    settle(cx);
+    assert_eq!(state(&again, cx), ("provence-alpes-cote-d-azur".into(), vec!["provence-alpes-cote-d-azur".into()], Some(173)));
+    assert_eq!(osm_files(&root), ["provence-alpes-cote-d-azur.graph", "provence-alpes-cote-d-azur.osm.pbf"]);
+    // The last one: nothing left, nothing read.
+    again.update(cx, |d, cx| d.remove_region("provence-alpes-cote-d-azur", cx));
+    settle(cx);
+    assert_eq!(state(&again, cx), ("provence-alpes-cote-d-azur".into(), vec![], None));
+    assert!(osm_files(&root).is_empty());
+
+    // The index without the server: the copy kept serves; without one, it is said.
+    let offline_data = open_loops(cx, &offline(), &offline());
+    offline_data.update(cx, |d, cx| d.load_catalog(cx));
+    settle(cx);
+    assert_eq!(offline_data.read_with(cx, |d, _| d.loops.catalog.clone()).unwrap().map(|c| c.len()), Ok(2));
+    std::fs::remove_file(root.join("cache/geofabrik-index.json")).unwrap();
+    let none = open_loops(cx, &offline(), &offline());
+    none.update(cx, |d, cx| d.load_catalog(cx));
+    settle(cx);
+    assert!(none.read_with(cx, |d, _| d.loops.catalog.clone()).unwrap().is_err());
+}
+
 /// An extract that can't be read is set aside and said; without the elevation server, the graph
 /// is built and its altitude said incomplete. (A download cut mid-stream is `store`'s test.)
 #[gpui::test]

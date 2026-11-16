@@ -302,6 +302,9 @@ pub struct LoopsView {
     named: Option<([f64; 2], String)>,
     /// A place to bring into view at the next frame.
     focus: Option<[f64; 2]>,
+    /// Loops asked for before the network was read (another region's, or at first): they are
+    /// planned once it is.
+    plan_when_ready: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -392,6 +395,7 @@ impl LoopsView {
             place_error: None,
             named: None,
             focus: None,
+            plan_when_ready: false,
             _subscriptions: subs,
         }
     }
@@ -415,10 +419,11 @@ impl LoopsView {
         cx.notify();
         let (base, region) = {
             let d = self.data.read(cx);
-            (d.loops.places_base.clone(), d.loops.region)
+            (d.loops.places_base.clone(), d.loops.region.clone())
         };
         cx.spawn(async move |this, cx| {
-            let res = cx.background_executor().spawn(async move { crate::platform::osm::search_places(&base, &q, region) }).await;
+            let within = region.clone();
+            let res = cx.background_executor().spawn(async move { crate::platform::osm::search_places(&base, &q, &within) }).await;
             this.update(cx, |this, cx| {
                 if this.searching != Some(n) {
                     return;
@@ -442,9 +447,12 @@ impl LoopsView {
 
     /// Starts from `at` (named `name`), brought into view: set, or moved there.
     fn start_at(&mut self, at: [f64; 2], name: Option<String>, cx: &mut Context<Self>) {
-        let region = self.data.read(cx).loops.region;
-        if !region.holds(at[0], at[1]) {
-            self.place_error = Some(trf(format!("This place is outside {}, the region downloaded.", region.name()), format!("Ce lieu est hors de {}, la région téléchargée.", region.name())));
+        let outside = {
+            let d = self.data.read(cx);
+            !d.loops.region.holds(at[0], at[1]) && d.region_for(at[0], at[1]).is_none()
+        };
+        if outside {
+            self.place_error = Some(tr("This place is outside the regions downloaded: add its region in Settings › Maps.", "Ce lieu est hors des régions téléchargées : ajoute la sienne dans Réglages › Cartes.").into());
             cx.notify();
             return;
         }
@@ -452,18 +460,19 @@ impl LoopsView {
         self.start = Some((at[0], at[1]));
         self.named = name.map(|n| (at, n));
         self.focus = Some(at);
-        if self.data.read(cx).loops.graph.is_some() {
-            self.propose(false, cx);
-        }
-        cx.notify();
+        self.propose(false, cx);
     }
 
     /// The request the panel describes, or why it can't be one.
     fn request(&self, places: Places, cx: &App) -> Result<Request, String> {
         let (lat, lon) = self.start.ok_or(tr("Click on the map to set the start.", "Clique sur la carte pour poser le départ."))?;
-        let region = self.data.read(cx).loops.region;
+        let region = self.data.read(cx).loops.region.clone();
         if !region.holds(lat, lon) {
-            return Err(trf(format!("The start is outside {}, the region downloaded.", region.name()), format!("Le départ est hors de {}, la région téléchargée.", region.name())));
+            return Err(tr(
+                "The start is outside the regions downloaded: add its region in Settings › Maps.",
+                "Le départ est hors des régions téléchargées : ajoute la sienne dans Réglages › Cartes.",
+            )
+            .into());
         }
         let value = |i: &Entity<InputState>| i.read(cx).value().to_string();
         let bad = || tr("A distance between 0.5 and 200 km, please.", "Une distance entre 0,5 et 200 km, s'il te plaît.").to_string();
@@ -504,6 +513,26 @@ impl LoopsView {
                 }
             }
         });
+        // A start in another region downloaded: that one is used from now on, and the loops come
+        // once its network is read; so do they when the network isn't read yet.
+        if let Some((lat, lon)) = self.start {
+            let other = {
+                let d = self.data.read(cx);
+                if d.loops.region.holds(lat, lon) { None } else { d.region_for(lat, lon) }
+            };
+            if let Some(r) = other
+                && self.data.update(cx, |d, cx| d.use_region(r, cx))
+            {
+                self.plan_when_ready = true;
+                cx.notify();
+                return;
+            }
+            if self.data.read(cx).loops.graph.is_none() && self.data.read(cx).loops.region.holds(lat, lon) {
+                self.plan_when_ready = true;
+                cx.notify();
+                return;
+            }
+        }
         let places = self.places(cx);
         match self.request(places, cx) {
             Ok(req) => {
@@ -1170,7 +1199,7 @@ impl Render for LoopsView {
         if self.selected >= found.len() {
             self.selected = 0;
         }
-        let region = self.data.read(cx).loops.region;
+        let region = self.data.read(cx).loops.region.clone();
         // The region at first; then each new set of loops, all of them in sight.
         // The selection this frame paints: a click handled below may select another loop (a
         // point asked plans again from the first), and the chosen line, its grade and its
@@ -1206,6 +1235,10 @@ impl Render for LoopsView {
         let b = self.map.bounds.get();
         let (w, h) = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
         // The first click sets the start; the next ones, points to pass by.
+        if self.plan_when_ready && self.data.read(cx).loops.graph.is_some() {
+            self.plan_when_ready = false;
+            self.propose(false, cx);
+        }
         if let Some((sx, sy)) = self.map.click.take() {
             let at = self.map.view.position(sx, sy, w, h);
             if self.placing_zone {
@@ -1643,7 +1676,7 @@ impl LoopsView {
         let t = self.snap.theme;
         let d = self.data.read(cx);
         let l = &d.loops;
-        let region = l.region.name();
+        let region = l.region.name().to_string();
         let ready = l.graph.is_some();
         let job = d.loops_line();
         let running = job.is_some();
@@ -2143,7 +2176,7 @@ impl LoopsView {
     /// place the watch named them after.
     fn usual_starts(&self, cx: &App) -> Vec<Usual> {
         let d = self.data.read(cx);
-        let region = d.loops.region;
+        let region = d.loops.region.clone();
         let places: std::collections::HashMap<i64, String> = d.acts.iter().filter_map(|a| Some((a.activity_id, crate::logic::journal::place(a)?))).collect();
         let outings = d.derived.iter().map(|(id, x)| (x.line.as_slice(), places.get(id).cloned()));
         crate::logic::loops::usual_starts(outings, 12).into_iter().filter(|u| region.holds(u.at[0], u.at[1])).take(3).collect()

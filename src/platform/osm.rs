@@ -14,6 +14,32 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub const GEOFABRIK: &str = "https://download.geofabrik.de";
 pub const NOMINATIM: &str = "https://nominatim.openstreetmap.org";
 
+/// The regions Geofabrik offers (its index, some 4 MB), kept in the cache and fetched again
+/// after a month; an older copy serves when the server can't be reached.
+pub fn catalog(base: &str) -> Result<Vec<Region>, String> {
+    let path = cache_dir().join("geofabrik-index.json");
+    let age = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
+    let kept = || std::fs::read_to_string(&path).ok().and_then(|j| crate::logic::regions::read_index(&j).ok());
+    if age.is_some_and(|a| a.as_secs() < 30 * 86_400)
+        && let Some(r) = kept()
+    {
+        return Ok(r);
+    }
+    let fetched = agent()
+        .get(format!("{base}/index-v1.json"))
+        .call()
+        .map_err(|e| service_error("Geofabrik", e))
+        .and_then(|mut r| r.body_mut().with_config().limit(64 << 20).read_to_string().map_err(|e| service_error("Geofabrik", e)))
+        .and_then(|j| crate::logic::regions::read_index(&j).map(|r| (j, r)).map_err(|e| format!("Geofabrik : {e}")));
+    match fetched {
+        Ok((json, regions)) => {
+            write_atomic(&path, json.as_bytes(), false).ok();
+            Ok(regions)
+        }
+        Err(e) => kept().ok_or(e),
+    }
+}
+
 /// Places named `q` within `region`, the five likeliest, from OpenStreetMap's search. Its policy:
 /// one search at a time, made by the user (never while typing), the app named in the User-Agent.
 pub fn search_places(base: &str, q: &str, region: &Region) -> Result<Vec<crate::logic::place::Place>, String> {
@@ -63,7 +89,7 @@ pub fn download(base: &str, region: &Region, done: &AtomicU64, total: &AtomicU64
     total.store(expected.unwrap_or(0), Ordering::Relaxed);
     let mut from = Counted { inner: res.body_mut().as_reader(), done, cancel };
     let cut = tr("Download cut", "Téléchargement interrompu");
-    let n = write_atomic_from(&extract_path(region.id), &mut from, false).map_err(|e| {
+    let n = write_atomic_from(&extract_path(&region.id), &mut from, false).map_err(|e| {
         if e.to_string() == crate::logic::graph::CANCELLED { e.to_string() } else { format!("{cut} : {e}") }
     })?;
     if expected.is_some_and(|x| x != n) {
