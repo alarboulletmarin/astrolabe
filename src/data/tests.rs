@@ -423,6 +423,17 @@ fn a_region_is_downloaded_once_and_planned_offline(cx: &mut TestAppContext) {
     assert_eq!(servers.asked("/terrarium/"), tiles, "no tile asked again");
 }
 
+/// The window tests' data ignore the settings other tests saved in the folder they share: a
+/// preference left there (asphalt avoided) changed the loops one of them found, by test order.
+#[gpui::test]
+fn the_window_tests_start_from_no_settings(cx: &mut TestAppContext) {
+    let root = folder("settings-ignored");
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    std::fs::write(root.join("data/settings"), "loops.paved=1\nloops.mode=range\n").unwrap();
+    let data = cx.new(|_| Data::with_activities(Theme::for_appearance(gpui::WindowAppearance::Dark), Vec::new()));
+    assert!(data.read_with(cx, |d, _| d.settings.is_empty()));
+}
+
 /// Regions from Geofabrik's index (a stand-in): added (downloaded and built), used, read back,
 /// updated, removed with their files; the index kept for when the server can't be reached.
 #[gpui::test]

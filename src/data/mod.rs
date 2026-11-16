@@ -148,6 +148,8 @@ impl Data {
         let mut d = Data { acts: Arc::new(acts), key_loaded: true, status: Status::Idle, ..Self::blank(theme) };
         // No region on disk to look for.
         d.loops.looked = true;
+        // Nor the settings other tests saved in the folder they share: each starts from none.
+        d.settings.clear();
         d
     }
 
