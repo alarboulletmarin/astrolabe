@@ -908,6 +908,55 @@ mod tests {
         assert!((0..1000).map(|_| r.unit()).all(|u| (0.0..1.0).contains(&u)));
     }
 
+    /// The made-up athlete's usual routes for `scripts/demo-data.py`, planned on real paths from
+    /// home in Annecy: a few lengths per sport, written as `scripts/demo-routes.json` (points at
+    /// least 15 m apart, with their altitude). Run by hand, on a graph of the Rhône-Alpes region
+    /// (Settings › Maps):
+    ///
+    /// ASTROLABE_GRAPH=~/.local/share/astrolabe/osm/rhone-alpes.graph cargo test --release -- --ignored --nocapture demo_routes
+    #[test]
+    #[ignore]
+    fn demo_routes() {
+        let path = std::env::var("ASTROLABE_GRAPH").expect("ASTROLABE_GRAPH: a Rhône-Alpes graph");
+        let g = crate::logic::graph::Graph::decode(&std::fs::read(path).unwrap()).unwrap();
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let home = [45.899, 6.129];
+        // (sport, trail preference, lengths in km)
+        let sports: [(&str, f32, &[f64]); 5] = [
+            ("running", 0.3, &[6.0, 7.5, 8.5, 10.0, 12.0, 14.0, 16.0, 18.0, 21.0]),
+            ("trail_running", 1.0, &[10.0, 13.0, 16.0, 20.0, 25.0]),
+            ("walking", 0.5, &[3.0, 4.5, 6.0, 8.0]),
+            ("hiking", 1.0, &[11.0, 14.0, 18.0]),
+            ("road_biking", 0.0, &[30.0, 40.0, 50.0, 65.0, 80.0]),
+        ];
+        let mut out = serde_json::Map::new();
+        for (sport, trail, kms) in sports {
+            let mut routes = Vec::new();
+            for (i, km) in kms.iter().enumerate() {
+                let prefs = Prefs { trail, ..Prefs::default() };
+                let req = Request { lat: home[0], lon: home[1], target: Target::Exact(km * 1000.0), prefs, climb: None, seed: 7 + i as u64, count: 1, via: Vec::new(), places: Places::default() };
+                let Ok(found) = plan(&g, &req, threads) else {
+                    println!("{sport} {km} km: no loop");
+                    continue;
+                };
+                let l = &found[0];
+                let (mut line, mut eles, mut last) = (Vec::new(), Vec::new(), f32::NEG_INFINITY);
+                for ((p, e), a) in l.line.iter().zip(&l.eles).zip(&l.along) {
+                    if a - last >= 15.0 || std::ptr::eq(p, l.line.last().unwrap()) {
+                        line.push([(p[0] * 1e5).round() / 1e5, (p[1] * 1e5).round() / 1e5]);
+                        eles.push(e.map(|e| e.round()));
+                        last = *a;
+                    }
+                }
+                println!("{sport} {km} km: {:.1} km, +{:.0} m, {} points", l.dist / 1000.0, l.up, line.len());
+                routes.push(serde_json::json!({ "line": line, "eles": eles }));
+            }
+            out.insert(sport.into(), routes.into());
+        }
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/demo-routes.json");
+        std::fs::write(file, serde_json::to_string(&out).unwrap()).unwrap();
+    }
+
     /// 200 requests of 5 to 40 km in exact mode, from starts drawn within 12 km of Nice: how many
     /// get a loop within 2 %, and how long planning takes. Run by hand, in release, on a graph
     /// built by `measure_graph_build`:
