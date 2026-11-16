@@ -229,7 +229,7 @@ pub fn tint(png: &[u8], bg: [u8; 3], fg: [u8; 3]) -> Option<(u32, u32, Vec<u8>)>
     Some((w, h, out))
 }
 
-/// An aerial photo's tile for the ground in 3D, a little toned down, darker in the dark theme.
+/// An aerial photo's tile (JPEG or PNG) for the ground in 3D, a little toned down, darker in the dark theme.
 /// BGRA out; where there is no photo (white: out of France, out at sea, and the near white
 /// fringe along the edge of what was photographed) the alpha is 0.
 pub fn photo(png: &[u8], dark: bool) -> Option<(u32, u32, Vec<u8>)> {
@@ -266,6 +266,16 @@ mod tests {
         assert_eq!(photo(&png([241, 250, 255]), false).unwrap().2[3], 0);
         assert_eq!(photo(&png([239, 255, 255]), false).unwrap().2[3], 255);
         assert!(photo(b"not a png", false).is_none());
+        // The IGN's tiles are JPEG: read alike (within its rounding), white as none too.
+        let jpeg = |px: [u8; 3]| {
+            let mut b = Vec::new();
+            image::RgbImage::from_pixel(16, 16, image::Rgb(px)).write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Jpeg).unwrap();
+            b
+        };
+        let (w, h, j) = photo(&jpeg([60, 120, 40]), false).unwrap();
+        assert_eq!((w, h), (16, 16));
+        assert!(j[..3].iter().zip(&px[..3]).all(|(a, b)| a.abs_diff(*b) <= 4) && j[3] == 255, "{:?} {:?}", &j[..4], &px[..4]);
+        assert_eq!(photo(&jpeg([255; 3]), false).unwrap().2[3], 0);
     }
 
     #[test]

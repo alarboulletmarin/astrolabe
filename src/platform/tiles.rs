@@ -3,14 +3,14 @@
 //! policy asks.
 
 use super::store::{cache_dir, write_atomic};
-use super::{agent, http_error};
+use super::{USER_AGENT, agent, http_error, service_error};
 use std::fs;
 
 pub const DEFAULT_TILES: &str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 
-/// The IGN's aerial photos of France (open licence, no key), as PNG: its tiled service only
-/// gives them as JPEG, which the app doesn't read. Outside France, and out at sea, all white.
-pub const PHOTO_TILES: &str = "https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=ORTHOIMAGERY.ORTHOPHOTOS&STYLES=&CRS=EPSG:3857&BBOX={bbox}&WIDTH=256&HEIGHT=256&FORMAT=image/png";
+/// The IGN's aerial photos of France (open licence, no key). Outside France, and out at sea,
+/// all white; far from it, nothing (404).
+pub const PHOTO_TILES: &str = "https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=ORTHOIMAGERY.ORTHOPHOTOS&STYLE=normal&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=image/jpeg";
 
 /// A tile's address: `{z}`, `{x}`, `{y}`, or `{bbox}`, its box in web Mercator metres (west,
 /// south, east, north).
@@ -23,6 +23,26 @@ pub fn tile_url(template: &str, z: u8, x: u32, y: u32) -> String {
 }
 
 pub fn tile(template: &str, z: u8, x: u32, y: u32) -> Result<Vec<u8>, String> {
+    fetch(template, z, x, y).map_err(http_error)
+}
+
+/// An aerial photo's tile (`PHOTO_TILES`); `None` where the IGN has none at all. One client for
+/// all of them, so that its connections serve again; a tile not there within 10 s is given up
+/// (the server sometimes holds one), to be asked again.
+pub fn photo(z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>, String> {
+    static PHOTOS: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    let client = PHOTOS.get_or_init(|| ureq::Agent::config_builder().user_agent(USER_AGENT).timeout_global(Some(std::time::Duration::from_secs(10))).build().into());
+    match fetch_with(client, PHOTO_TILES, z, x, y) {
+        Err(ureq::Error::StatusCode(404)) => Ok(None),
+        r => r.map(Some).map_err(|e| service_error("IGN", e)),
+    }
+}
+
+fn fetch(template: &str, z: u8, x: u32, y: u32) -> Result<Vec<u8>, ureq::Error> {
+    fetch_with(&agent(), template, z, x, y)
+}
+
+fn fetch_with(client: &ureq::Agent, template: &str, z: u8, x: u32, y: u32) -> Result<Vec<u8>, ureq::Error> {
     let url = tile_url(template, z, x, y);
     // One folder per server, so changing it never mixes two styles.
     let server: String = template.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
@@ -30,13 +50,7 @@ pub fn tile(template: &str, z: u8, x: u32, y: u32) -> Result<Vec<u8>, String> {
     if let Ok(b) = fs::read(&path) {
         return Ok(b);
     }
-    let bytes = agent()
-        .get(&url)
-        .call()
-        .map_err(http_error)?
-        .body_mut()
-        .read_to_vec()
-        .map_err(http_error)?;
+    let bytes = client.get(&url).call()?.body_mut().read_to_vec()?;
     write_atomic(&path, &bytes, false).ok();
     Ok(bytes)
 }

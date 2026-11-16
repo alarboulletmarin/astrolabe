@@ -644,14 +644,17 @@ impl Data {
             let px = cx
                 .background_executor()
                 .spawn(async move {
-                    let png = tiles::tile(tiles::PHOTO_TILES, k.0, k.1, k.2).ok()?;
-                    map::photo(&png, dark).filter(|(w, h, _)| (*w, *h) == (256, 256)).map(|(_, _, px)| Arc::new(px))
+                    // Where the IGN has nothing, a tile with nothing in it: the grey ground shows.
+                    match tiles::photo(k.0, k.1, k.2).ok()? {
+                        Some(jpeg) => map::photo(&jpeg, dark).filter(|(w, h, _)| (*w, *h) == (256, 256)).map(|(_, _, px)| Arc::new(px)),
+                        None => Some(Arc::new(vec![0; 256 * 256 * 4])),
+                    }
                 })
                 .await;
+            let failed = px.is_none();
             this.update(cx, |d, cx| {
                 d.photos_busy -= 1;
-                // A tile that can't be had stays empty, so it isn't asked again at every frame;
-                // one fetched for the other theme is dropped.
+                // One fetched for the other theme is dropped.
                 if px.is_some() && d.theme.dark == dark {
                     d.ground.insert(k, px);
                 } else if d.theme.dark != dark {
@@ -660,6 +663,18 @@ impl Data {
                 cx.notify();
             })
             .ok();
+            // One that couldn't be had (the server failed, or the network) stays empty a while, so
+            // that it isn't asked again at every frame; then it is asked again.
+            if failed {
+                cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
+                this.update(cx, |d, cx| {
+                    if d.ground.get(&k).is_some_and(Option::is_none) {
+                        d.ground.remove(&k);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
         })
         .detach();
         None
