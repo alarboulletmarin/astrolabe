@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Astrolabe — Know where you stand</title>
+<style>
+@font-face { font-family: "Plex Sans"; font-weight: 400; src: url(../assets/fonts/IBMPlexSans-Regular.ttf); }
+@font-face { font-family: "Plex Sans"; font-weight: 700; src: url(../assets/fonts/IBMPlexSans-Bold.ttf); }
+@font-face { font-family: "Plex Mono"; font-weight: 400; src: url(../assets/fonts/IBMPlexMono-Regular.ttf); }
+@font-face { font-family: "Plex Mono"; font-weight: 700; src: url(../assets/fonts/IBMPlexMono-Bold.ttf); }
+@font-face { font-family: "Plex Serif"; font-weight: 600; src: url(../assets/fonts/IBMPlexSerif-SemiBold.ttf); }
+html, body { margin: 0; background: #000; overflow: hidden; }
+#stage { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #1b1a19; }
+#c, #fx { position: absolute; inset: 0; }
+#wallwrap { position: absolute; inset: 0; perspective: 2200px; perspective-origin: 50% 50%; pointer-events: none; }
+#wall { position: absolute; left: 50%; top: 50%; width: 0; height: 0; transform-style: preserve-3d; }
+#wall img { position: absolute; width: 640px; height: 420px; border-radius: 12px; border: 1px solid #3a3735;
+  box-shadow: 0 30px 80px rgba(0,0,0,.55); backface-visibility: hidden; }
+#pill { position: absolute; left: 50%; bottom: 92px; transform: translateX(-50%); padding: 14px 30px 16px; border-radius: 999px;
+  background: #1b1a19; border: 1px solid #3a3735; color: #e4e0da; font: 700 44px "Plex Sans"; letter-spacing: -.02em;
+  white-space: nowrap; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+#pill i { font: 400 22px "Plex Mono"; font-style: normal; color: #e0926b; margin-right: 18px; vertical-align: 6px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="c" width="1920" height="1080"></canvas>
+  <div id="wallwrap"><div id="wall"></div></div>
+  <div id="pill"><i>01</i><span>Today</span></div>
+  <canvas id="fx" width="1920" height="1080"></canvas>
+</div>
+<script src="timeline.js"></script>
+<script src="routes.js"></script>
+<script>
+"use strict";
+const W = 1920, H = 1080;
+const c = document.getElementById("c"), x = c.getContext("2d");
+const fx = document.getElementById("fx"), fxx = fx.getContext("2d");
+const wall = document.getElementById("wall"), wallwrap = document.getElementById("wallwrap");
+const pill = document.getElementById("pill"), pillN = pill.querySelector("i"), pillW = pill.querySelector("span");
+
+// Bref Dark / Bref Light (src/ui/theme.rs).
+const D = { bg: "#1b1a19", text: "#e4e0da", dim: "#77716a", soft: "#a8a29a", accent: "#e0926b", panel: "#232120", border: "#3a3735" };
+const L = { bg: "#fbfaf8", text: "#26231f", dim: "#a8a29a", soft: "#6f6a63", accent: "#b4532a", panel: "#f1eeea", border: "#e2ddd6" };
+// Grade buckets, palest to darkest, as the loop legend.
+const GRADE = ["#f6d9c8", "#efb594", "#e0926b", "#c45f33", "#93391a"];
+const SANS = "Plex Sans", MONO = "Plex Mono", SERIF = "Plex Serif";
+
+// ---------- maths ----------
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const P = (t, a, b) => clamp((t - a) / (b - a));
+const eOut3 = t => 1 - Math.pow(1 - t, 3);
+const eIn3 = t => t * t * t;
+const eIO3 = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const eOutExpo = t => t >= 1 ? 1 : 1 - Math.pow(2, -10 * t);
+const eInExpo = t => t <= 0 ? 0 : Math.pow(2, 10 * t - 10);
+const eIOExpo = t => t <= 0 ? 0 : t >= 1 ? 1 : t < .5 ? Math.pow(2, 20 * t - 10) / 2 : (2 - Math.pow(2, -20 * t + 10)) / 2;
+const eOutBack = (t, s = 1.70158) => 1 + (s + 1) * Math.pow(t - 1, 3) + s * Math.pow(t - 1, 2);
+const eOutElastic = t => t <= 0 ? 0 : t >= 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - .75) * (2 * Math.PI / 3)) + 1;
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function hex(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+function mix(a, b, t) { const A = hex(a), B = hex(b); return "rgb(" + A.map((v, i) => Math.round(lerp(v, B[i], t))).join(",") + ")"; }
+function rgba(h, a) { const [r, g, b] = hex(h); return `rgba(${r},${g},${b},${a})`; }
+
+// ---------- drawing helpers ----------
+function font(w, size, fam = SANS) { x.font = `${w} ${size}px "${fam}"`; }
+function text(s, X, Y, { w = 700, size = 100, fam = SANS, color = D.text, align = "left", base = "alphabetic", track = 0, alpha = 1 } = {}) {
+  x.save(); font(w, size, fam); x.fillStyle = color; x.textAlign = align; x.textBaseline = base; x.globalAlpha *= alpha;
+  x.letterSpacing = track + "px"; x.fillText(s, X, Y); x.restore();
+}
+function measure(s, w, size, fam = SANS, track = 0) { x.save(); font(w, size, fam); x.letterSpacing = track + "px"; const m = x.measureText(s).width; x.restore(); return m; }
+// A word rising out of a mask line.
+function rise(s, X, Y, p, opts) {
+  const size = opts.size || 100;
+  x.save(); x.beginPath(); x.rect(X - 40, Y - size * 1.05, (opts.clipW || 3000), size * 1.35); x.clip();
+  text(s, X, Y + (1 - eOutExpo(p)) * size * 1.2, opts); x.restore();
+}
+function typed(key, t, X, Y, opts = {}) {
+  const T = TL.typed[key]; let n = 0;
+  for (const tt of T.times) if (t >= tt) n++;
+  const s = T.text.slice(0, n);
+  text(s, X, Y, { w: 400, fam: MONO, ...opts });
+  const size = opts.size || 30, wdt = measure(s, 400, size, MONO, opts.track || 0);
+  const done = n === T.text.length, lastT = n ? T.times[n - 1] : -1;
+  const blink = !done || (Math.floor((t - lastT) * 3.6) % 2 === 0);
+  if (blink && (opts.cursor !== false)) {
+    const cx = opts.align === "center" ? X + wdt / 2 - measure(T.text, 400, size, MONO, opts.track || 0) / 2 + 0 : X + wdt;
+    x.save(); x.fillStyle = opts.cursorColor || D.accent; x.globalAlpha *= (opts.alpha ?? 1);
+    x.fillRect(opts.align === "center" ? X - measure(T.text, 400, size, MONO) / 2 + wdt + 4 : cx + 4, Y - size * .78, size * .5, size * .95); x.restore();
+  }
+  return n;
+}
+function bg(col) { x.fillStyle = col; x.fillRect(0, 0, W, H); }
+
+// ---------- the icon (dev.andrea.Astrolabe.svg), in its 100-unit frame ----------
+// p: draw progress of the rings 0..1, dot: dot scale, spin: rotation of the inner rete.
+function icon(cx, cy, size, { p = 1, dot = 1, spin = 0, ticks = 0, tickSpin = 0, stroke = D.text, accent = D.accent, glow = 0, alpha = 1, ringW = 1 } = {}) {
+  const k = size / 84; // outer ring of radius 42 -> size/2
+  x.save(); x.translate(cx, cy); x.scale(k, k); x.translate(-50, -50); x.globalAlpha *= alpha; const base = x.globalAlpha;
+  x.lineCap = "round"; x.strokeStyle = stroke;
+  // Outer ring.
+  const po = eIO3(P(p, 0, .55));
+  x.lineWidth = 7 * ringW; x.beginPath(); x.arc(50, 50, 42, -Math.PI / 2, -Math.PI / 2 + po * Math.PI * 2); x.stroke();
+  // Scale ticks just outside: "read a scale".
+  if (ticks > 0) {
+    x.save(); x.translate(50, 50); x.rotate(tickSpin);
+    const N = 72;
+    for (let i = 0; i < N; i++) {
+      const tp = clamp(ticks * N - i * .9 + .5); if (tp <= 0) continue;
+      const a = i / N * Math.PI * 2, big = i % 6 === 0, r1 = 48.5, r2 = r1 + (big ? 5.5 : 2.6) * eOut3(tp);
+      x.strokeStyle = big ? accent : stroke; x.globalAlpha = base * (big ? 1 : .55) * tp; x.lineWidth = big ? 1.1 : .6;
+      x.beginPath(); x.moveTo(Math.cos(a) * r1, Math.sin(a) * r1); x.lineTo(Math.cos(a) * r2, Math.sin(a) * r2); x.stroke();
+    }
+    x.restore(); x.globalAlpha = base;
+  }
+  // Inner rete, clipped to the plate.
+  x.save(); x.beginPath(); x.arc(50, 50, 38.51, 0, Math.PI * 2); x.clip();
+  x.translate(50, 50); x.rotate(spin); x.translate(-50, -50);
+  const rings = [[50, 30.76, 25.7], [50, 35.55, 16.37], [50, 37.9, 9.6], [50, 38.97, 3.95]];
+  rings.forEach(([rx, ry, r], i) => {
+    const q = eIO3(P(p, .18 + i * .12, .62 + i * .12)); if (q <= 0) return;
+    x.lineWidth = 2.4 * ringW; x.beginPath(); x.arc(rx, ry, r, Math.PI / 2 - q * Math.PI, Math.PI / 2 + q * Math.PI); x.stroke();
+  });
+  x.restore();
+  // The star.
+  if (dot > 0) {
+    if (glow > 0) { const g = x.createRadialGradient(50, 39.2, 0, 50, 39.2, 22); g.addColorStop(0, rgba(accent, .55 * glow)); g.addColorStop(1, rgba(accent, 0)); x.fillStyle = g; x.beginPath(); x.arc(50, 39.2, 22, 0, 7); x.fill(); }
+    x.fillStyle = accent; x.beginPath(); x.arc(50, 39.2, 4 * dot, 0, Math.PI * 2); x.fill();
+  }
+  x.restore();
+}
+// Where the star sits on screen for an icon of `size` at (cx, cy).
+const starAt = (cx, cy, size) => [cx, cy + (39.2 - 50) * size / 84];
+
+// ---------- data for the charts ----------
+const rnd = mulberry(1616);
+const WEEKS = Array.from({ length: 26 }, (_, i) => {
+  const tot = i === 25 ? 1.47 : clamp(5.9 + Math.sin(i * .9) * 1.4 + (rnd() - .5) * 3.2, 1.2, 9);
+  const sh = [.25 + rnd() * .3, .2 + rnd() * .3, rnd() * .35, rnd() * .15]; const s = sh.reduce((a, b) => a + b);
+  return { tot, parts: sh.map(v => v / s * tot) };
+});
+const GRID = Array.from({ length: 53 * 7 }, () => { const r = rnd(); return r < .42 ? 0 : r < .62 ? 1 : r < .78 ? 2 : r < .92 ? 3 : 4; });
+
+// ---------- scene 1: a star, rings, a scale (0 - 3 s) ----------
+function s1(t) {
+  bg(D.bg);
+  // Faint sky: a few stars that drift.
+  const r = mulberry(3);
+  for (let i = 0; i < 140; i++) {
+    const sx = r() * W, sy = r() * H, tw = .3 + .7 * Math.abs(Math.sin(t * 2 + i));
+    x.fillStyle = rgba(D.text, .18 * tw * P(t, 0, .8)); x.fillRect(sx + t * 6 * (r() - .5), sy, 2, 2);
+  }
+  const zoom = eInExpo(P(t, 2.45, 3.0));
+  const size = 520 * (1 + zoom * 26);
+  const [sx, sy] = starAt(960, 470, 520);
+  // Zoom toward the star itself.
+  const cx = 960 + (960 - sx) * zoom * 26 * 0, cy = 470;
+  x.save(); x.translate(sx, sy); x.scale(1 + zoom * 26, 1 + zoom * 26); x.translate(-sx, -sy);
+  icon(960, 470, 520, {
+    p: P(t, .35, 2.1), dot: eOutElastic(P(t, .12, 1.0)), spin: (1 - eOut3(P(t, .4, 2.4))) * -2.4 + t * .05,
+    ticks: P(t, .9, 2.3), tickSpin: t * .12, glow: .6 + .4 * Math.sin(t * 5), alpha: 1
+  });
+  x.restore();
+  // Typed caption.
+  typed("star", t, 960 - measure(TL.typed.star.text, 400, 34, MONO) / 2, 900, { size: 34, color: D.soft, alpha: 1 - P(t, 2.35, 2.6) });
+  // Accent flood from the star: becomes scene 2's background.
+  const fl = eInExpo(P(t, 2.7, 3.0));
+  if (fl > 0) { x.fillStyle = D.accent; x.beginPath(); x.arc(sx, sy, fl * 1300, 0, 7); x.fill(); }
+}
+
+// ---------- scene 2: read a scale. know where you stand. (3 - 6 s) ----------
+function s2(t) {
+  const lt = t - 3;
+  bg(D.accent);
+  const ink = D.bg;
+  // A ruler sliding past: the scale.
+  const slide = lt * 520 + eOutExpo(P(lt, 0, .6)) * 400;
+  const ry = 760, ra = 1 - P(lt, .85, 1.1);
+  x.save(); x.globalAlpha = ra;
+  for (let i = -2; i < 60; i++) {
+    const X = i * 48 - (slide % 480) - 0; const n = i + Math.floor(slide / 480) * 10;
+    const big = n % 10 === 0, mid = n % 5 === 0;
+    x.fillStyle = ink; x.fillRect(X, ry, 3, big ? -90 : mid ? -56 : -30);
+    if (big) text(String(n / 10 * 100).padStart(3, "0"), X + 10, ry - 70, { w: 400, fam: MONO, size: 26, color: ink });
+  }
+  x.fillRect(0, ry, W, 3);
+  x.restore();
+  const p0 = P(lt, .05, .5);
+  if (lt < 1.05) {
+    const out = eInExpo(P(lt, .85, 1.05));
+    rise("read a scale.", 150, 520 - out * 160, p0, { size: 150, color: ink, track: -5, alpha: 1 - out });
+    text("02", 150, 300, { w: 400, fam: MONO, size: 28, color: ink, alpha: P(lt, .1, .3) * (1 - out) });
+  }
+  // Know where / you stand.
+  if (lt >= .95) {
+    const k = lt - 1;
+    const words = [["Know", 150, 470, 0], ["where", 0, 470, .25], ["you", 150, 720, .5], ["stand.", 0, 720, 1.0]];
+    let xx = 150; const out = eInExpo(P(lt, 2.55, 2.95));
+    words.forEach(([w, x0, y, d], i) => {
+      if (x0) xx = x0;
+      const pw = P(k, d, d + .45);
+      const size = 236;
+      const X = xx;
+      x.save(); x.translate(0, -out * (y > 600 ? 700 : 560));
+      rise(w, X, y, pw, { size, color: ink, track: -10, clipW: measure(w, 700, size, SANS, -10) + 80 });
+      x.restore();
+      xx += measure(w + " ", 700, size, SANS, -10);
+    });
+    // Underline sweep under "stand."
+    const u = eOutExpo(P(k, 1.25, 1.75));
+    const sx = 150 + measure("you ", 700, 236, SANS, -10);
+    x.fillStyle = ink; x.fillRect(sx, 765 - out * 600, measure("stand.", 700, 236, SANS, -10) * u, 14);
+    // The star, at the full stop.
+    const [dx] = [sx + measure("stand", 700, 236, SANS, -10) + 12];
+    text("01  —  where you stand", W - 150, 980, { w: 400, fam: MONO, size: 26, color: ink, align: "right", alpha: P(k, 1.4, 1.7) * (1 - out) });
+  }
+  // Dark panel wiping up into scene 3.
+  const wp = eInExpo(P(t, 5.55, 6.0));
+  if (wp > 0) { x.fillStyle = D.bg; x.fillRect(0, H - wp * H, W, H); }
+}
+
+// ---------- scene 3: this week against the median week (6 - 10 s) ----------
+function chartWeeks(lt, ox, oy, gw, gh, alpha) {
+  const n = WEEKS.length, slot = gw / n, bw = slot * .74, max = 9.5;
+  // Axis lines.
+  x.save(); x.globalAlpha = alpha;
+  for (let h = 2; h <= 8; h += 2) {
+    const y = oy - h / max * gh, a = eOutExpo(P(lt, .1 + h * .03, .7 + h * .03));
+    x.fillStyle = D.border; x.fillRect(ox, y, gw * a, 1.5);
+    text(h + "h", ox - 20, y + 9, { w: 400, fam: MONO, size: 24, color: D.dim, align: "right", alpha: a });
+  }
+  const tints = [D.accent, mix(D.accent, D.bg, .32), mix(D.accent, D.bg, .55), mix(D.accent, D.bg, .74)];
+  WEEKS.forEach((wk, i) => {
+    const d = .35 + i * .055, g = eOutBack(P(lt, d, d + .55), 2.2);
+    const X = ox + i * slot + (slot - bw) / 2;
+    if (i === n - 1) {
+      // The current week: dashed outline, filling.
+      const hh = wk.tot / max * gh * g, pulse = .6 + .4 * Math.sin(lt * 9);
+      x.save(); x.setLineDash([7, 6]); x.strokeStyle = rgba(D.accent, pulse); x.lineWidth = 2.5; x.strokeRect(X, oy - hh, bw, hh); x.restore();
+      return;
+    }
+    let y = oy;
+    wk.parts.forEach((v, j) => { const hh = v / max * gh * g; x.fillStyle = tints[j]; x.fillRect(X, y - hh, bw, hh); y -= hh; });
+  });
+  // Median, dashed, drawn left to right.
+  const m = 5.87, my = oy - m / max * gh, mp = eIO3(P(lt, 1.9, 2.7));
+  x.save(); x.setLineDash([14, 10]); x.strokeStyle = D.text; x.lineWidth = 3; x.beginPath(); x.moveTo(ox, my); x.lineTo(ox + gw * mp, my); x.stroke(); x.restore();
+  if (mp > 0) {
+    const tx = ox + gw * mp;
+    x.fillStyle = D.text; x.beginPath(); x.arc(tx, my, 7, 0, 7); x.fill();
+    text("median week  5h52", ox + gw - 4, my - 22, { w: 400, fam: MONO, size: 26, color: D.text, align: "right", alpha: P(lt, 2.4, 2.8) });
+  }
+  x.restore();
+}
+function s3(t) {
+  const lt = t - 6;
+  bg(D.bg);
+  const out = eInExpo(P(t, 9.6, 10.0));
+  x.save(); x.translate(0, -out * H * 1.1);
+  const a = 1;
+  text("THIS WEEK", 150, 190, { w: 400, fam: MONO, size: 26, color: D.accent, track: 4, alpha: P(lt, .05, .3) });
+  // Counter: 0h00 -> 1h28.
+  const mins = Math.round(88 * eOutExpo(P(lt, .15, 1.5)));
+  const val = Math.floor(mins / 60) + "h" + String(mins % 60).padStart(2, "0");
+  rise(val, 140, 400, P(lt, .05, .5), { size: 230, color: D.text, track: -10 });
+  text("1 outing · 6 days left", 150, 470, { w: 400, fam: MONO, size: 28, color: D.soft, alpha: P(lt, .7, 1.1) });
+  // Right column: the claim.
+  const cl = P(lt, 2.6, 3.0);
+  rise("against your", 1100, 300, cl, { size: 86, color: D.soft, track: -3 });
+  rise("median week.", 1100, 400, P(lt, 2.7, 3.15), { size: 86, color: D.text, track: -3 });
+  chartWeeks(lt, 200, 970, 1570, 400, a);
+  x.restore();
+  // Scene 4 coming up from below.
+  if (out > 0) { x.save(); x.translate(0, H - out * H * 1.0); s4(t, true); x.restore(); }
+}
+
+// ---------- scene 4: the streak (10 - 13.5 s) ----------
+function s4(t, preview = false) {
+  const lt = t - 10;
+  if (!preview) bg(D.bg); else { x.fillStyle = D.bg; x.fillRect(0, 0, W, H); }
+  const n = Math.round(66 * eOutExpo(P(lt, .05, 1.2)));
+  const out = eInExpo(P(t, 13.15, 13.5));
+  x.save();
+  // Zoom out and away into the map.
+  x.translate(960, 540); x.scale(1 + out * 2.4, 1 + out * 2.4); x.translate(-960, -540); x.globalAlpha = 1 - out;
+  text("STREAK", 150, 170, { w: 400, fam: MONO, size: 26, color: D.accent, track: 4 });
+  text(String(n), 140, 470, { w: 700, size: 330, color: D.text, track: -16 });
+  const nw = measure(String(66), 700, 330, SANS, -16);
+  rise("weeks", 160 + nw, 470, P(lt, .5, .9), { size: 110, color: D.soft, track: -4 });
+  rise("at least one outing every week.", 1000, 290, P(lt, .9, 1.3), { size: 50, w: 400, color: D.soft, track: -1 });
+  rise("The longest so far.", 1000, 360, P(lt, 1.05, 1.45), { size: 50, w: 700, color: D.text, track: -1 });
+  // Consistency grid, 53 weeks by 7 days, filling in a diagonal wave.
+  const cs = 26, gap = 6, ox = 150 + 40, oy = 640;
+  const months = ["Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov"];
+  months.forEach((m, i) => text(m, ox + i * 4.42 * (cs + gap), oy - 22, { w: 400, fam: MONO, size: 20, color: D.dim, alpha: P(lt, .3 + i * .03, .6 + i * .03) }));
+  ["Mon", "Wed", "Fri"].forEach((d, i) => text(d, ox - 18, oy + (i * 2) * (cs + gap) + 20, { w: 400, fam: MONO, size: 18, color: D.dim, align: "right", alpha: P(lt, .3, .6) }));
+  const lv = [D.panel, mix(D.accent, D.bg, .78), mix(D.accent, D.bg, .58), mix(D.accent, D.bg, .32), D.accent];
+  for (let col = 0; col < 53; col++) for (let row = 0; row < 7; row++) {
+    const d = .25 + col * .03 + row * .04, p = eOutBack(P(lt, d, d + .35), 3);
+    if (p <= 0) continue;
+    const v = GRID[col * 7 + row];
+    // A ripple of light along the streak, late in the scene.
+    const sweep = Math.exp(-Math.pow((lt - 2.3) * 9 - (col - 13) * .25, 2)) * (col >= 13 ? 1 : 0);
+    const X = ox + col * (cs + gap) + cs / 2, Y = oy + row * (cs + gap) + cs / 2, s = cs * p * (1 + sweep * .25);
+    x.fillStyle = mix(lv[v], v > 0 ? "#f6d9c8" : "#4a3328", clamp(sweep) * .6);
+    x.beginPath(); x.roundRect(X - s / 2, Y - s / 2, s, s, 5); x.fill();
+  }
+  // The current day.
+  const cp = P(lt, 2.0, 2.2);
+  if (cp > 0) { x.strokeStyle = rgba(D.accent, cp); x.lineWidth = 3; x.beginPath(); x.roundRect(ox + 52 * (cs + gap) - 3, oy - 3, cs + 6, cs + 6, 7); x.stroke(); }
+  text("201 active days over the last 53 weeks", ox, oy + 7 * (cs + gap) + 50, { w: 400, fam: MONO, size: 24, color: D.soft, alpha: P(lt, 1.6, 2.0) });
+  x.restore();
+}
+
+// ---------- scene 5: a loop, then every track (13.5 - 19 s) ----------
+const HP = HERO.pts, HD = HERO.dist, HE = HERO.ele, TOT = HD[HD.length - 1];
+function bounds(list) { let a = [1e9, 1e9, -1e9, -1e9]; for (const p of list) { a[0] = Math.min(a[0], p[0]); a[1] = Math.min(a[1], p[1]); a[2] = Math.max(a[2], p[0]); a[3] = Math.max(a[3], p[1]); } return a; }
+const BH = bounds(HP), BA = bounds(OTHERS.flatMap(o => o.pts).concat(HP));
+function fit(b, w, h) { return { cx: (b[0] + b[2]) / 2, cy: (b[1] + b[3]) / 2, k: Math.min(w / (b[2] - b[0]), h / (b[3] - b[1])) }; }
+const CH = fit(BH, 1150, 600), CA = fit(BA, 1800, 980);
+function s5(t) {
+  const lt = t - 13.5;
+  bg(D.bg);
+  const zin = eOutExpo(P(lt, 0, .9));
+  const zz = eIO3(P(t, 16.9, 18.4));
+  // Camera: from close on the loop to every track.
+  const k = Math.exp(lerp(Math.log(CH.k * (1.6 - .6 * zin)), Math.log(CA.k), zz));
+  const ccx = lerp(CH.cx, CA.cx, zz), ccy = lerp(CH.cy, CA.cy, zz);
+  const rot = lerp(-.12, .03, eIO3(P(lt, 0, 5.5)));
+  const scx = 960, scy = lerp(450, 520, zz);
+  const tr = ([px, py]) => { const dx = (px - ccx) * k, dy = (py - ccy) * k; return [scx + dx * Math.cos(rot) - dy * Math.sin(rot), scy + dx * Math.sin(rot) + dy * Math.cos(rot)]; };
+  // Graticule.
+  x.save(); x.globalAlpha = .9;
+  const step = 500; // metres
+  for (let gx = Math.floor((BA[0] - 4000) / step) * step; gx < BA[2] + 4000; gx += step) {
+    const a = tr([gx, BA[1] - 4000]), b = tr([gx, BA[3] + 4000]);
+    x.strokeStyle = gx % 2500 === 0 ? "#2b2826" : "#221f1e"; x.lineWidth = 1.5; x.beginPath(); x.moveTo(...a); x.lineTo(...b); x.stroke();
+  }
+  for (let gy = Math.floor((BA[1] - 4000) / step) * step; gy < BA[3] + 4000; gy += step) {
+    const a = tr([BA[0] - 4000, gy]), b = tr([BA[2] + 4000, gy]);
+    x.strokeStyle = gy % 2500 === 0 ? "#2b2826" : "#221f1e"; x.lineWidth = 1.5; x.beginPath(); x.moveTo(...a); x.lineTo(...b); x.stroke();
+  }
+  x.restore();
+  // Every other track, glowing in.
+  if (t > 16.9) {
+    x.save(); x.globalCompositeOperation = "lighter"; x.lineJoin = "round"; x.lineCap = "round";
+    OTHERS.forEach((o, i) => {
+      const d = 17.0 + (i % 13) * .07 + Math.floor(i / 13) * .25, q = eIO3(P(t, d, d + .9));
+      if (q <= 0) return;
+      const m = Math.max(2, Math.floor(o.pts.length * q));
+      x.strokeStyle = rgba(D.accent, .55); x.lineWidth = 3.4;
+      x.beginPath(); o.pts.slice(0, m).forEach((p, j) => { const [a, b] = tr(p); j ? x.lineTo(a, b) : x.moveTo(a, b); }); x.stroke();
+    });
+    x.restore();
+  }
+  // The loop, drawn by grade.
+  const dp = eIO3(P(lt, .35, 3.4)), dnow = dp * TOT;
+  x.save(); x.lineJoin = "round"; x.lineCap = "round";
+  const lw = lerp(8, 4, zz);
+  // Glow underlay.
+  x.shadowColor = rgba(D.accent, .55); x.shadowBlur = 18;
+  let head = tr(HP[0]), headI = 0;
+  for (let i = 1; i < HP.length; i++) {
+    if (HD[i - 1] > dnow) break;
+    const f = HD[i] > dnow ? (dnow - HD[i - 1]) / (HD[i] - HD[i - 1]) : 1;
+    const a = tr(HP[i - 1]), b0 = tr(HP[i]), b = [lerp(a[0], b0[0], f), lerp(a[1], b0[1], f)];
+    x.strokeStyle = GRADE[HERO.grade[i]]; x.lineWidth = lw;
+    x.beginPath(); x.moveTo(...a); x.lineTo(...b); x.stroke();
+    head = b; headI = i;
+  }
+  x.restore();
+  // Start pin.
+  const st = tr(HP[0]), sp = eOutBack(P(lt, .1, .45), 3);
+  x.fillStyle = D.text; x.beginPath(); x.arc(st[0], st[1], 12 * sp, 0, 7); x.fill();
+  x.fillStyle = D.bg; x.beginPath(); x.arc(st[0], st[1], 5 * sp, 0, 7); x.fill();
+  // The runner: a star moving along.
+  if (dp > 0 && dp < 1 || (dp >= 1 && t < 17.2)) {
+    const pul = (lt * 2.5) % 1;
+    x.strokeStyle = rgba(D.accent, 1 - pul); x.lineWidth = 3; x.beginPath(); x.arc(head[0], head[1], 12 + pul * 34, 0, 7); x.stroke();
+    x.fillStyle = D.accent; x.beginPath(); x.arc(head[0], head[1], 11, 0, 7); x.fill();
+    x.fillStyle = "#fff"; x.beginPath(); x.arc(head[0], head[1], 4.5, 0, 7); x.fill();
+  }
+  // HUD, top left.
+  const hudA = P(lt, .2, .6) * (1 - P(t, 16.9, 17.4));
+  const curE = HE[headI] || HE[0];
+  let climb = 0; for (let i = 1; i <= headI; i++) climb += Math.max(0, HE[i] - HE[i - 1]);
+  x.save(); x.globalAlpha = hudA;
+  x.fillStyle = rgba(D.panel, .92); x.strokeStyle = D.border; x.lineWidth = 1.5;
+  x.beginPath(); x.roundRect(110, 100, 470, 300, 16); x.fill(); x.stroke();
+  text("LOOP A  ·  TRAIL", 145, 160, { w: 400, fam: MONO, size: 24, color: D.accent, track: 3 });
+  text((dnow / 1000).toFixed(1), 140, 270, { w: 700, size: 112, color: D.text, track: -5 });
+  text("km", 150 + measure((dnow / 1000).toFixed(1), 700, 112, SANS, -5), 270, { w: 400, size: 40, color: D.soft });
+  text("+" + Math.round(climb) + " m", 145, 345, { w: 400, fam: MONO, size: 30, color: D.text });
+  text(Math.round(curE) + " m alt", 340, 345, { w: 400, fam: MONO, size: 30, color: D.soft });
+  x.restore();
+  // Coordinates, typed.
+  x.save(); x.globalAlpha = 1 - P(t, 16.9, 17.3);
+  text("START", W - 150 - measure(TL.typed.coords.text, 400, 30, MONO), 140, { w: 400, fam: MONO, size: 22, color: D.dim, track: 3 });
+  typed("coords", t, W - 150 - measure(TL.typed.coords.text, 400, 30, MONO), 180, { size: 30, color: D.text });
+  x.restore();
+  // Legend.
+  const lg = P(lt, .8, 1.2) * (1 - P(t, 16.9, 17.3));
+  ["< 3 %", "3–6", "6–10", "10–15", "> 15 %"].forEach((s, i) => {
+    const X = W - 150 - (4 - i) * 128 - 100;
+    x.globalAlpha = lg; x.fillStyle = GRADE[i]; x.beginPath(); x.roundRect(X, 222, 34, 10, 5); x.fill();
+    text(s, X + 42, 233, { w: 400, fam: MONO, size: 20, color: D.soft, alpha: lg });
+    x.globalAlpha = 1;
+  });
+  // Profile, bottom.
+  const pa = P(lt, .3, .7) * (1 - eIn3(P(t, 16.9, 17.5)));
+  if (pa > 0) {
+    const px0 = 330, pw = 1260, py0 = 1010, ph = 150, emin = 420, emax = 880;
+    x.save(); x.globalAlpha = pa; x.translate(0, (1 - pa) * 60);
+    x.fillStyle = rgba(D.panel, .94); x.strokeStyle = D.border; x.lineWidth = 1.5;
+    x.beginPath(); x.roundRect(px0 - 40, py0 - ph - 70, pw + 80, ph + 100, 16); x.fill(); x.stroke();
+    text("Profile", px0, py0 - ph - 30, { w: 400, size: 24, color: D.soft });
+    text("854 m max  ·  +" + HERO.climb + " m", px0 + pw, py0 - ph - 30, { w: 400, fam: MONO, size: 22, color: D.soft, align: "right" });
+    const PX = d => px0 + d / TOT * pw, PY = e => py0 - (e - emin) / (emax - emin) * ph;
+    x.beginPath(); x.moveTo(PX(0), py0);
+    for (let i = 0; i < HP.length && HD[i] <= dnow; i++) x.lineTo(PX(HD[i]), PY(HE[i]));
+    x.lineTo(PX(dnow), PY(curE)); x.lineTo(PX(dnow), py0); x.closePath();
+    x.fillStyle = rgba(D.accent, .18); x.fill();
+    x.beginPath(); for (let i = 0; i < HP.length && HD[i] <= dnow; i++) i ? x.lineTo(PX(HD[i]), PY(HE[i])) : x.moveTo(PX(HD[i]), PY(HE[i]));
+    x.strokeStyle = D.accent; x.lineWidth = 3; x.stroke();
+    // Grade strip.
+    for (let i = 1; i < HP.length && HD[i - 1] <= dnow; i++) { x.fillStyle = GRADE[HERO.grade[i]]; x.fillRect(PX(HD[i - 1]), py0 + 10, Math.max(1, PX(Math.min(HD[i], dnow)) - PX(HD[i - 1])), 8); }
+    x.fillStyle = D.text; x.beginPath(); x.arc(PX(dnow), PY(curE), 7, 0, 7); x.fill();
+    x.restore();
+  }
+  // Heatmap caption.
+  const hc = P(t, 17.6, 18.0);
+  if (hc > 0) {
+    rise("Every track.", 150, 930, hc, { size: 110, color: D.text, track: -5 });
+    rise("One map.", 150 + measure("Every track. ", 700, 110, SANS, -5), 930, P(t, 17.85, 18.25), { size: 110, color: D.accent, track: -5 });
+    text("2 YEARS AROUND ANNECY · MADE-UP ATHLETE, REAL PATHS", 155, 990, { w: 400, fam: MONO, size: 22, color: D.dim, track: 3, alpha: P(t, 18.1, 18.4) });
+  }
+  // Pre-cut flash.
+  const fl = P(t, 18.8, 19.0);
+  if (fl > 0) { x.fillStyle = rgba(D.text, eInExpo(fl) * .9); x.fillRect(0, 0, W, H); }
+}
+
+// ---------- scene 6: manifesto, one cut per beat (19 - 23 s) ----------
+const CARDS = [
+  { th: D, a: "Yours.", sz: 300 },
+  { th: L, a: "On your", b: "machine.", sz: 210 },
+  { th: D, a: "Opens", b: "instantly.", sz: 210 },
+  { th: L, a: "Talks to", b: "Garmin.", sz: 210 },
+  { th: "A", a: "Nobody", b: "else.", sz: 230 },
+  { th: L, a: "Figures,", sz: 260 },
+  { th: D, a: "never", b: "advice.", sz: 230 },
+  { th: "A", mono: true },
+];
+function s6(t) {
+  const i = clamp(Math.floor((t - 19) / .5), 0, 7), lt = t - 19 - i * .5, cd = CARDS[i];
+  const th = cd.th === "A" ? { bg: D.accent, text: D.bg, soft: mix(D.bg, D.accent, .35), accent: D.bg } : cd.th;
+  bg(th.bg);
+  // Rotating icon, corner.
+  icon(150, 150, 70, { stroke: th.text, accent: th === L ? L.accent : th.accent === D.bg ? D.bg : D.accent, spin: t * 1.5, p: 1, dot: 1 });
+  text(String(i + 1).padStart(2, "0") + " / 08", W - 150, 165, { w: 400, fam: MONO, size: 26, color: th.soft || th.dim, align: "right" });
+  if (cd.mono) {
+    // Typed, with a hard block cursor.
+    const s = TL.typed.binary.text, sz = 92, w0 = measure(s, 400, sz, MONO);
+    typed("binary", t, 960 - w0 / 2, 580, { size: sz, color: th.text, cursorColor: th.text });
+    text("RUST · DRAWN ON THE GPU · MIT", 960, 700, { w: 400, fam: MONO, size: 28, color: th.soft, align: "center", track: 4, alpha: P(lt, .2, .35) });
+    return;
+  }
+  const sc = 1.08 - .08 * eOutExpo(P(lt, 0, .35));
+  x.save(); x.translate(960, 540); x.scale(sc, sc); x.translate(-960, -540);
+  const two = !!cd.b, X = 150;
+  const y1 = two ? 500 : 640, y2 = y1 + cd.sz * .92;
+  rise(cd.a, X, y1, P(lt, 0, .18), { size: cd.sz, color: th.text, track: -cd.sz * .045 });
+  if (two) rise(cd.b, X, y2, P(lt, .05, .24), { size: cd.sz, color: cd.th === "A" ? D.bg : th.accent, track: -cd.sz * .045 });
+  x.restore();
+  // A ruler tick running along the bottom: the beat.
+  x.fillStyle = cd.th === "A" ? D.bg : th.accent; x.fillRect(0, H - 14, W * (i + eOutExpo(P(lt, 0, .45))) / 8, 14);
+}
+
+// ---------- scene 7: the screenshot wall (23 - 27 s) ----------
+const SHOTS = ["today", "journal", "activity", "calendar", "stats", "records", "heatmap", "loops", "today-dark"].map(n => "../docs/" + n + (n === "heatmap" || n === "loops" ? ".jpg" : ".png"));
+const COLS = 9, ROWS = 5, CW = 640, CHh = 420, GAPX = 60, GAPY = 60;
+const cards = [];
+let heroCard = null;
+for (let r = 0; r < ROWS; r++) for (let cI = 0; cI < COLS; cI++) {
+  const im = document.createElement("img");
+  const isHero = r === 2 && cI === 4;
+  im.src = isHero ? "../docs/today-dark.png" : SHOTS[(r * 4 + cI * 3) % 8];
+  wall.appendChild(im);
+  const card = { im, r, c: cI, X: (cI - 4) * (CW + GAPX) - CW / 2, Y: (r - 2) * (CHh + GAPY) - CHh / 2, hero: isHero, ph: (r * 7 + cI * 3) % 10 };
+  cards.push(card); if (isHero) heroCard = card;
+}
+function s7(t, show) {
+  wallwrap.style.display = show ? "block" : "none";
+  pill.style.display = show && t >= 23.2 && t < 26.6 ? "block" : "none";
+  if (!show) return;
+  const lt = t - 23;
+  // Background with a warm glow.
+  bg(D.bg);
+  const g = x.createRadialGradient(960, 600, 0, 960, 600, 1100); g.addColorStop(0, rgba(D.accent, .22)); g.addColorStop(1, rgba(D.accent, 0));
+  x.fillStyle = g; x.fillRect(0, 0, W, H);
+  const flat = eIOExpo(P(t, 25.55, 26.5));
+  const intro = eOutExpo(P(lt, 0, .8));
+  const rx = lerp(52, 0, flat), rz = lerp(-28, 0, flat);
+  // The wall drifts diagonally, then centres the hero card.
+  const drift = (1 - flat) * (lt * 260 - 520);
+  const tz = lerp(-900 + intro * 500, 0, flat);
+  const scaleEnd = 1600 / CW;
+  const sc = lerp(1, scaleEnd, flat) * (1 - eInExpo(P(t, 26.45, 27.0)) * .86);
+  const dx = lerp(drift, 0, flat), dy = lerp(-drift * .35, 0, flat);
+  wall.style.transform = `translate3d(0,0,${tz}px) scale(${sc}) rotateX(${rx}deg) rotateZ(${rz}deg) translate(${dx}px, ${dy}px)`;
+  for (const cd of cards) {
+    const d = cd.ph * .05 + Math.abs(cd.c - 4) * .04, p = eOutExpo(P(lt, d, d + .6));
+    const hover = Math.sin(t * 2 + cd.ph) * 30 * (1 - flat);
+    const z = (1 - p) * -1200 + hover + (cd.hero ? 0 : -flat * 900);
+    const op = cd.hero ? p : p * (1 - flat);
+    cd.im.style.left = cd.X + "px"; cd.im.style.top = cd.Y + "px";
+    cd.im.style.transform = `translateZ(${z}px)`;
+    cd.im.style.opacity = op;
+    cd.im.style.borderRadius = (cd.hero ? lerp(12, 60, P(t, 26.4, 27)) : 12) + "px";
+  }
+  // Feature words, one per eighth note.
+  let wi = 0; TL.words.forEach((w, i) => { if (t >= w.t) wi = i; });
+  const wt = t - TL.words[wi].t;
+  pillN.textContent = String(wi + 1).padStart(2, "0");
+  pillW.textContent = TL.words[wi].w;
+  pill.style.transform = `translateX(-50%) scale(${1 + .08 * (1 - eOutExpo(clamp(wt / .2)))})`;
+  pill.style.opacity = P(t, 23.2, 23.35) * (1 - P(t, 25.6, 25.9));
+}
+
+// ---------- scene 8: the mark (27 - 30 s) ----------
+function s8(t) {
+  const lt = t - 27;
+  bg(D.bg);
+  // Faint ring of the scale, rotating, behind.
+  x.save(); x.globalAlpha = .08 * P(lt, .3, 1.2);
+  icon(960, 540, 1400, { p: 1, dot: 0, ticks: 1, tickSpin: -t * .05, spin: t * .1, ringW: .4 }); x.restore();
+  const mv = eIOExpo(P(lt, .9, 1.6));
+  const size = lerp(380, 250, mv), cx = lerp(960, 960 - 520, mv), cy = 540;
+  const snap = eOutBack(P(lt, 0, .45), 2);
+  // Dot falls from above and lands at 27.5 (the chime).
+  const fallP = P(lt, .15, .5), [sx, sy] = starAt(cx, cy, size);
+  const fy = lerp(-200, sy, eIn3(fallP));
+  x.save(); x.translate(cx, cy); x.scale(lerp(1.4, 1, snap), lerp(1.4, 1, snap)); x.rotate((1 - snap) * .6); x.translate(-cx, -cy);
+  icon(cx, cy, size, { p: clamp(.25 + P(lt, 0, .5) * .75), dot: 0, spin: (1 - eOutExpo(P(lt, 0, 1.2))) * 1.5, ticks: P(lt, .45, 1.3), tickSpin: lt * .08, alpha: clamp(lt / .15) });
+  x.restore();
+  if (fallP < 1) { x.fillStyle = D.accent; x.beginPath(); x.ellipse(sx, fy, size / 84 * 4, size / 84 * 4 * (1 + 1.5 * fallP), 0, 0, 7); x.fill(); }
+  else {
+    // Landing ripple.
+    const rp = P(lt, .5, 1.6);
+    x.strokeStyle = rgba(D.accent, (1 - rp) * .8); x.lineWidth = 3; x.beginPath(); x.arc(sx, sy, 10 + rp * 260, 0, 7); x.stroke();
+    x.strokeStyle = rgba(D.accent, (1 - rp) * .4); x.beginPath(); x.arc(sx, sy, 10 + eOut3(rp) * 160, 0, 7); x.stroke();
+    const bump = 1 + .6 * Math.exp(-(lt - .5) * 8) * Math.sin((lt - .5) * 30);
+    const g = x.createRadialGradient(sx, sy, 0, sx, sy, 70); g.addColorStop(0, rgba(D.accent, .5)); g.addColorStop(1, rgba(D.accent, 0));
+    x.fillStyle = g; x.beginPath(); x.arc(sx, sy, 70, 0, 7); x.fill();
+    x.fillStyle = D.accent; x.beginPath(); x.arc(sx, sy, size / 84 * 4 * bump, 0, 7); x.fill();
+  }
+  // Wordmark and tagline.
+  const wx = 960 - 520 + 200;
+  rise("Astrolabe", wx, 560, P(lt, 1.2, 1.75), { size: 190, color: D.text, track: -8, clipW: 1300 });
+  rise("Know where you stand.", wx + 6, 650, P(lt, 1.45, 1.95), { size: 56, w: 400, fam: SERIF, color: D.soft, track: -1, clipW: 1300 });
+  // Footer.
+  const fa = P(lt, 1.6, 2.0);
+  x.fillStyle = rgba(D.border, fa); x.fillRect(wx, 720, 1000 * eOutExpo(fa), 2);
+  text("FREE AND OPEN SOURCE  ·  LINUX  ·  MACOS  ·  WINDOWS", wx + 4, 780, { w: 400, fam: MONO, size: 24, color: D.dim, track: 3, alpha: fa });
+  if (t >= TL.typed.url.times[0] - .1) typed("url", t, wx + 4, 840, { size: 30, color: D.accent });
+  // Fade out.
+  const fo = P(t, 29.7, 30);
+  if (fo > 0) { x.fillStyle = rgba("#000000", eIn3(fo)); x.fillRect(0, 0, W, H); }
+}
+
+// ---------- post: grain, vignette, flashes on hits ----------
+const grain = document.createElement("canvas"); grain.width = 512; grain.height = 512;
+{ const g = grain.getContext("2d"), id = g.createImageData(512, 512), r = mulberry(9);
+  for (let i = 0; i < id.data.length; i += 4) { const v = r() * 255; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  g.putImageData(id, 0, 0); }
+function post(t) {
+  fxx.clearRect(0, 0, W, H);
+  // Grain.
+  fxx.save(); fxx.globalAlpha = .045; fxx.globalCompositeOperation = "overlay";
+  const f = Math.floor(t * 30), ox = (f * 137) % 512, oy = (f * 241) % 512;
+  fxx.fillStyle = fxx.createPattern(grain, "repeat"); fxx.translate(-ox, -oy); fxx.fillRect(0, 0, W + 512, H + 512); fxx.restore();
+  // Vignette.
+  const v = fxx.createRadialGradient(960, 540, 500, 960, 540, 1250); v.addColorStop(0, "rgba(0,0,0,0)"); v.addColorStop(1, "rgba(0,0,0,.32)");
+  fxx.fillStyle = v; fxx.fillRect(0, 0, W, H);
+  // A short flash after each hit.
+  for (const h of TL.hits) { const d = t - h; if (d >= 0 && d < .18) { fxx.fillStyle = `rgba(255,245,235,${.22 * (1 - d / .18)})`; fxx.fillRect(0, 0, W, H); } }
+}
+
+// ---------- camera shake on hits ----------
+function shake(t) {
+  let s = 0; for (const h of TL.hits) { const d = t - h; if (d >= 0 && d < .3) s += (1 - d / .3) * 9; }
+  return [Math.sin(t * 91) * s, Math.cos(t * 77) * s];
+}
+
+window.render = function (t) {
+  x.save();
+  x.setTransform(1, 0, 0, 1, 0, 0);
+  const [sx, sy] = shake(t); x.translate(sx, sy);
+  const wallOn = t >= 23 && t < 27.0;
+  s7(t, wallOn);
+  if (t < 3) s1(t);
+  else if (t < 6) s2(t);
+  else if (t < 10) s3(t);
+  else if (t < 13.5) s4(t);
+  else if (t < 19) s5(t);
+  else if (t < 23) s6(t);
+  else if (t < 27) { /* drawn in s7 */ }
+  else s8(t);
+  x.restore();
+  wallwrap.style.transform = `translate(${sx}px, ${sy}px)`;
+  post(t);
+};
+window.ready = (async () => {
+  await Promise.all([[400, SANS], [700, SANS], [400, MONO], [700, MONO], [600, SERIF]].map(([w, f]) => document.fonts.load(`${w} 40px "${f}"`)));
+  await Promise.all(cards.map(c => c.im.decode().catch(() => {})));
+  return true;
+})();
+// Live preview when opened by hand: ?t=12.3 or loops.
+if (!navigator.webdriver) {
+  const q = new URLSearchParams(location.search);
+  window.ready.then(() => { if (q.has("t")) render(+q.get("t")); else { const t0 = performance.now(); const loop = () => { render(((performance.now() - t0) / 1000) % 30); requestAnimationFrame(loop); }; loop(); } });
+}
+</script>
+</body>
+</html>
