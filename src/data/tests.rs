@@ -486,7 +486,8 @@ fn regions_are_added_used_and_removed(cx: &mut TestAppContext) {
     assert_eq!(servers.asked(".osm.pbf"), 3);
     assert_eq!(state(&again, cx).2, Some(173));
 
-    // Removed: its files go, the next region is used.
+    // Removed: its files go (a download cut midway too), the next region is used.
+    std::fs::write(root.join("data/osm/monaco.osm.tmp"), b"cut").unwrap();
     again.update(cx, |d, cx| d.remove_region("monaco", cx));
     settle(cx);
     assert_eq!(state(&again, cx), ("provence-alpes-cote-d-azur".into(), vec!["provence-alpes-cote-d-azur".into()], Some(173)));

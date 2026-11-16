@@ -28,6 +28,9 @@ pub struct SettingsView {
     region_input: Entity<InputState>,
     /// The key being changed: its field shows (always, without a key).
     changing_key: bool,
+    /// The region whose removal waits for a yes, and the focus of the question (for Esc).
+    removing: Option<Arc<Region>>,
+    question_focus: FocusHandle,
     _subscriptions: [Subscription; 2],
 }
 
@@ -47,7 +50,7 @@ impl SettingsView {
                 cx.notify();
             }
         });
-        SettingsView { data, width, key_input, tiles_input, region_input, changing_key: false, _subscriptions: [observe, typed] }
+        SettingsView { data, width, key_input, tiles_input, region_input, changing_key: false, removing: None, question_focus: cx.focus_handle(), _subscriptions: [observe, typed] }
     }
 
     fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -64,22 +67,80 @@ impl SettingsView {
         self.region_input.update(cx, |s, cx| s.focus(window, cx));
     }
 
-    /// Removes a region's files once confirmed.
-    fn confirm_remove(&mut self, r: Arc<Region>, window: &mut Window, cx: &mut Context<Self>) {
-        let size = store::region_files(&r.id).0.map(size_label).unwrap_or_default();
-        let question = trf(format!("Remove {}?", r.name()), format!("Retirer {} ?", r.name()));
+    /// Asks before removing a region's files.
+    fn ask_remove(&mut self, r: Arc<Region>, window: &mut Window, cx: &mut Context<Self>) {
+        self.removing = Some(r);
+        self.question_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn answer_remove(&mut self, yes: bool, cx: &mut Context<Self>) {
+        if let Some(r) = self.removing.take()
+            && yes
+        {
+            self.data.update(cx, |d, cx| d.remove_region(&r.id, cx));
+        }
+        cx.notify();
+    }
+
+    /// The question, over the page and in its colours: Remove, or Cancel (Esc, or a click beside).
+    fn question(&self, r: &Region, t: crate::ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
+        let size = store::region_files(&r.id).0.map(|n| format!(" ({})", size_label(n))).unwrap_or_default();
         let detail = trf(
-            format!("Its extract ({size}) and its path network are deleted from the disk; the loops saved stay. It can be downloaded again."),
-            format!("Son extrait ({size}) et son réseau de chemins sont supprimés du disque ; les boucles enregistrées restent. Elle pourra être téléchargée à nouveau."),
+            format!("Its extract{size} and its path network are deleted from the disk; the loops saved stay. It can be downloaded again."),
+            format!("Son extrait{size} et son réseau de chemins sont supprimés du disque ; les boucles enregistrées restent. Elle pourra être téléchargée à nouveau."),
         );
-        let answer = window.prompt(PromptLevel::Warning, &question, Some(&detail), &[tr("Remove", "Retirer"), tr("Cancel", "Annuler")], cx);
-        let data = self.data.clone();
-        cx.spawn(async move |_, cx| {
-            if answer.await == Ok(0) {
-                data.update(cx, |d, cx| d.remove_region(&r.id, cx));
-            }
-        })
-        .detach();
+        deferred(
+            div()
+                .id("remove-question")
+                .track_focus(&self.question_focus)
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    if e.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        this.answer_remove(false, cx);
+                    }
+                }))
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(if t.dark { black().opacity(0.45) } else { t.text.opacity(0.12) })
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(16.))
+                .on_click(cx.listener(|this, _, _, cx| this.answer_remove(false, cx)))
+                .child(
+                    div()
+                        .id("remove-box")
+                        .debug_selector(|| "remove-box".into())
+                        .w(px(420.))
+                        .max_w_full()
+                        .p(px(24.))
+                        .rounded(px(12.))
+                        .bg(t.bg)
+                        .border_1()
+                        .border_color(t.border)
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.))
+                        // A click in the box isn't one beside it.
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(heading(trf(format!("Remove {}?", r.name()), format!("Retirer {} ?", r.name()))))
+                        .child(div().text_size(px(13.)).line_height(rems(1.5)).text_color(t.soft).child(detail))
+                        .child(
+                            div()
+                                .mt(px(8.))
+                                .flex()
+                                .justify_end()
+                                .gap(px(8.))
+                                .child(button("cancel-remove", tr("Cancel", "Annuler"), false, t).on_click(cx.listener(|this, _, _, cx| this.answer_remove(false, cx))))
+                                .child(button("confirm-remove", tr("Remove", "Retirer"), true, t).on_click(cx.listener(|this, _, _, cx| this.answer_remove(true, cx)))),
+                        ),
+                ),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 
     fn save_tiles(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -126,8 +187,9 @@ impl Render for SettingsView {
         let t = self.data.read(cx).theme;
         let two = width >= TWO_COLUMNS;
         let column = || div().flex_1().min_w_0().flex().flex_col().gap(px(28.));
-        let left = column().child(self.account(cx)).child(self.maps(cx));
-        let right = column().child(self.received(cx)).child(self.not_read(cx)).child(self.appearance(cx));
+        // Two columns of about the same height: the maps are the longest section.
+        let left = column().child(self.account(cx)).child(self.received(cx)).child(self.not_read(cx));
+        let right = column().child(self.maps(cx)).child(self.appearance(cx));
         let body = div()
             .w_full()
             .max_w(px(1120.))
@@ -138,7 +200,8 @@ impl Render for SettingsView {
             .child(left)
             .child(right);
         // The ground around the sheet, as under the rail.
-        div().size_full().bg(t.panel).p(px(8.)).pl_0().child(
+        let question = self.removing.clone().map(|r| self.question(&r, t, cx));
+        div().size_full().relative().bg(t.panel).p(px(8.)).pl_0().children(question).child(
             div()
                 .id("settings")
                 .size_full()
@@ -151,7 +214,7 @@ impl Render for SettingsView {
                     div()
                         .px(px(crate::ui::pad(width)))
                         .pt(px((crate::ui::top() - 8.0).max(20.)))
-                        .pb(px(48.))
+                        .pb(px(28.))
                         .flex()
                         .flex_col()
                         .gap(px(24.))
@@ -322,7 +385,7 @@ impl SettingsView {
                                     button(("update-region", i), if size.is_some() { tr("Update", "Mettre à jour") } else { tr("Download", "Télécharger") }, false, t)
                                         .on_click(cx.listener(move |this, _, _, cx| this.data.update(cx, |d, cx| d.update_region(&update_r, cx)))),
                                 )
-                                .child(button(("remove-region", i), tr("Remove", "Retirer"), false, t).on_click(cx.listener(move |this, _, window, cx| this.confirm_remove(remove_r.clone(), window, cx))))
+                                .child(button(("remove-region", i), tr("Remove", "Retirer"), false, t).on_click(cx.listener(move |this, _, window, cx| this.ask_remove(remove_r.clone(), window, cx))))
                             }),
                     ),
             );

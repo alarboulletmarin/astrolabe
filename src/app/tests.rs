@@ -136,15 +136,27 @@ fn regions_are_found_added_and_removed_in_settings(cx: &mut TestAppContext) {
     // The field is emptied; the region shows, to download again or remove.
     assert!(!shown(cx, "add-region-0") && shown(cx, "update-region-0") && shown(cx, "remove-region-0"));
     assert!(std::fs::read_to_string(root.join("data/regions.json")).unwrap().contains("bretagne"));
-    // Cancelled: still there. Confirmed: gone.
+    // Asked in the page, not by the system. Cancelled, by the button, Esc or a click beside the
+    // question: still there. Confirmed: gone.
     click(cx, "remove-region-0");
-    assert!(cx.has_pending_prompt());
-    cx.simulate_prompt_answer(crate::lang::tr("Cancel", "Annuler"));
+    assert!(!cx.has_pending_prompt() && shown(cx, "confirm-remove"));
+    click(cx, "cancel-remove");
+    assert!(!shown(cx, "confirm-remove"));
+    click(cx, "remove-region-0");
+    cx.simulate_keystrokes("escape");
     cx.run_until_parked();
+    assert!(!shown(cx, "confirm-remove"));
+    click(cx, "remove-region-0");
+    let corner = cx.debug_bounds("remove-box").unwrap().origin - gpui::point(gpui::px(10.), gpui::px(10.));
+    cx.simulate_click(corner, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(!shown(cx, "confirm-remove"));
+    // A click inside the box keeps the question.
+    click(cx, "remove-region-0");
+    click(cx, "remove-box");
+    assert!(shown(cx, "confirm-remove"));
     assert_eq!(listed(cx), ["bretagne"]);
-    click(cx, "remove-region-0");
-    cx.simulate_prompt_answer(crate::lang::tr("Remove", "Retirer"));
-    cx.run_until_parked();
+    click(cx, "confirm-remove");
     assert!(listed(cx).is_empty() && !shown(cx, "remove-region-0"));
     assert_eq!(std::fs::read_to_string(root.join("data/regions.json")).unwrap().trim(), "[]");
 }

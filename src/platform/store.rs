@@ -294,7 +294,8 @@ pub fn region_files(region: &str) -> (Option<u64>, Option<std::time::SystemTime>
 /// by the user). The elevation tiles stay: they are shared.
 pub fn delete_region(region: &str) -> Result<(), String> {
     let failed = |e: std::io::Error| format!("{} : {e}", crate::lang::tr("Region not removed", "Région non retirée"));
-    for p in [extract_path(region), graph_path(region)] {
+    // The extract, a download cut midway (its temporary file), and the network.
+    for p in [extract_path(region), extract_path(region).with_extension("tmp"), graph_path(region)] {
         match fs::remove_file(&p) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(e)),
             _ => {}
