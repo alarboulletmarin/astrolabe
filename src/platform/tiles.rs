@@ -108,7 +108,9 @@ fn read_used(path: &Path) -> Option<Vec<u8>> {
     f.read_to_end(&mut b).ok()?;
     let old = f.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e > Duration::from_secs(86_400)));
     if old {
-        f.set_modified(SystemTime::now()).ok();
+        // Windows only changes the date through a handle opened for writing (nothing is written).
+        drop(f);
+        fs::File::options().write(true).open(path).and_then(|w| w.set_modified(SystemTime::now())).ok();
     }
     Some(b)
 }
