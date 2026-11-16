@@ -16,7 +16,6 @@ First release.
 - **Records**: best efforts for road, trail, cycling and swimming, the ten best of each unfolded, and records of every kind.
 - **Heatmap**: all your tracks on one map, with the activities that pass through the point you click.
 - Navigation back and forward (Alt + arrows, mouse buttons, Escape), a window moved from its top edge, light and dark themes and English or French, following the system.
-- The Astrolabe logo.
 - Downloads for Arch Linux, macOS and Windows with every release, and a `make install` for other Linux distributions. The macOS and Windows files are not signed.
 - **A new logo**: the limb of an astrolabe and the circles of its plate around the zenith, with fewer and thicker lines at 16 and 32 px.
 - **Loops**: a new page (`Ctrl + L`).
