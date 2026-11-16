@@ -197,7 +197,11 @@ pub fn icon_label_button(id: impl Into<ElementId>, path: &'static str, label: im
 }
 
 fn button_frame(id: impl Into<ElementId>, primary: bool, t: Theme) -> Stateful<Div> {
+    let id = id.into();
+    // Found by its id in the window tests.
+    let selector = id.to_string();
     div()
+        .debug_selector(move || selector)
         .id(id)
         .flex_none()
         .px(px(12.))

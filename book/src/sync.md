@@ -3,7 +3,7 @@
 ## What a synchronisation does
 
 It starts on its own at launch when a key is saved, and from the round button at the bottom of the
-rail or **Synchronise now** in the settings.
+rail or **Synchronise** in the settings.
 
 1. **Activities**: Astrolabe asks Garmin for your activities, newest first, and stops at the first
    one it already knows. The new list is written to disk before it replaces the one shown: if the

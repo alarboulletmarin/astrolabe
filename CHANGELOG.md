@@ -21,6 +21,7 @@ Notable changes, newest first. Versions follow [Semantic Versioning](https://sem
     built and kept on disk, and everything is computed on the machine: no account, no routing
     service, offline afterwards.
   - A damaged network or extract is set aside, never deleted.
+- **Settings, redrawn**: a sheet in two columns (one when the window is narrow), with the Garmin account, the maps, the data received and what Astrolabe doesn't read, and the appearance. The key's field shows only when changing it; without a system key store, the encrypted-file fallback is said there, once.
 - **Storage errors are shown**: an activity cache that can't be read is set aside as `activities.damaged-<number>.json` and reported, instead of opening on an empty journal; a write that fails in the background (tracks, settings) shows in the status line.
 - **Windows**: the app no longer opens a console window behind its own.
 - **User guide** (`book/`): install, first steps, the pages, synchronising and working offline, shortcuts, your data and backups, troubleshooting. The README is shorter and shows made-up data.

@@ -6,12 +6,15 @@ use std::borrow::Cow;
 
 pub const SANS: &str = "IBM Plex Sans";
 pub const MONO: &str = "IBM Plex Mono";
+/// Page and section titles of the Atelier pages.
+pub const SERIF: &str = "IBM Plex Serif";
 
-const FONT_FILES: [&[u8]; 4] = [
+const FONT_FILES: [&[u8]; 5] = [
     include_bytes!("../../assets/fonts/IBMPlexSans-Regular.ttf"),
     include_bytes!("../../assets/fonts/IBMPlexSans-Bold.ttf"),
     include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf"),
     include_bytes!("../../assets/fonts/IBMPlexMono-Bold.ttf"),
+    include_bytes!("../../assets/fonts/IBMPlexSerif-SemiBold.ttf"),
 ];
 
 pub fn init_fonts(cx: &mut App) {

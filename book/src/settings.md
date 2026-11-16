@@ -4,27 +4,33 @@ The last item of the rail, **Settings**. Astrolabe opens on it when no key is sa
 
 <!-- screenshot: the settings page -->
 
-## Garmin API key
+On a wide window the page has two columns: the account and the maps on the left, the data and
+the appearance on the right. On a narrow one they follow each other.
 
-- **Personal API key**: paste the key and click **Check and save**. It is "Checked with Garmin before being saved."
-- A badge says where it is kept: the system keyring, or "encrypted in the app" where there is none.
-- **Replace with a new key** and **Remove the key** change or remove it.
+## Garmin account
 
-How to get one: [First steps](first-steps.md). Where it goes: [Your data and backups](data.md).
+- **Personal API key** says where the key is kept: the system keyring, "encrypted by the app"
+  where there is none (said once, here, with why), or "none".
+- Without a key, its field shows: paste the key and click **Check and save**. It is "Checked with
+  Garmin before being saved."
+- With one, **Change the key** shows the field again, with **Cancel** and **Remove the key**.
+- **Synchronisation** says where it stands, with the tracks read and **Synchronise**. See
+  [Synchronising](sync.md).
 
-## Synchronisation
+How to get a key: [First steps](first-steps.md). Where it goes: [Your data and backups](data.md).
 
-Two steps, **Activities** then **Files**, with their progress, and **Synchronise now**. See [Synchronising](sync.md).
+## Maps
 
-## Map background
+OpenStreetMap's tiles by default, kept on disk. **Tile address ({z}, {x}, {y})** takes another
+server's address, with `{z}`, `{x}`, `{y}`; **Save** keeps it.
 
-OpenStreetMap's tiles by default, kept on disk. **Tile address ({z}, {x}, {y})** takes another server's address, with `{z}`, `{x}`, `{y}`; **Save** keeps it.
+## Data received
+
+How many activities since when, how many FIT files are read, and the folder they are kept in (its
+whole path in a tooltip when it is cut). A box says what Astrolabe doesn't read: what the key gives
+access to but the app doesn't ask for, and what the personal API doesn't provide.
 
 ## Appearance
 
 - **Theme**: **System**, **Light** or **Dark**.
 - **Language**: **System**, English or Français.
-
-## Where your data goes
-
-A reminder of what leaves the machine, and to whom. See [Your data and backups](data.md).

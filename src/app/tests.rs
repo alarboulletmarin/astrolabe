@@ -80,6 +80,27 @@ fn the_rail_opens_pages_and_the_keys_walk_through_them(cx: &mut TestAppContext) 
     assert_eq!(page(&shell, cx), Page::Settings);
 }
 
+/// With a key, Settings shows where it is kept and hides its field until asked to change it;
+/// without one, the field shows.
+#[gpui::test]
+fn the_key_field_shows_when_asked(cx: &mut TestAppContext) {
+    let (shell, cx) = start(cx, 3);
+    let data = shell.read_with(cx, |s, _| s.data.clone());
+    click(cx, "rail-settings");
+    let shown = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("save-key").is_some();
+    assert!(shown(cx) && cx.debug_bounds("change-key").is_none());
+    data.update(cx, |d, cx| {
+        d.key = Some("GCDC_test".into());
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(!shown(cx) && cx.debug_bounds("sync-now").is_some());
+    click(cx, "change-key");
+    assert!(shown(cx) && cx.debug_bounds("delete-key").is_some());
+    click(cx, "cancel-key");
+    assert!(!shown(cx) && cx.debug_bounds("change-key").is_some());
+}
+
 /// A click on a journal row opens the outing; Esc and the arrows then behave.
 #[gpui::test]
 fn a_journal_row_opens_the_outing(cx: &mut TestAppContext) {

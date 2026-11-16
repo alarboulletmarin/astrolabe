@@ -83,6 +83,17 @@ pub fn weekday_label(d: chrono::NaiveDate) -> String {
     }
 }
 
+/// "1er mars 2025", "March 1, 2025".
+pub fn long_date(d: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
+    if is_french() {
+        let day = if d.day() == 1 { "1er".to_string() } else { d.day().to_string() };
+        format!("{day} {} {}", month_name(d.month0()), d.year())
+    } else {
+        format!("{} {}, {}", month_name(d.month0()), d.day(), d.year())
+    }
+}
+
 /// "sam. 24 oct.", "Sat, Oct 24": for tables.
 pub fn short_date(d: chrono::NaiveDate) -> String {
     use chrono::Datelike;
