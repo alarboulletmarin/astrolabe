@@ -629,7 +629,9 @@ impl Data {
         if let Some(t) = self.ground.get(&k) {
             return t.clone();
         }
-        if self.photos_busy >= 6 {
+        // The IGN's image services allow 50 requests a second from one address: 10 at a time,
+        // at about 0.2 s each, stay under it.
+        if self.photos_busy >= 10 {
             return None;
         }
         // ponytail: drops every tile past 450 (120 MB: the ground and four finer levels fit), an

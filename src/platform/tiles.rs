@@ -26,13 +26,19 @@ pub fn tile(template: &str, z: u8, x: u32, y: u32) -> Result<Vec<u8>, String> {
     fetch(template, z, x, y).map_err(http_error)
 }
 
-/// An aerial photo's tile (`PHOTO_TILES`); `None` where the IGN has none at all. One client for
-/// all of them, so that its connections serve again; a tile not there within 10 s is given up
-/// (the server sometimes holds one), to be asked again.
+/// An aerial photo's tile (`PHOTO_TILES`); `None` where the IGN has none at all. One client per
+/// wait, so that its connections serve again. Nine in ten come within 0.7 s, but the server
+/// sometimes holds one, and a level of photos shows only once all its tiles are there: past
+/// 1.2 s it is asked again at once (the second answer is quick), and given up after 10 s.
 pub fn photo(z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>, String> {
-    static PHOTOS: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-    let client = PHOTOS.get_or_init(|| ureq::Agent::config_builder().user_agent(USER_AGENT).timeout_global(Some(std::time::Duration::from_secs(10))).build().into());
-    match fetch_with(client, PHOTO_TILES, z, x, y) {
+    static QUICK: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    static PATIENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    let client = |cell: &'static std::sync::OnceLock<ureq::Agent>, ms| cell.get_or_init(|| ureq::Agent::config_builder().user_agent(USER_AGENT).timeout_global(Some(std::time::Duration::from_millis(ms))).build().into());
+    let mut r = fetch_with(client(&QUICK, 1200), PHOTO_TILES, z, x, y);
+    if matches!(r, Err(ureq::Error::Timeout(_))) {
+        r = fetch_with(client(&PATIENT, 10_000), PHOTO_TILES, z, x, y);
+    }
+    match r {
         Err(ureq::Error::StatusCode(404)) => Ok(None),
         r => r.map(Some).map_err(|e| service_error("IGN", e)),
     }
