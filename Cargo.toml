@@ -21,6 +21,8 @@ keyring = "4.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 ureq = { version = "3", features = ["json"] }
+# Already built for the window (same version and backends): the 3D view draws on the graphics card.
+wgpu = { version = "29.0", default-features = false, features = ["std", "parking_lot", "vulkan", "gles", "wgsl"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

@@ -14,10 +14,10 @@ const LIGHT: [f32; 3] = [-0.5, 0.5, std::f32::consts::FRAC_1_SQRT_2];
 /// Brightness of a flat surface before it is brought back to 1: flat ground keeps its colours.
 const FLAT_LIT: f32 = AMBIENT + (1.0 - AMBIENT) * LIGHT[2];
 /// The line is 0.5 % nearer than its own ground, so it is not buried in it.
-const LINE_BIAS: f32 = 1.005;
+pub const LINE_BIAS: f32 = 1.005;
 /// Brightness of a wall turned away from the sun.
 const WALL_SHADE: f32 = 0.55;
-const NEAR: f64 = 1.0;
+pub const NEAR: f64 = 1.0;
 const BAND: usize = 16;
 
 /// A regular grid of altitudes. Vertex `(i, j)` is `heights[j * cols + i]`, `i` going east and
@@ -508,7 +508,7 @@ impl Camera {
     }
 
     /// Eye position and the unit vectors right, up, forward, in scaled (exaggerated) metres.
-    fn basis(&self, ex: f64) -> ([f64; 3], [[f64; 3]; 3]) {
+    pub fn basis(&self, ex: f64) -> ([f64; 3], [[f64; 3]; 3]) {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
         let f = [sy * cp, cy * cp, -sp];
@@ -868,7 +868,7 @@ enum Part {
 }
 
 /// How much of the line shows through what hides it.
-const HIDDEN_LINE: f32 = 0.4;
+pub const HIDDEN_LINE: f32 = 0.4;
 
 /// A thick segment (a capsule on screen), nearer than the surface by `LINE_BIAS`.
 #[allow(clippy::too_many_arguments)]

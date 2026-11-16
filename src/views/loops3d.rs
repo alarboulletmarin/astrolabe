@@ -11,6 +11,7 @@ use crate::logic::graph::Graph;
 use crate::logic::osm::Highway;
 use crate::logic::terrain::{self, Camera, Face, Inset, Shade, Terrain, Texture};
 use crate::ui::render_image;
+use crate::platform::gpu3d;
 use gpui_kit::*;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -170,7 +171,7 @@ impl Blocks {
 /// a picture every `FLY_TICK`; the whole loop in about a minute, within these speeds (m/s).
 const FLY_DIST: f64 = 900.0;
 const FLY_PITCH: f64 = 0.5;
-const FLY_TICK: std::time::Duration = std::time::Duration::from_millis(33);
+const FLY_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 const FLY_SPEED: (f64, f64) = (60.0, 300.0);
 /// The eye looks this many metres ahead along the line, and turns to it at this rate (per second).
 const FLY_AHEAD: f64 = 200.0;
@@ -229,6 +230,8 @@ pub(super) struct Scene {
     shown: Option<(Camera, usize, usize)>,
     busy: bool,
     drawn: Option<u64>,
+    /// Whether the last picture was drawn on the graphics card (then always the sharp one).
+    gpu: bool,
     /// Where the pointer was at the last move of a drag, and whether it turns the ground
     /// (otherwise it moves it).
     drag: Option<(Point<Pixels>, bool)>,
@@ -315,7 +318,7 @@ impl Scene {
         let base = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE };
         let texture = base.clone().lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, rough: Arc::new(t.coarser()), terrain: Arc::new(t), stale: Vec::new(), bbox, shade: Arc::new(shade), base: Arc::new(base), texture: Arc::new(texture), draped: false, insets: Vec::new(), inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
+        let mut s = Scene { key, gpu: false, rough: Arc::new(t.coarser()), terrain: Arc::new(t), stale: Vec::new(), bbox, shade: Arc::new(shade), base: Arc::new(base), texture: Arc::new(texture), draped: false, insets: Vec::new(), inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
         s.frame(line, size);
         Some(s)
     }
@@ -585,9 +588,9 @@ impl LoopsView {
         .detach();
     }
 
-    /// Draws the scene again in the background when the eye, the line or the size changed, at
-    /// full size and smoothed even while the pointer moves it (about 16 ms for 1200 × 800). One
-    /// drawing at a time, the latest wins.
+    /// Draws the scene again in the background when the eye, the line or the size changed: on the
+    /// graphics card, whole and sharp (a few milliseconds); without one, on the processor. One
+    /// drawing at a time, the next one started as soon as it is done if the eye moved meanwhile.
     fn ensure_picture(&mut self, l: &Loop, size: (f64, f64), cx: &mut Context<Self>) {
         let t = self.snap.theme;
         let ramp = slope_ramp(&t, true).map(bytes);
@@ -607,9 +610,9 @@ impl LoopsView {
             colour[r].fill(ink);
         }
         let line: Vec<([f64; 3], [u8; 3])> = l.line.iter().zip(colour).map(|(p, c)| (s.place(*p), c)).collect();
-        // While the eye moves (the picture shown is from another eye), a quick one: the rough
-        // ground, not smoothed. Once it stays, the full one.
-        let fine = s.image.is_none() || s.shown.is_some_and(|(c, sw, sh)| c == s.cam && (sw, sh) == (w, h));
+        // On the processor, while the eye moves (the picture shown is from another eye), a quick
+        // one: the rough ground, not smoothed. Once it stays, the full one.
+        let fine = s.gpu || s.image.is_none() || s.shown.is_some_and(|(c, sw, sh)| c == s.cam && (sw, sh) == (w, h));
         let key = {
             let mut hsh = std::collections::hash_map::DefaultHasher::new();
             let c = s.cam;
@@ -622,25 +625,36 @@ impl LoopsView {
             return;
         }
         s.busy = true;
-        let (terrain, texture, blocks, cam, insets) = (if fine { s.terrain.clone() } else { s.rough.clone() }, s.texture.clone(), s.blocks.clone(), s.cam, s.insets.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>());
-        cx.spawn(async move |this, cx| {
-            let img = cx
-                .background_executor()
-                .spawn(async move {
-                    let solids = blocks.map(|b| b.seen(&cam)).unwrap_or_default();
+        let (terrain, rough, texture, blocks, cam, insets) = (s.terrain.clone(), s.rough.clone(), s.texture.clone(), s.blocks.clone(), s.cam, s.insets.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>());
+        // Started here: a task spawned on the window would first wait for its frame to end.
+        let job = cx.background_executor().spawn(async move {
+            let solids = blocks.map(|b| b.seen(&cam)).unwrap_or_default();
+            let background = [bg[0], bg[1], bg[2], 255];
+            let (px, gpu) = match gpu3d::render(&terrain, &texture, &solids, &cam, EXAGGERATION, &line, w, h, background, &insets) {
+                Some(px) => (px, true),
+                None => {
                     let insets: Vec<&Inset> = insets.iter().map(|i| i.as_ref()).collect();
-                    let px = terrain::render(&terrain, &texture, &solids, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], fine, &insets);
-                    render_image(w as u32, h as u32, px).map(Arc::new)
-                })
-                .await;
+                    (terrain::render(if fine { &terrain } else { &rough }, &texture, &solids, &cam, EXAGGERATION, &line, w, h, background, fine, &insets), false)
+                }
+            };
+            (render_image(w as u32, h as u32, px).map(Arc::new), gpu)
+        });
+        cx.spawn(async move |this, cx| {
+            let (img, gpu) = job.await;
             this.update(cx, |v, cx| {
                 if let Some(s) = v.scene.as_mut() {
                     s.busy = false;
                     s.drawn = Some(key);
+                    s.gpu = gpu;
                     if img.is_some() {
                         s.stale.extend(std::mem::replace(&mut s.image, img));
                         s.shown = Some((cam, w, h));
                     }
+                }
+                // Without waiting for a frame: the eye may have moved meanwhile.
+                let found = v.snap_found(cx);
+                if let Some(l) = found.get(v.selected).filter(|_| v.three_d) {
+                    v.ensure_picture(l, (w as f64, h as f64), cx);
                 }
                 cx.notify();
             })

@@ -5,6 +5,7 @@ use crate::lang::tr;
 
 pub mod elevation;
 pub mod garmin;
+pub mod gpu3d;
 pub mod osm;
 pub mod secrets;
 pub mod store;
