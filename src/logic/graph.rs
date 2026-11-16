@@ -11,7 +11,7 @@ use std::sync::{Mutex, mpsc};
 
 /// Raised when the filter, the classes, the contraction or the format change: an older graph is
 /// built again from the extract kept on disk.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 const MAGIC: &[u8; 8] = b"ASTRLOOP";
 /// Edges are cut so that no straight stretch is longer: the altitude is read along it, and the
 /// snapping grid finds every edge from its points.
@@ -555,13 +555,25 @@ pub(crate) fn gallop(ids: &[i64], cursor: &mut usize, id: i64) -> Option<usize> 
 /// What a cancelled build answers.
 pub const CANCELLED: &str = "cancelled";
 
-/// Builds the graph of an extract, in three passes over it: the ways one can run on (which nodes
-/// they use, which are junctions), the positions of those nodes, the ways again (cut at the
-/// junctions). Altitudes are not read here (`set_elevation`).
+/// Builds the graph of an extract, in four passes over it: the outlines of pedestrian areas
+/// drawn as relations, the ways one can run on (which nodes they use, which are junctions), the
+/// positions of those nodes, the ways again (cut at the junctions). Altitudes are not read here
+/// (`set_elevation`).
 pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &AtomicBool, progress: &Progress) -> Result<Graph, String> {
-    // Pass 1: every node a kept way uses, and the ends of the ways.
-    let (header, states) = pass(read, 1, threads, cancel, progress, || (Vec::<i64>::new(), Vec::<i64>::new(), Vec::<Vec<i64>>::new()), |(refs, ends, areas), _, d| {
-        let b = osm::block(d, false, true)?;
+    // Pass 1: the ways that outline a pedestrian area drawn as a multipolygon (relations come
+    // after the ways in an extract, so they are read before).
+    // ponytail: a whole pass for a few hundred relations; reading the relation blocks alone
+    // (the last ones of a sorted extract) would spare most of it.
+    let (_, states) = pass(read, 1, threads, cancel, progress, Vec::<(i64, osm::Class)>::new, |out, _, d| {
+        out.extend(osm::members(d)?);
+        Ok(())
+    })?;
+    let mut outlines: Vec<(i64, osm::Class)> = states.into_iter().flatten().collect();
+    outlines.sort_unstable_by_key(|m| m.0);
+    outlines.dedup_by_key(|m| m.0);
+    // Pass 2: every node a kept way uses, and the ends of the ways.
+    let (header, states) = pass(read, 2, threads, cancel, progress, || (Vec::<i64>::new(), Vec::<i64>::new(), Vec::<Vec<i64>>::new()), |(refs, ends, areas), _, d| {
+        let b = osm::ways_with(d, &outlines)?;
         areas.extend(b.areas);
         for w in b.ways {
             ends.push(w.refs[0]);
@@ -603,10 +615,10 @@ pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &Atomi
         }
     }
 
-    // Pass 2: the positions of those nodes, packed (lat, lon) in a u64; MAX: not found.
+    // Pass 3: the positions of those nodes, packed (lat, lon) in a u64; MAX: not found.
     let coords: Vec<AtomicU64> = (0..ids.len()).map(|_| AtomicU64::new(u64::MAX)).collect();
     let area_coords: Vec<AtomicU64> = (0..area_ids.len()).map(|_| AtomicU64::new(u64::MAX)).collect();
-    pass(read, 2, threads, cancel, progress, || (), |_, _, d| {
+    pass(read, 3, threads, cancel, progress, || (), |_, _, d| {
         let (mut cursor, mut area_cursor) = (0usize, 0usize);
         for (id, lat, lon) in osm::block(d, true, false)?.nodes {
             let packed = (lat as u32 as u64) << 32 | lon as u32 as u64;
@@ -638,14 +650,14 @@ pub fn build(read: &mut Reader, source_size: u64, threads: usize, cancel: &Atomi
         [(c >> 32) as u32 as i32, c as u32 as i32]
     };
 
-    // Pass 3: the ways again, cut at junctions into pieces (node indices into `ids`). A way with
+    // Pass 4: the ways again, cut at junctions into pieces (node indices into `ids`). A way with
     // a node the extract lacks is left out.
     // ponytail: such a way is dropped whole; cutting it at the gap would keep the rest of it.
     let industrial = Industrial::new(&rings);
     type Pieces = Vec<(u64, Vec<u32>, Vec<(u32, u32, Class)>)>;
-    let (_, states) = pass(read, 3, threads, cancel, progress, Pieces::new, |out, seq, d| {
+    let (_, states) = pass(read, 4, threads, cancel, progress, Pieces::new, |out, seq, d| {
         let (mut flat, mut pieces) = (Vec::new(), Vec::new());
-        'way: for w in osm::block(d, false, true)?.ways {
+        'way: for w in osm::ways_with(d, &outlines)?.ways {
             let mut idx = Vec::with_capacity(w.refs.len());
             for r in &w.refs {
                 match ids.binary_search(r) {
@@ -938,6 +950,11 @@ pub mod tests {
 
     /// An extract: its blobs (type, bytes), from nodes (id, lat, lon) and ways (id, tags, refs).
     pub fn extract(nodes: &[(i64, f64, f64)], ways: &[(i64, Vec<(&str, &str)>, Vec<i64>)]) -> Vec<(String, Vec<u8>)> {
+        extract_with(nodes, ways, &[])
+    }
+
+    /// As `extract`, with relations (id, tags, member ways) after the ways.
+    pub fn extract_with(nodes: &[(i64, f64, f64)], ways: &[(i64, Vec<(&str, &str)>, Vec<i64>)], rels: &[(i64, Vec<(&str, &str)>, Vec<i64>)]) -> Vec<(String, Vec<u8>)> {
         let blob = |raw: &[u8]| {
             let mut b = W::default();
             b.bytes(1, raw);
@@ -973,12 +990,32 @@ pub mod tests {
             w.uint(1, *id as u64).packed(2, keys).packed(3, vals).packed(8, delta(refs));
             group.bytes(3, &w.0);
         }
+        let mut relations = W::default();
+        for (id, tags, members) in rels {
+            let mut index = |s: &str| match strings.iter().position(|x| x == s) {
+                Some(i) => i as u64,
+                None => {
+                    strings.push(s.into());
+                    (strings.len() - 1) as u64
+                }
+            };
+            let keys: Vec<u64> = tags.iter().map(|(k, _)| index(k)).collect();
+            let vals: Vec<u64> = tags.iter().map(|(_, v)| index(v)).collect();
+            let roles: Vec<u64> = members.iter().map(|_| index("outer")).collect();
+            let mut r = W::default();
+            r.uint(1, *id as u64).packed(2, keys).packed(3, vals).packed(8, roles).packed(9, delta(members)).packed(10, vec![1; members.len()]);
+            relations.bytes(4, &r.0);
+        }
         let mut table = W::default();
         for s in &strings {
             table.bytes(1, s.as_bytes());
         }
         let mut block = W::default();
-        block.bytes(1, &table.0).bytes(2, &group.0).uint(17, 100);
+        block.bytes(1, &table.0).bytes(2, &group.0);
+        if !rels.is_empty() {
+            block.bytes(2, &relations.0);
+        }
+        block.uint(17, 100);
         out.push(("OSMData".into(), blob(&block.0)));
         out
     }
@@ -1249,6 +1286,41 @@ pub mod tests {
         assert_eq!(g.edges.iter().filter(|e| e.class.highway() == osm::Highway::Steps).count(), 1);
         // Every stretch of the grid is 250 m, give or take the earth's curve.
         assert!(g.edges.iter().filter(|e| e.class.highway() == osm::Highway::Residential).all(|e| (e.len - 250.0).abs() < 0.5));
+    }
+
+    #[test]
+    fn a_pedestrian_area_drawn_as_a_relation_is_walked_round() {
+        // A seafront promenade: a long thin area whose outline is two untagged ways (1-2-3 and
+        // 3-4-1), joined at 2 by a crossing from the town (5). A cycle track (6-7) runs along it,
+        // and an untagged way (8-9) belongs to no pedestrian area.
+        let nodes = [(1, 43.690, 7.250), (2, 43.690, 7.255), (3, 43.690, 7.260), (4, 43.6903, 7.255), (5, 43.692, 7.255), (6, 43.6905, 7.250), (7, 43.6905, 7.260), (8, 43.695, 7.250), (9, 43.695, 7.260)];
+        let ways = [
+            (10, vec![], vec![1, 2, 3]),
+            (11, vec![], vec![3, 4, 1]),
+            (12, vec![("highway", "footway"), ("footway", "crossing")], vec![5, 2]),
+            (13, vec![("highway", "cycleway")], vec![6, 7]),
+            (14, vec![], vec![8, 9]),
+        ];
+        let promenade = vec![("type", "multipolygon"), ("highway", "pedestrian"), ("name", "Promenade"), ("surface", "concrete")];
+        let rels = [
+            (20, promenade.clone(), vec![10, 11]),
+            // Not a multipolygon, not pedestrian, or barred: nothing.
+            (21, vec![("type", "route"), ("highway", "pedestrian")], vec![14]),
+            (22, vec![("type", "multipolygon"), ("landuse", "grass")], vec![14]),
+            (23, vec![("type", "multipolygon"), ("highway", "pedestrian"), ("foot", "no")], vec![14]),
+        ];
+        let g = build_from(&extract_with(&nodes, &ways, &rels)).unwrap();
+        assert!(g.edges.iter().all(|e| e.class.highway() != osm::Highway::Cycleway), "a cycle track is not walked");
+        let along: f32 = g.edges.iter().filter(|e| e.class.highway() == osm::Highway::Pedestrian).map(|e| e.len).sum();
+        // Round the outline: about 2 × 806 m and a little.
+        assert!((1600.0..1700.0).contains(&along), "{along}");
+        assert!(g.edges.iter().filter(|e| e.class.highway() == osm::Highway::Pedestrian).all(|e| e.class.is_paved()));
+        // The crossing reaches it (the outline contracted round 2): one network, 8-9 left out.
+        assert_eq!(g.nodes(), 2);
+        assert_eq!(g.comp.iter().max(), Some(&0));
+        // Without the relation, the outline is nothing: the crossing alone.
+        let g = build_from(&extract_with(&nodes, &ways, &[])).unwrap();
+        assert_eq!(g.edges.iter().map(|e| e.class.highway()).collect::<Vec<_>>(), [osm::Highway::Footway]);
     }
 
     #[test]

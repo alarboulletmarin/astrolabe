@@ -135,13 +135,23 @@ impl Places {
 /// for a way not to run on (alpine scrambles).
 pub fn factor(c: Class, p: &Prefs) -> Option<f32> {
     let mut f = match c.highway() {
-        Highway::Path | Highway::Footway | Highway::Bridleway | Highway::Pedestrian | Highway::LivingStreet | Highway::Track => 1.0,
+        // A cycle track is in the network only when walkers share it: a path.
+        Highway::Path | Highway::Footway | Highway::Bridleway | Highway::Pedestrian | Highway::LivingStreet | Highway::Track | Highway::Cycleway => 1.0,
         Highway::Steps => 1.6,
         Highway::Residential | Highway::Unclassified | Highway::Service => 1.15,
-        Highway::Tertiary | Highway::Cycleway => 1.4,
+        Highway::Tertiary => 1.4,
         Highway::Secondary => 1.8,
         Highway::Primary => 2.5,
     };
+    // A road said to have a sidewalk is run on its sidewalk: little dearer than a footway along
+    // a big road. Said to have none, one runs in the traffic: only to link the rest.
+    if c.is_road() {
+        f = match c.sidewalk() {
+            1 => if matches!(c.highway(), Highway::Secondary | Highway::Primary) { 1.2 } else { 1.0 },
+            2 => f * 3.0,
+            _ => f,
+        };
+    }
     f *= match c.sac_scale() {
         0..=2 => 1.0,
         3 => 1.5,
@@ -564,6 +574,21 @@ mod tests {
                 assert!(factor(c, &p).unwrap() >= 1.0);
             }
         }
+    }
+
+    #[test]
+    fn a_road_costs_by_its_sidewalk() {
+        let p = Prefs::default();
+        let road = |h, walk| factor(Class::new(h, crate::logic::osm::Surface::Paved, 0, 0, 0).with_sidewalk(walk), &p).unwrap();
+        let footway = factor(Class::new(Highway::Footway, crate::logic::osm::Surface::Paved, 0, 0, 0), &p).unwrap();
+        // Along a sidewalk: a footway, a little more by a main road.
+        assert_eq!(road(Highway::Residential, 1), footway);
+        assert!(road(Highway::Primary, 1) > footway && road(Highway::Primary, 1) < road(Highway::Primary, 0));
+        // In the traffic: only to link the rest.
+        assert!(road(Highway::Residential, 2) > 3.0 * footway);
+        assert!(road(Highway::Primary, 2) > road(Highway::Primary, 0));
+        // A cycle track kept is shared with walkers: a path.
+        assert_eq!(factor(Class::new(Highway::Cycleway, crate::logic::osm::Surface::Paved, 0, 0, 0), &p), Some(footway));
     }
 
     #[test]

@@ -187,15 +187,33 @@ pub struct Block {
     // ponytail: multipolygon relations are not read, so a building with a courtyard drawn as
     // one is missed; `building:part` is not read either: one height per footprint.
     pub buildings: Vec<(Vec<i64>, f32)>,
+    /// The ways that outline a pedestrian area drawn as a multipolygon relation (a seafront
+    /// promenade, a square), with the area's class; read only when asked for (`members`).
+    pub members: Vec<(i64, Class)>,
 }
 
 /// Reads an `OSMData` block (inflated). Positions only if `nodes`, ways only if `ways`.
 pub fn block(b: &[u8], nodes: bool, ways: bool) -> Result<Block, String> {
-    block_of(b, nodes, ways, false)
+    read_block(b, nodes, ways, false, false, &[])
 }
 
 /// As `block`, and the buildings if `buildings`.
 pub fn block_of(b: &[u8], nodes: bool, ways: bool, buildings: bool) -> Result<Block, String> {
+    read_block(b, nodes, ways, buildings, false, &[])
+}
+
+/// The ways of a block, and among the others those of `outlines` (sorted by id), each with the
+/// class it is given there: the outlines of pedestrian areas (`members`).
+pub fn ways_with(b: &[u8], outlines: &[(i64, Class)]) -> Result<Block, String> {
+    read_block(b, false, true, false, false, outlines)
+}
+
+/// The outlines of pedestrian areas drawn as multipolygon relations in a block (`Block::members`).
+pub fn members(b: &[u8]) -> Result<Vec<(i64, Class)>, String> {
+    Ok(read_block(b, false, false, false, true, &[])?.members)
+}
+
+fn read_block(b: &[u8], nodes: bool, ways: bool, buildings: bool, relations: bool, outlines: &[(i64, Class)]) -> Result<Block, String> {
     let mut strings: Vec<&[u8]> = Vec::new();
     let mut groups = Vec::new();
     let (mut gran, mut lat_off, mut lon_off) = (100i64, 0i64, 0i64);
@@ -261,6 +279,40 @@ pub fn block_of(b: &[u8], nodes: bool, ways: bool, buildings: bool) -> Result<Bl
                         out.nodes.push((id, coord(lat_off, lat), coord(lon_off, lon)));
                     }
                 }
+                (4, 2) if relations => {
+                    let (mut keys, mut vals, mut mems, mut types) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                    let mut r = Pb::new(p.bytes()?);
+                    while r.more() {
+                        match r.key()? {
+                            (2, wire) => r.repeated(wire, |v| keys.push(v as usize))?,
+                            (3, wire) => r.repeated(wire, |v| vals.push(v as usize))?,
+                            (9, wire) => {
+                                let mut m = 0i64;
+                                r.repeated(wire, |v| {
+                                    m = m.wrapping_add(zigzag(v));
+                                    mems.push(m);
+                                })?
+                            }
+                            (10, wire) => r.repeated(wire, |v| types.push(v))?,
+                            (_, wire) => r.skip(wire)?,
+                        }
+                    }
+                    if keys.len() != vals.len() || mems.len() != types.len() {
+                        return Err("PBF: relation fields of different lengths".into());
+                    }
+                    let text = |i: usize| strings.get(i).copied().ok_or("PBF: string index out of range");
+                    let mut tags = Vec::with_capacity(keys.len());
+                    for (k, v) in keys.iter().zip(&vals) {
+                        tags.push((text(*k)?, text(*v)?));
+                    }
+                    let multipolygon = tags.iter().any(|(k, v)| *k == b"type" && *v == b"multipolygon");
+                    if multipolygon
+                        && let Some(class) = classify(&tags).filter(|c| c.highway() == Highway::Pedestrian)
+                    {
+                        // Member type 1: a way.
+                        out.members.extend(mems.iter().zip(&types).filter(|(_, t)| **t == 1).map(|(m, _)| (*m, class)));
+                    }
+                }
                 (3, 2) if ways || buildings => {
                     let (mut id, mut keys, mut vals, mut refs) = (0i64, Vec::new(), Vec::new(), Vec::new());
                     let mut w = Pb::new(p.bytes()?);
@@ -297,11 +349,12 @@ pub fn block_of(b: &[u8], nodes: bool, ways: bool, buildings: bool) -> Result<Bl
                     if ways && closed && is_industrial_area(&tags) {
                         out.areas.push(refs.clone());
                     }
-                    if ways
-                        && refs.len() >= 2
-                        && let Some(class) = classify(&tags)
-                    {
-                        out.ways.push(Way { id, class, refs });
+                    if ways && refs.len() >= 2 {
+                        // A way of its own first; else the outline of a pedestrian area.
+                        let outline = || outlines.binary_search_by_key(&id, |m| m.0).ok().map(|i| outlines[i].1);
+                        if let Some(class) = classify(&tags).or_else(outline) {
+                            out.ways.push(Way { id, class, refs });
+                        }
                     }
                 }
                 (_, w) => p.skip(w)?,
@@ -360,8 +413,9 @@ pub enum Surface {
 
 /// A way's attributes, packed in a `u32`: highway (4 bits), surface (2), sac_scale (3: 0 none,
 /// 1 hiking … 6 difficult_alpine_hiking), trail_visibility (3: 0 unknown, 1 excellent … 6 no),
-/// tracktype (3: 0 unknown, 1 grade1 … 5 grade5), lit (2: 0 unknown, 1 lit, 2 unlit), and
-/// industrial (1: inside an industrial area, set by the graph build, not read from the way).
+/// tracktype (3: 0 unknown, 1 grade1 … 5 grade5), lit (2: 0 unknown, 1 lit, 2 unlit),
+/// industrial (1: inside an industrial area, set by the graph build, not read from the way), and
+/// for a road, its sidewalk (2: 0 unknown, 1 one at least, 2 none).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Class(pub u32);
 
@@ -377,6 +431,23 @@ impl Class {
 
     pub fn with_industrial(self) -> Class {
         Class(self.0 | 1 << 17)
+    }
+
+    /// The same class with `sidewalk` (0 unknown, 1 one at least, 2 none).
+    pub fn with_sidewalk(self, sidewalk: u8) -> Class {
+        Class(self.0 & !(3 << 18) | (sidewalk.min(2) as u32) << 18)
+    }
+
+    pub fn sidewalk(self) -> u8 {
+        (self.0 >> 18 & 3) as u8
+    }
+
+    /// A road for cars: a runner is on its sidewalk, or in the traffic.
+    pub fn is_road(self) -> bool {
+        matches!(
+            self.highway(),
+            Highway::Residential | Highway::Unclassified | Highway::Service | Highway::Tertiary | Highway::Secondary | Highway::Primary
+        )
     }
 
     #[allow(dead_code)] // read by the route planner, not wired yet
@@ -456,6 +527,21 @@ pub fn classify(tags: &[(&[u8], &[u8])]) -> Option<Class> {
     if matches!(tag(b"access"), Some(b"private" | b"no")) && !reopened {
         return None;
     }
+    // A cycle track is not for walkers (in France they may not use one), unless it is shared.
+    if highway == Highway::Cycleway && !reopened {
+        return None;
+    }
+    // A road's sidewalks: drawn as ways of their own (`separate`), the road itself is not run on;
+    // said on the road, the road stands for its sidewalk.
+    let sides = [b"sidewalk" as &[u8], b"sidewalk:both", b"sidewalk:left", b"sidewalk:right"].map(|k| tag(k).unwrap_or_default());
+    let own = sides.iter().any(|v| matches!(*v, b"both" | b"left" | b"right" | b"yes"));
+    let separate = sides.iter().any(|v| *v == b"separate");
+    let none = !own && !separate && sides.iter().any(|v| matches!(*v, b"no" | b"none"));
+    let road = matches!(highway, Highway::Residential | Highway::Unclassified | Highway::Service | Highway::Tertiary | Highway::Secondary | Highway::Primary);
+    if road && separate && !own {
+        return None;
+    }
+    let sidewalk = if !road { 0 } else if own { 1 } else if none { 2 } else { 0 };
     let surface = match tag(b"surface").unwrap_or_default() {
         b"" => Surface::Unknown,
         b"paved" | b"asphalt" | b"concrete" | b"concrete:plates" | b"concrete:lanes" | b"paving_stones" | b"sett" | b"cobblestone"
@@ -495,7 +581,7 @@ pub fn classify(tags: &[(&[u8], &[u8])]) -> Option<Class> {
         b"yes" | b"24/7" | b"automatic" | b"limited" | b"interval" | b"sunset-sunrise" => 1,
         _ => 0,
     };
-    Some(Class::new(highway, surface, sac, visibility, tracktype).with_lit(lit))
+    Some(Class::new(highway, surface, sac, visibility, tracktype).with_lit(lit).with_sidewalk(sidewalk))
 }
 
 /// A closed way that is an industrial, railway or quarry area.
@@ -663,10 +749,26 @@ pub mod tests {
         assert!(c(&[("highway", "footway")]).is_some_and(|c| !c.is_trail()));
         assert!(c(&[("highway", "footway"), ("surface", "dirt")]).unwrap().is_trail());
         assert_eq!(c(&[("highway", "steps"), ("trail_visibility", "bad")]).unwrap().visibility(), 4);
-        // Main roads and cycleways link the rest, at a cost; motorways and trunks never.
-        assert!(c(&[("highway", "cycleway")]).unwrap().is_paved());
-        assert_eq!(c(&[("highway", "cycleway"), ("foot", "no")]), None);
+        // Main roads link the rest, at a cost; motorways and trunks never.
         assert_eq!(c(&[("highway", "primary")]).unwrap().highway(), Highway::Primary);
+        // A cycle track only when walkers share it.
+        assert_eq!(c(&[("highway", "cycleway")]), None);
+        assert_eq!(c(&[("highway", "cycleway"), ("foot", "no")]), None);
+        assert!(c(&[("highway", "cycleway"), ("foot", "designated")]).unwrap().is_paved());
+        assert!(c(&[("highway", "cycleway"), ("foot", "yes")]).is_some());
+        // Sidewalks: drawn apart, the road is left out (even open to walkers); said on it, or
+        // said missing; a footway has none to say.
+        let walk = |tags: &[(&str, &str)]| c(tags).map(|c| c.sidewalk());
+        assert_eq!(walk(&[("highway", "primary"), ("sidewalk", "separate")]), None);
+        assert_eq!(walk(&[("highway", "residential"), ("sidewalk:both", "separate"), ("foot", "yes")]), None);
+        assert_eq!(walk(&[("highway", "primary"), ("sidewalk:left", "separate"), ("sidewalk:right", "yes")]), Some(1));
+        assert_eq!(walk(&[("highway", "tertiary"), ("sidewalk", "both")]), Some(1));
+        assert_eq!(walk(&[("highway", "secondary"), ("sidewalk", "right")]), Some(1));
+        assert_eq!(walk(&[("highway", "secondary"), ("sidewalk", "no")]), Some(2));
+        assert_eq!(walk(&[("highway", "service"), ("sidewalk", "none")]), Some(2));
+        assert_eq!(walk(&[("highway", "secondary"), ("sidewalk:left", "no"), ("sidewalk:right", "separate")]), None);
+        assert_eq!(walk(&[("highway", "secondary")]), Some(0));
+        assert_eq!(walk(&[("highway", "footway"), ("sidewalk", "no")]), Some(0));
         assert_eq!(c(&[("highway", "trunk")]), None);
         assert_eq!(c(&[("building", "yes")]), None);
         // Lighting: said yes in several ways, said no, or silent or odd.
@@ -680,6 +782,9 @@ pub mod tests {
         assert!(both.lit() == 2 && both.industrial() && !gravel_road.industrial());
         assert_eq!((both.highway(), both.surface()), (Highway::Unclassified, Surface::Gravel));
         assert_eq!(both.with_lit(1).lit(), 1);
+        let walked = both.with_sidewalk(2);
+        assert!(walked.sidewalk() == 2 && walked.lit() == 2 && walked.industrial() && walked.highway() == Highway::Unclassified);
+        assert_eq!(walked.with_sidewalk(1).sidewalk(), 1);
     }
 
     #[test]

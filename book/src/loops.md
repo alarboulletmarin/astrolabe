@@ -12,11 +12,16 @@ Astrolabe then does the following:
 
 1. It downloads the region's OpenStreetMap extract from Geofabrik, a few hundred MB, kept in the data
    folder.
-2. It builds the network of paths one can run on from it: three passes over the extract. Paths,
+2. It builds the network of paths one can run on from it: four passes over the extract. Paths,
    tracks, footways, bridleways, steps, pedestrian and living streets, residential, unclassified,
-   service and tertiary roads are kept. So are cycleways and secondary and primary roads, which tie
-   the rest together. Ways that are private, forbidden, or closed to walkers are left out, and so
-   are motorways and trunk roads.
+   service and tertiary roads are kept, and so are pedestrian areas drawn as a polygon (a seafront
+   promenade, a square): one runs round their edge. Secondary and primary roads are kept too, to
+   tie the rest together. Ways that are private, forbidden, or closed to walkers are left out, and
+   so are motorways, trunk roads and cycle tracks (unless walkers may share them).
+   - A road whose sidewalks are drawn as ways of their own is left out: one runs on its
+     sidewalks.
+   - A road said to have a sidewalk counts as a footway.
+   - A road said to have none costs three times as much: it is taken only to link the rest.
 3. It fetches the elevation tiles that cover the paths, kept in the cache folder, and reads the climb
    and descent of every stretch from them.
 

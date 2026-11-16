@@ -240,7 +240,7 @@ impl Data {
                         }
                         Err(e) => return Err(e),
                     };
-                    stage.store(4, Ordering::Relaxed);
+                    stage.store(5, Ordering::Relaxed);
                     let tiles = g.tiles();
                     let missing: Vec<(u32, u32)> = tiles.iter().copied().filter(|(x, y)| platform::elevation::cached(elevation::ZOOM, *x, *y).is_none()).collect();
                     total.store(tiles.len() as u64, Ordering::Relaxed);
@@ -249,7 +249,7 @@ impl Data {
                     if cancel.load(Ordering::Relaxed) {
                         return Err(CANCELLED.to_string());
                     }
-                    stage.store(5, Ordering::Relaxed);
+                    stage.store(6, Ordering::Relaxed);
                     let mut dem = Dem::new(64, |x, y| platform::elevation::cached(elevation::ZOOM, x, y).and_then(|b| elevation::decode(&b)));
                     g.set_elevation(&mut dem);
                     store::save_graph(id, &g.encode())?;
@@ -303,11 +303,11 @@ impl Data {
                 let mb = j.done.load(Ordering::Relaxed) / 1_000_000;
                 (format!("{} · {mb} {}{}", tr("Loops: downloading the region", "Boucles : téléchargement de la région"), tr("MB", "Mo"), pct(s)), s)
             }
-            p @ 1..=3 => {
+            p @ 1..=4 => {
                 let s = share(j.build.bytes.load(Ordering::Relaxed), self.loops.extract.unwrap_or(0));
-                (format!("{} {p}/3{}", tr("Loops: building the path network", "Boucles : construction du réseau"), pct(s)), s)
+                (format!("{} {p}/4{}", tr("Loops: building the path network", "Boucles : construction du réseau"), pct(s)), s)
             }
-            4 => {
+            5 => {
                 let (done, total) = (j.done.load(Ordering::Relaxed), j.total.load(Ordering::Relaxed));
                 (format!("{} {done} / {total}", tr("Loops: elevation tiles", "Boucles : tuiles d'altitude")), share(done, total))
             }

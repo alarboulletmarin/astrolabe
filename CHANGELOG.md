@@ -13,6 +13,8 @@ Notable changes, newest first. Versions follow [Semantic Versioning](https://sem
   - The chosen loop saves as GPX (`Ctrl + S`), and its seed gives it back.
   - Every change of the start, the points, the zones or the line can be undone (`Ctrl + Z`): the
     arrows on the map name the change they take back, and the line under the map says it.
+  - Loops run on paths, footways, sidewalks and pedestrian areas (a seafront promenade drawn as
+    a polygon too), never on cycle tracks; a road without a sidewalk only links the rest.
   - The map is shaded with the relief.
   - The region's extract (Provence-Alpes-Côte d'Azur for now) is downloaded once from Geofabrik,
     and the elevation tiles that cover it from the Amazon open data bucket. The network of paths is
