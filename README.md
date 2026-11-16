@@ -6,7 +6,7 @@
 
 A desktop journal of your sport activities, read from your Garmin account. Your activities, their GPS tracks and their curves are kept on your machine, and the app opens instantly on what it has. Written in Rust with [GPUI](https://www.gpui.rs).
 
-![The Today page, on made-up data: this week, the streak, the year so far, time per week and consistency](docs/demo.png)
+![The Today page, on made-up data: this week, the streak, the year so far, time per week and consistency](docs/today.png)
 
 **[Install](#install)** · **[User guide](book/src/introduction.md)** · [Shortcuts](book/src/shortcuts.md) · [Website](https://alarboulletmarin.github.io/astrolabe/) · [Architecture](ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md)
 
@@ -22,6 +22,29 @@ A desktop journal of your sport activities, read from your Garmin account. Your 
 - **Light and dark, English and French**, following your system.
 
 An astrolabe is the old instrument of astronomers and sailors: you take the height of a star, read a scale, and know where you stand. Astrolabe does the same with your activities.
+
+## A look around
+
+On made-up data (`scripts/demo-data.py`): an invented athlete's two years of outings, on real paths around Annecy.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/journal.png" alt="The journal: outings week by week, with pace, the gap to the usual pace, heart rate zones and an altitude profile"><br><b>Journal</b>: week by week, with the columns you choose</td>
+<td width="50%"><img src="docs/activity.png" alt="An activity: the map of the track, the figures, the pace of each kilometre"><br><b>Activity</b>: the track, the kilometres, the laps and the curves</td>
+</tr>
+<tr>
+<td><img src="docs/calendar.png" alt="The calendar by month, the outings in the day cells and each week's total"><br><b>Calendar</b>: by week, month or year</td>
+<td><img src="docs/stats.png" alt="Statistics: distance per week over a year, and the totals per sport"><br><b>Statistics</b>: any measure, grouping, period and sports</td>
+</tr>
+<tr>
+<td><img src="docs/records.png" alt="Records: best times for road running, trail and cycling, with the second and third"><br><b>Records</b>: best efforts, with the podium of each</td>
+<td><img src="docs/heatmap.jpg" alt="The heatmap: every track on one map"><br><b>Heatmap</b>: every track on one map</td>
+</tr>
+<tr>
+<td><img src="docs/loops.jpg" alt="A running loop proposed from home, in 3D over aerial photos, coloured by grade, with its altitude profile"><br><b>Loops</b>: proposed on OpenStreetMap's paths, here in 3D</td>
+<td><img src="docs/today-dark.png" alt="The Today page in the dark theme"><br><b>Dark</b>, following the system</td>
+</tr>
+</table>
 
 ## Your data stay yours
 

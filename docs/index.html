@@ -13,7 +13,7 @@
 <meta property="og:url" content="https://alarboulletmarin.github.io/astrolabe/">
 <meta property="og:title" content="Astrolabe — a journal of your sport activities">
 <meta property="og:description" content="Your Garmin activities, kept on your machine. Opens instantly.">
-<meta property="og:image" content="https://alarboulletmarin.github.io/astrolabe/screenshot.png">
+<meta property="og:image" content="https://alarboulletmarin.github.io/astrolabe/today.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -69,8 +69,15 @@ header a:not(.brand) { color: var(--soft); font-size: .9rem; }
 .points b { display: block; margin-bottom: 4px; }
 .points span { color: var(--soft); font-size: .95rem; }
 
+#look { margin-top: 104px; }
+.soft { color: var(--soft); margin: 8px 0 0; }
+.gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 24px; margin-top: 28px; }
+.gallery figure { margin: 0; }
+.gallery img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 8px; }
+.gallery figcaption { margin-top: 8px; font-size: .9rem; color: var(--soft); }
+
 #download { margin-top: 104px; }
-#download h2 { margin: 0 0 8px; font-size: 2rem; }
+#look h2, #download h2 { margin: 0 0 8px; font-size: 2rem; }
 .os { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 4px 24px; padding: 20px 0; border-top: 1px solid var(--border); }
 .os h3 { margin: 0; font-size: 1rem; }
 .os p { margin: 0; color: var(--soft); font-size: .95rem; }
@@ -84,6 +91,8 @@ footer a { color: var(--soft); }
   .hero { padding-top: 40px; }
   /* The whole window is unreadable at this width: show its top left corner. */
   .shot { aspect-ratio: 1; object-fit: cover; object-position: left top; margin-top: 40px; }
+  #look { margin-top: 72px; }
+  .gallery { grid-template-columns: minmax(0, 1fr); }
   .points { grid-template-columns: minmax(0, 1fr); gap: 20px; margin-top: 48px; }
   .os { grid-template-columns: minmax(0, 1fr); }
   #download { margin-top: 72px; }
@@ -109,7 +118,7 @@ footer a { color: var(--soft); }
     <small><span lang="en">Free and open source · Linux, macOS, Windows</span><span lang="fr">Libre et gratuit · Linux, macOS, Windows</span></small>
   </div>
 
-  <img class="shot" src="screenshot.png" width="1278" height="838" alt="The Today page: this week, streak, year to date, time per week and consistency" fetchpriority="high">
+  <img class="shot" src="today.png" width="1280" height="840" alt="The Today page: this week, streak, year to date, time per week and consistency" fetchpriority="high">
 
   <ul class="points">
     <li><b><span lang="en">Everything about your outings</span><span lang="fr">Tout sur tes sorties</span></b>
@@ -122,6 +131,19 @@ footer a { color: var(--soft); }
       <span lang="en">One binary in Rust, drawn on the GPU. MIT licence.</span>
       <span lang="fr">Un binaire en Rust, dessiné sur le GPU. Licence MIT.</span></li>
   </ul>
+
+  <section id="look">
+    <h2><span lang="en">A look around</span><span lang="fr">Un tour d’horizon</span></h2>
+    <p class="soft"><span lang="en">On made-up data: an invented athlete’s two years, on real paths around Annecy.</span><span lang="fr">Sur des données inventées : deux ans de sorties d’un sportif imaginaire, sur de vrais chemins autour d’Annecy.</span></p>
+    <div class="gallery">
+      <figure><img src="journal.png" width="1280" height="840" loading="lazy" alt="The journal, week by week"><figcaption><span lang="en">Journal, week by week</span><span lang="fr">Le journal, semaine par semaine</span></figcaption></figure>
+      <figure><img src="activity.png" width="1280" height="840" loading="lazy" alt="An activity: map, figures, pace per kilometre"><figcaption><span lang="en">An activity: track, kilometres, curves</span><span lang="fr">Une sortie : tracé, kilomètres, courbes</span></figcaption></figure>
+      <figure><img src="stats.png" width="1280" height="840" loading="lazy" alt="Statistics: distance per week"><figcaption><span lang="en">Statistics</span><span lang="fr">Statistiques</span></figcaption></figure>
+      <figure><img src="records.png" width="1280" height="840" loading="lazy" alt="Records: road running, trail, cycling"><figcaption><span lang="en">Records</span><span lang="fr">Records</span></figcaption></figure>
+      <figure><img src="heatmap.jpg" width="1280" height="840" loading="lazy" alt="The heatmap of every track"><figcaption><span lang="en">Heatmap</span><span lang="fr">Carte de chaleur</span></figcaption></figure>
+      <figure><img src="loops.jpg" width="1280" height="840" loading="lazy" alt="A running loop in 3D over aerial photos, coloured by grade"><figcaption><span lang="en">Running loops, here in 3D</span><span lang="fr">Boucles de course, ici en 3D</span></figcaption></figure>
+    </div>
+  </section>
 
   <section id="download">
     <h2><span lang="en">Download</span><span lang="fr">Télécharger</span></h2>
