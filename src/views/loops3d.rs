@@ -185,6 +185,78 @@ struct Fly {
     run: u64,
 }
 
+/// Where a point `[lat, lon]` is on the ground `t`, local metres and altitude.
+fn place(t: &Terrain, p: [f64; 2]) -> [f64; 3] {
+    let q = t.local(p[0], p[1]);
+    [q[0], q[1], t.height_at(q[0], q[1])]
+}
+
+/// Puts the eye of a flight over `l` at `at` metres along it, looking the way it goes; `dt`
+/// seconds have passed since the last time (the eye turns at its own pace, not with every bend).
+fn fly_eye(cam: &mut Camera, t: &Terrain, l: &Loop, at: f64, dt: f64) {
+    let on = |at: f64| {
+        let (i, f) = fly_at(&l.along, at);
+        let (a, b) = (place(t, l.line[i]), place(t, l.line[(i + 1).min(l.line.len() - 1)]));
+        [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * f)
+    };
+    let total = l.along.last().copied().unwrap_or(0.0) as f64;
+    let here = on(at);
+    // Ahead; at the very end, the way it came.
+    let (from, to) = if at + FLY_AHEAD <= total { (here, on(at + FLY_AHEAD)) } else { (on((total - FLY_AHEAD).max(0.0)), on(total)) };
+    cam.target = here;
+    if (to[0] - from[0]).hypot(to[1] - from[1]) > 1.0 {
+        let heading = (to[0] - from[0]).atan2(to[1] - from[1]);
+        cam.orbit(turn(cam.yaw, heading) * (dt * FLY_TURN).min(1.0), 0.0);
+    }
+    cam.lift(t, EXAGGERATION);
+}
+
+/// The part of the ground `bbox` (`[south, west, north, east]`) a level of photos centred on
+/// `centre` (local metres), `half` metres each way, covers; `None` when it is off the ground.
+fn level_box(t: &Terrain, bbox: [f64; 4], centre: [f64; 2], half: f64) -> Option<[f64; 4]> {
+    let (lat, lon) = (t.south + centre[1] / t.my, t.west + centre[0] / t.mx);
+    let (dlat, dlon) = (half / t.my, half / t.mx);
+    let b = [(lat - dlat).max(bbox[0]), (lon - dlon).max(bbox[1]), (lat + dlat).min(bbox[2]), (lon + dlon).min(bbox[3])];
+    (b[0] < b[2] && b[1] < b[3]).then_some(b)
+}
+
+/// The photo tiles a flight over `l` on the ground `t` (its box `bbox`) asks for in a view
+/// `height` pixels high, in the order it asks: the whole ground's, then each level's (coarsest
+/// first) every 50 m along the way. The flight is played as `fly` plays it, without drawing.
+fn corridor(t: &Terrain, bbox: [f64; 4], l: &Loop, height: f64) -> Vec<(u8, u32, u32)> {
+    let drape = map_zoom(bbox);
+    let cos = ((bbox[0] + bbox[2]) / 2.0).to_radians().cos();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut add = |z: u8, b: [f64; 4]| out.extend(tiles(b, z).into_iter().filter(|&(x, y)| seen.insert((z, x, y))).map(|(x, y)| (z, x, y)));
+    add(drape, bbox);
+    let total = l.along.last().copied().unwrap_or(0.0) as f64;
+    if l.line.len() < 2 || l.along.len() != l.line.len() || total <= 0.0 || t.cols < 2 || t.rows < 2 {
+        return out;
+    }
+    let mut cam = Camera::fit(t);
+    cam.dist = FLY_DIST.max(cam.min_dist);
+    cam.pitch = FLY_PITCH;
+    fly_eye(&mut cam, t, l, 0.0, 1.0);
+    let (speed, dt) = ((total / 60.0).clamp(FLY_SPEED.0, FLY_SPEED.1), FLY_TICK.as_secs_f64());
+    let (mut at, mut last) = (0.0, f64::NEG_INFINITY);
+    loop {
+        if at - last >= 50.0 || at >= total {
+            last = at;
+            for (z, centre, half) in levels(&cam, cos, drape, height).into_iter().rev() {
+                if let Some(b) = level_box(t, bbox, centre, half) {
+                    add(z, b);
+                }
+            }
+        }
+        if at >= total {
+            return out;
+        }
+        at = (at + speed * dt).min(total);
+        fly_eye(&mut cam, t, l, at, dt);
+    }
+}
+
 /// Where a flight is `at` metres along a line (`along`: metres from the start at each point):
 /// the point before it and the share of the way to the next one.
 fn fly_at(along: &[f32], at: f64) -> (usize, f64) {
@@ -232,6 +304,8 @@ pub(super) struct Scene {
     drawn: Option<u64>,
     /// Whether the last picture was drawn on the graphics card (then always the sharp one).
     gpu: bool,
+    /// Set to stop fetching this loop's photos ahead (another loop is shown).
+    ahead: Arc<std::sync::atomic::AtomicBool>,
     /// Where the pointer was at the last move of a drag, and whether it turns the ground
     /// (otherwise it moves it).
     drag: Option<(Point<Pixels>, bool)>,
@@ -318,7 +392,7 @@ impl Scene {
         let base = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE };
         let texture = base.clone().lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, gpu: false, rough: Arc::new(t.coarser()), terrain: Arc::new(t), stale: Vec::new(), bbox, shade: Arc::new(shade), base: Arc::new(base), texture: Arc::new(texture), draped: false, insets: Vec::new(), inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
+        let mut s = Scene { key, gpu: false, ahead: Arc::default(), rough: Arc::new(t.coarser()), terrain: Arc::new(t), stale: Vec::new(), bbox, shade: Arc::new(shade), base: Arc::new(base), texture: Arc::new(texture), draped: false, insets: Vec::new(), inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
         s.frame(line, size);
         Some(s)
     }
@@ -364,29 +438,14 @@ impl Scene {
     /// have passed since the last time (the eye turns at its own pace, not with every bend).
     /// Returns the point of the line it is at.
     fn fly_to(&mut self, l: &Loop, at: f64, dt: f64) -> usize {
-        let on = |at: f64| {
-            let (i, f) = fly_at(&l.along, at);
-            let (a, b) = (self.place(l.line[i]), self.place(l.line[(i + 1).min(l.line.len() - 1)]));
-            [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * f)
-        };
-        let total = l.along.last().copied().unwrap_or(0.0) as f64;
-        let here = on(at);
-        // Ahead; at the very end, the way it came.
-        let (from, to) = if at + FLY_AHEAD <= total { (here, on(at + FLY_AHEAD)) } else { (on((total - FLY_AHEAD).max(0.0)), on(total)) };
-        self.cam.target = here;
-        if (to[0] - from[0]).hypot(to[1] - from[1]) > 1.0 {
-            let heading = (to[0] - from[0]).atan2(to[1] - from[1]);
-            self.cam.orbit(turn(self.cam.yaw, heading) * (dt * FLY_TURN).min(1.0), 0.0);
-        }
-        self.cam.lift(&self.terrain, EXAGGERATION);
+        fly_eye(&mut self.cam, &self.terrain, l, at, dt);
         self.moved = true;
         fly_at(&l.along, at).0
     }
 
     /// Where a point of the loop is on the ground, local metres and altitude.
     fn place(&self, p: [f64; 2]) -> [f64; 3] {
-        let q = self.terrain.local(p[0], p[1]);
-        [q[0], q[1], self.terrain.height_at(q[0], q[1])]
+        place(&self.terrain, p)
     }
 
     /// Screen position of a point of the loop in a `w` × `h` view, on the picture as it is
@@ -419,10 +478,12 @@ impl LoopsView {
         if let Some(mut s) = Scene::of(&l.line, key, self.snap.theme.dark, size, &mut tile) {
             // The last loop's picture goes off the atlas with the next frame.
             if let Some(old) = self.scene.take() {
+                old.ahead.store(true, std::sync::atomic::Ordering::Relaxed);
                 s.stale.extend(old.stale.into_iter().chain(old.image));
             }
             self.scene = Some(s);
             self.paint_roads(cx);
+            self.fetch_ahead(l, size.1, cx);
         }
     }
 
@@ -467,7 +528,26 @@ impl LoopsView {
             s.texture = Arc::new((*s.base).clone().lit(&s.shade));
         }
         self.paint_roads(cx);
+        if on {
+            let found = self.snap_found(cx);
+            if let Some(l) = found.get(self.selected) {
+                let height = self.plots.get("loops-3d").get().size.height / px(1.);
+                self.fetch_ahead(l, height as f64, cx);
+            }
+        }
         cx.notify();
+    }
+
+    /// Fetches ahead, in the background and onto the disk, the photos a flight over `l` will ask
+    /// for in a view `height` high (see `corridor`): they are there when the eye comes.
+    fn fetch_ahead(&mut self, l: &Loop, height: f64, cx: &mut Context<Self>) {
+        let Some(s) = self.scene.as_ref().filter(|_| self.photos) else { return };
+        let (t, bbox, l, cancel, data) = (s.terrain.clone(), s.bbox, l.clone(), s.ahead.clone(), self.data.clone());
+        cx.spawn(async move |_, cx| {
+            let keys = cx.background_executor().spawn(async move { corridor(&t, bbox, &l, height) }).await;
+            data.update(cx, |d, cx| d.photos_ahead(keys, cancel, cx));
+        })
+        .detach();
     }
 
     /// Lays the aerial photos on the ground once they are all there; where there is none (abroad,
@@ -504,12 +584,7 @@ impl LoopsView {
         // coarser one's photos (else, moving, it would take every download for tiles already
         // behind the eye).
         for (z, centre, half) in wanted.iter().rev().copied() {
-            let (lat, lon) = (t.south + centre[1] / t.my, t.west + centre[0] / t.mx);
-            let (dlat, dlon) = (half / t.my, half / t.mx);
-            let b = [(lat - dlat).max(bbox[0]), (lon - dlon).max(bbox[1]), (lat + dlat).min(bbox[2]), (lon + dlon).min(bbox[3])];
-            if b[0] >= b[2] || b[1] >= b[3] {
-                continue;
-            }
+            let Some(b) = level_box(&t, bbox, centre, half) else { continue };
             // The photos are asked for at every frame until they are all there, the finest level's
             // first.
             let got: Vec<_> = if photos { tiles(b, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect() } else { Vec::new() };
@@ -993,6 +1068,46 @@ mod tests {
         assert!((turn(deg(10.0), deg(350.0)) + deg(20.0)).abs() < 1e-9);
         assert!((turn(deg(90.0), deg(90.0))).abs() < 1e-9);
         assert!((turn(0.0, deg(179.0)) - deg(179.0)).abs() < 1e-9);
+    }
+
+    /// What is fetched ahead is what a flight asks for: the photo tiles of every level the eye
+    /// wants, at each of its steps, are nearly all in the corridor (sampled every 50 m).
+    #[test]
+    fn the_corridor_holds_what_a_flight_asks_for() {
+        use super::{FLY_DIST, FLY_PITCH, FLY_SPEED, FLY_TICK, Loop, corridor, level_box, levels, map_zoom, tiles};
+        let mut hills = |_: u8, _: u32, _: u32| Some(Arc::new((0..256 * 256).map(|i| 200.0 + 150.0 * ((i % 256) as f32 / 30.0).sin() + (i / 256) as f32).collect::<Vec<f32>>()));
+        // A winding line of about 12 km.
+        let line: Vec<[f64; 2]> = (0..200).map(|k| [43.70 + k as f64 * 0.0004, 7.25 + 0.01 * (k as f64 / 15.0).sin()]).collect();
+        let l = Loop::from_track(line.clone(), vec![None; 200], None);
+        let mut s = Scene::of(&line, 0, false, (1200.0, 800.0), &mut hills).unwrap();
+        let keys = corridor(&s.terrain, s.bbox, &l, 800.0);
+        let set: std::collections::HashSet<_> = keys.iter().copied().collect();
+        assert_eq!(set.len(), keys.len(), "each tile once");
+        // The whole ground's first.
+        let drape = map_zoom(s.bbox);
+        let first = tiles(s.bbox, drape).len();
+        assert!(keys[..first].iter().all(|k| k.0 == drape));
+        // The flight as `fly` and `fly_on` play it.
+        s.cam.dist = FLY_DIST.max(s.cam.min_dist);
+        s.cam.pitch = FLY_PITCH;
+        s.fly_to(&l, 0.0, 1.0);
+        let total = l.dist;
+        let (speed, dt) = ((total / 60.0).clamp(FLY_SPEED.0, FLY_SPEED.1), FLY_TICK.as_secs_f64());
+        let cos = ((s.bbox[0] + s.bbox[2]) / 2.0).to_radians().cos();
+        let (mut at, mut asked, mut missed) = (0.0f64, 0, 0);
+        while at < total {
+            at = (at + speed * dt).min(total);
+            s.fly_to(&l, at, dt);
+            for (z, centre, half) in levels(&s.cam, cos, drape, 800.0) {
+                for (x, y) in level_box(&s.terrain, s.bbox, centre, half).map(|b| tiles(b, z)).unwrap_or_default() {
+                    asked += 1;
+                    missed += !set.contains(&(z, x, y)) as usize;
+                }
+            }
+        }
+        assert!(asked > 1000, "{asked}");
+        assert!(missed * 100 <= asked * 2, "{missed} of {asked} missed");
+        println!("{} tiles ahead; {missed} of {asked} asked missed", keys.len());
     }
 
     /// The loop's box on screen, in a view of `size`.

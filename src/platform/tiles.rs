@@ -5,6 +5,7 @@
 use super::store::{cache_dir, write_atomic};
 use super::{USER_AGENT, agent, http_error, service_error};
 use std::fs;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub const DEFAULT_TILES: &str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 
@@ -31,6 +32,36 @@ pub fn tile(template: &str, z: u8, x: u32, y: u32) -> Result<Vec<u8>, String> {
 /// sometimes holds one, and a level of photos shows only once all its tiles are there: past
 /// 1.2 s it is asked again at once (the second answer is quick), and given up after 10 s.
 pub fn photo(z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>, String> {
+    ASKED.fetch_add(1, Ordering::SeqCst);
+    let r = fetch_photo(z, x, y);
+    ASKED.fetch_sub(1, Ordering::SeqCst);
+    r
+}
+
+/// Photo tiles being fetched for the screen: those fetched ahead wait until there are none.
+static ASKED: AtomicUsize = AtomicUsize::new(0);
+
+/// Fetches the photo tiles `keys` (zoom, x, y) into the disk cache, in this order, `workers` at
+/// a time, only while none is being fetched for the screen; stops once `cancel` is set. A tile
+/// that fails is left for the screen to ask. Blocks until done.
+pub fn photos_ahead(keys: &[(u8, u32, u32)], workers: usize, cancel: &AtomicBool) {
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|sc| {
+        for _ in 0..workers {
+            sc.spawn(|| {
+                loop {
+                    while ASKED.load(Ordering::SeqCst) > 0 && !cancel.load(Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    let Some(&(z, x, y)) = keys.get(next.fetch_add(1, Ordering::Relaxed)).filter(|_| !cancel.load(Ordering::Relaxed)) else { break };
+                    fetch_photo(z, x, y).ok();
+                }
+            });
+        }
+    });
+}
+
+fn fetch_photo(z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>, String> {
     static QUICK: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     static PATIENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     let client = |cell: &'static std::sync::OnceLock<ureq::Agent>, ms| cell.get_or_init(|| ureq::Agent::config_builder().user_agent(USER_AGENT).timeout_global(Some(std::time::Duration::from_millis(ms))).build().into());
@@ -64,6 +95,15 @@ fn fetch_with(client: &ureq::Agent, template: &str, z: u8, x: u32, y: u32) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn photos_fetched_ahead_stop_once_cancelled() {
+        // Cancelled before it starts: nothing is asked (the test would otherwise go online).
+        let start = std::time::Instant::now();
+        photos_ahead(&[(18, 132_000, 94_000); 50], 8, &AtomicBool::new(true));
+        photos_ahead(&[], 8, &AtomicBool::new(false));
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    }
 
     #[test]
     fn tile_urls() {

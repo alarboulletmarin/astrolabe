@@ -621,6 +621,16 @@ impl Data {
 
     /// The 256 × 256 pixels (BGRA) of an aerial photo's tile for the ground in 3D (alpha 0 where
     /// there is none), if ready; otherwise asks for it, six downloads at a time.
+    /// Fetches ahead, into the disk cache, the photo tiles `keys` (those a flight over a route
+    /// will ask for), after what the screen asks for; until `cancel` is set.
+    pub fn photos_ahead(&self, keys: Vec<(u8, u32, u32)>, cancel: Arc<std::sync::atomic::AtomicBool>, cx: &mut Context<Self>) {
+        // The tests never go online.
+        if cfg!(test) {
+            return;
+        }
+        cx.background_executor().spawn(async move { tiles::photos_ahead(&keys, 8, &cancel) }).detach();
+    }
+
     pub fn ground_tile(&mut self, k: (u8, u32, u32), cx: &mut Context<Self>) -> Option<Arc<Vec<u8>>> {
         // The tests never go online.
         if cfg!(test) {
