@@ -118,6 +118,24 @@ impl Graph {
         out
     }
 
+    /// The edges that have a point in a cell (about 550 m a side) touching `bbox` `[south, west,
+    /// north, east]`, degrees: every edge with a point in the box, and some around it. Each once.
+    pub fn edges_in(&self, [s, w, n, e]: [f64; 4]) -> Vec<u32> {
+        let g = &self.grid;
+        let cell = |v: f64, v0: i32| ((v * 1e7) as i64 - v0 as i64).div_euclid(CELL);
+        let (r0, r1, c0, c1) = (cell(s, g.lat0).max(0), cell(n, g.lat0).min(g.rows as i64 - 1), cell(w, g.lon0).max(0), cell(e, g.lon0).min(g.cols as i64 - 1));
+        let mut out = Vec::new();
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                let k = (r * g.cols as i64 + c) as usize;
+                out.extend_from_slice(&g.items[g.start[k] as usize..g.start[k + 1] as usize]);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// The nearest place on an edge that `accept` takes, within `max` metres.
     pub fn snap(&self, lat: f64, lon: f64, max: f64, accept: impl Fn(u32) -> bool) -> Option<Snap> {
         let g = &self.grid;
@@ -1004,6 +1022,27 @@ pub mod tests {
             (108, vec![("highway", "motorway")], vec![1, 7]),
         ];
         extract(&nodes, &ways)
+    }
+
+    #[test]
+    fn edges_in_a_box_are_those_with_a_point_in_it() {
+        let g = town();
+        let (lat, lon) = (g.lat.iter().map(|v| *v as f64 / 1e7), g.lon.iter().map(|v| *v as f64 / 1e7));
+        let all = [lat.clone().fold(90.0, f64::min), lon.clone().fold(180.0, f64::min), lat.fold(-90.0, f64::max), lon.fold(-180.0, f64::max)];
+        assert_eq!(g.edges_in(all), (0..g.edges.len() as u32).collect::<Vec<_>>(), "the whole town: every edge, once");
+        // A small box in the middle: every edge with a point inside is there.
+        let mid = [(all[0] + all[2]) / 2.0, (all[1] + all[3]) / 2.0];
+        let small = [mid[0] - 0.002, mid[1] - 0.002, mid[0] + 0.002, mid[1] + 0.002];
+        let got = g.edges_in(small);
+        let inside = |p: [i32; 2]| (small[0]..=small[2]).contains(&(p[0] as f64 / 1e7)) && (small[1]..=small[3]).contains(&(p[1] as f64 / 1e7));
+        for e in 0..g.edges.len() as u32 {
+            if g.line(e).iter().any(|(p, _)| inside(*p)) {
+                assert!(got.contains(&e), "edge {e}");
+            }
+        }
+        assert!(got.len() < g.edges.len());
+        assert!(g.edges_in([10.0, 10.0, 10.1, 10.1]).is_empty(), "far away: none");
+        assert!(g.edges_in([small[2], small[3], small[0], small[1]]).is_empty(), "an upside-down box: none");
     }
 
     #[test]

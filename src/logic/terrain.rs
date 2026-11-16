@@ -122,6 +122,9 @@ impl Terrain {
     }
 }
 
+/// A line to draw on a picture (`Texture::stroke`): its points `[u, v]`, width in texels, colour.
+pub type Stroke = (Vec<[f32; 2]>, f32, [u8; 3]);
+
 /// A picture laid over the whole ground: texel `(i, j)` is `px[j * w + i]`, `i` going east and `j`
 /// going north, each an even share of the ground. Bytes in the caller's order.
 #[derive(Clone, Debug)]
@@ -167,6 +170,50 @@ impl Texture {
             }
         }
         self
+    }
+
+    /// The part `[u0, v0, u1, v1]` of the picture, resampled to `w` × `h` texels.
+    pub fn crop(&self, [u0, v0, u1, v1]: [f32; 4], w: usize, h: usize) -> Texture {
+        let px = (0..w * h)
+            .map(|k| {
+                let (u, v) = (u0 + (u1 - u0) * ((k % w) as f32 + 0.5) / w as f32, v0 + (v1 - v0) * ((k / w) as f32 + 0.5) / h as f32);
+                self.sample(u, v).map(|c| (c + 0.5) as u8)
+            })
+            .collect();
+        Texture { w, h, px, fade: 0.0 }
+    }
+
+    /// Draws `lines` over the picture, each texel blended by how much of it they cover (soft
+    /// edges): each a run of points `[u, v]` (0..1 across the picture, as it is sampled), a
+    /// width in texels (under one: one texel wide, as much fainter) and a colour.
+    pub fn stroke(&mut self, lines: &[Stroke]) {
+        let (w, h) = (self.w as f32, self.h as f32);
+        for (pts, width, colour) in lines {
+            let (half, alpha) = if *width >= 1.0 { (width / 2.0, 1.0) } else { (0.5, width.max(0.0)) };
+            for seg in pts.windows(2) {
+                let (ax, ay, bx, by) = (seg[0][0] * w, seg[0][1] * h, seg[1][0] * w, seg[1][1] * h);
+                if ![ax, ay, bx, by].iter().all(|v| v.is_finite()) {
+                    continue;
+                }
+                let r = half + 1.0;
+                let span = |a: f32, b: f32, max: f32| ((a.min(b) - r).floor().clamp(0.0, max) as usize, (a.max(b) + r).ceil().clamp(0.0, max) as usize);
+                let ((x0, x1), (y0, y1)) = (span(ax, bx, w), span(ay, by, h));
+                let (dx, dy) = (bx - ax, by - ay);
+                let len2 = dx * dx + dy * dy;
+                for j in y0..y1 {
+                    for i in x0..x1 {
+                        let (px, py) = (i as f32 + 0.5 - ax, j as f32 + 0.5 - ay);
+                        let t = if len2 > 0.0 { ((px * dx + py * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                        let d = ((px - t * dx).powi(2) + (py - t * dy).powi(2)).sqrt();
+                        let k = (half + 0.5 - d).clamp(0.0, 1.0) * alpha;
+                        if k > 0.0 {
+                            let p = &mut self.px[j * self.w + i];
+                            *p = [0, 1, 2].map(|n| (p[n] as f32 + (colour[n] as f32 - p[n] as f32) * k + 0.5) as u8);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The colour at `u` east and `v` north, each 0..1 across the ground (bilinear).
@@ -877,6 +924,33 @@ mod tests {
             assert!((*got as f32 - want).abs() <= 1.5, "{p:?} vs {want}");
         }
         assert_eq!(pixel(&img, 200, 0.0, 0.0), CLEAR, "the corner is background");
+    }
+
+    #[test]
+    fn lines_are_stroked_with_soft_edges_and_clipped() {
+        let mut t = Texture { w: 100, h: 100, px: vec![[0; 3]; 10_000], fade: 0.0 };
+        // Across the middle, west to east, 3 texels wide; and one far outside (clipped, no panic).
+        t.stroke(&[(vec![[0.1, 0.5], [0.9, 0.5]], 3.0, [200; 3]), (vec![[-5.0, -5.0], [-4.0, 9.0]], 3.0, [200; 3]), (vec![[0.2, 0.2], [f32::NAN, 0.3]], 3.0, [200; 3])]);
+        let at = |i: usize, j: usize| t.px[j * 100 + i][0];
+        assert_eq!(at(50, 50), 200, "on the line");
+        assert_eq!(at(50, 49), 200, "within its half width");
+        assert_eq!(at(50, 48), 100, "its edge, half covered");
+        assert_eq!(at(50, 47), 0, "beyond it");
+        assert_eq!(at(5, 50), 0, "before its start");
+        assert_eq!(at(20, 20), 0, "a line through a point that is not a number is left out");
+        // Thinner than a texel: one texel, fainter.
+        let mut f = Texture { w: 10, h: 10, px: vec![[0; 3]; 100], fade: 0.0 };
+        f.stroke(&[(vec![[0.0, 0.55], [1.0, 0.55]], 0.25, [200; 3])]);
+        assert_eq!(f.px[5 * 10 + 5][0], 50);
+    }
+
+    #[test]
+    fn a_crop_is_the_part_resampled() {
+        let t = Texture { w: 4, h: 4, px: (0..16).map(|k| [(k % 4 * 60) as u8, (k / 4 * 60) as u8, 0]).collect(), fade: 0.1 };
+        let c = t.crop([0.5, 0.5, 1.0, 1.0], 2, 2);
+        assert_eq!((c.w, c.h, c.fade), (2, 2, 0.0));
+        assert_eq!(c.px[0], [120, 120, 0], "its south-west texel is the whole's texel (2, 2)");
+        assert_eq!(c.px[3], [180, 180, 0]);
     }
 
     #[test]

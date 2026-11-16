@@ -7,6 +7,8 @@ use crate::logic::loops::Loop;
 use crate::logic::map::world;
 use crate::logic::slope;
 use crate::logic::buildings::{self, Building};
+use crate::logic::graph::Graph;
+use crate::logic::osm::Highway;
 use crate::logic::terrain::{self, Camera, Face, Inset, Shade, Terrain, Texture};
 use crate::ui::render_image;
 use gpui_kit::*;
@@ -32,8 +34,61 @@ const MAP_PIXELS: f64 = 1024.0;
 /// 2D map's finest.
 const INSET_PIXELS: f64 = 1536.0;
 const INSET_MAX_ZOOM: u8 = 18;
+/// The grey ground and its roads, before the map's tiles: this many texels along its longer side.
+const GROUND_PIXELS: usize = 1536;
 /// The loop fills this share of the free area's width, or of its height.
 const FILL: f64 = 0.8;
+
+/// What an inset was made for: its zoom, the point (local metres) it is centred on, and whether
+/// the map's tiles were all there (otherwise: the roads over the coarse ground).
+type InsetAt = (u8, [f64; 2], bool);
+
+/// How wide a road is drawn on the 3D ground, in metres, and whether it is a path (drawn thin,
+/// in a darker grey, as on the map).
+fn road_width(h: Highway) -> (f64, bool) {
+    match h {
+        Highway::Primary => (12.0, false),
+        Highway::Secondary => (10.0, false),
+        Highway::Tertiary => (9.0, false),
+        Highway::Residential | Highway::Unclassified | Highway::LivingStreet => (7.0, false),
+        Highway::Pedestrian => (6.0, false),
+        Highway::Service => (4.5, false),
+        Highway::Cycleway | Highway::Track => (3.0, true),
+        Highway::Path | Highway::Footway | Highway::Bridleway | Highway::Steps => (2.0, true),
+    }
+}
+
+/// The roads of `g` over `bbox`, as lines to stroke on a picture of it (`Texture::stroke`) whose
+/// texels are `texel` metres: the roads' edges, then the paths, then the roads.
+fn roads(g: &Graph, bbox: [f64; 4], texel: f64, dark: bool) -> Vec<terrain::Stroke> {
+    let (fill, edge, path) = if dark { ([92; 3], [22; 3], [120; 3]) } else { ([255; 3], [176; 3], [140; 3]) };
+    let (du, dv) = (bbox[3] - bbox[1], bbox[2] - bbox[0]);
+    let (mut edges, mut paths, mut fills) = (Vec::new(), Vec::new(), Vec::new());
+    for e in g.edges_in(bbox) {
+        let pts: Vec<[f32; 2]> = g.line(e).iter().map(|(p, _)| [((p[1] as f64 / 1e7 - bbox[1]) / du) as f32, ((p[0] as f64 / 1e7 - bbox[0]) / dv) as f32]).collect();
+        let (m, thin) = road_width(g.edges[e as usize].class.highway());
+        let w = (m / texel) as f32;
+        if thin {
+            paths.push((pts, w, path));
+        } else {
+            if w >= 2.0 {
+                edges.push((pts.clone(), w + 2.0, edge));
+            }
+            fills.push((pts, w, fill));
+        }
+    }
+    edges.extend(paths);
+    edges.extend(fills);
+    edges
+}
+
+/// `p`, a picture of `bbox` `width` metres across, with the roads of `g` drawn on it.
+fn with_roads(mut p: Texture, g: Option<&Graph>, bbox: [f64; 4], width: f64, dark: bool) -> Texture {
+    if let Some(g) = g {
+        p.stroke(&roads(g, bbox, width / p.w.max(1) as f64, dark));
+    }
+    p
+}
 
 /// Buildings stand within this many metres of the loop.
 const BESIDE: f64 = 400.0;
@@ -127,12 +182,14 @@ pub(super) struct Scene {
     bbox: [f64; 4],
     /// The light on the ground, from the elevation tiles at their full resolution.
     shade: Arc<Shade>,
-    /// Grey by altitude until the map's tiles are all there, then the map (`draped`); lit.
+    /// Grey by altitude until the map's tiles are all there, then the map (`draped`): as it
+    /// is, and with the roads drawn on it and lit (`texture`).
+    base: Arc<Texture>,
     texture: Arc<Texture>,
     draped: bool,
     /// The finer map where the eye looks close, with its zoom and the point (local metres) it is
     /// centred on; and the one being made.
-    inset: Option<(Arc<Inset>, (u8, [f64; 2]))>,
+    inset: Option<(Arc<Inset>, InsetAt)>,
     inset_busy: bool,
     /// The buildings beside the loop, once read (`None` until then, and in the tests).
     blocks: Option<Arc<Blocks>>,
@@ -228,11 +285,18 @@ impl Scene {
         let t = Terrain::from_tiles(bbox, CELLS, z, &|x, y| needed.get(&(x, y)).cloned())?;
         let (lo, hi) = t.heights.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
         let shade = Shade::from_tiles(bbox, z, EXAGGERATION, &|x, y| needed.get(&(x, y)).cloned())?;
-        let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE }.lit(&shade);
+        let base = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE };
+        let texture = base.clone().lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, rough: Arc::new(t.coarser()), terrain: Arc::new(t), stale: Vec::new(), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, inset: None, inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
+        let mut s = Scene { key, rough: Arc::new(t.coarser()), terrain: Arc::new(t), stale: Vec::new(), bbox, shade: Arc::new(shade), base: Arc::new(base), texture: Arc::new(texture), draped: false, inset: None, inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
         s.frame(line, size);
         Some(s)
+    }
+
+    /// The ground's size, metres east and north.
+    fn extent(&self) -> (f64, f64) {
+        let t = &self.terrain;
+        ((t.cols - 1) as f64 * t.dx, (t.rows - 1) as f64 * t.dy)
     }
 
     /// Frames the loop again for a view that changed size, unless the eye was moved by hand.
@@ -323,6 +387,31 @@ impl LoopsView {
         let data = self.data.clone();
         let mut tile = |z: u8, x: u32, y: u32| data.update(cx, |d, cx| d.relief_tile((z, x, y), cx));
         if let Some(mut s) = Scene::of(&l.line, key, self.snap.theme.dark, size, &mut tile) {
+            // The roads, from the region's own map: on the ground before any tile (about 90 ms,
+            // in the background), unless the map came first (it has them too).
+            if let Some(g) = self.data.read(cx).loops.graph.clone() {
+                let (gw, gh) = s.extent();
+                let (w, h) = if gw >= gh { (GROUND_PIXELS, (GROUND_PIXELS as f64 * gh / gw) as usize) } else { ((GROUND_PIXELS as f64 * gw / gh) as usize, GROUND_PIXELS) };
+                let (base, shade, bbox, dark) = (s.base.clone(), s.shade.clone(), s.bbox, self.snap.theme.dark);
+                cx.spawn(async move |this, cx| {
+                    let texture = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let mut p = base.crop([0.0, 0.0, 1.0, 1.0], w.max(2), h.max(2));
+                            p.fade = FADE;
+                            with_roads(p, Some(&g), bbox, gw, dark).lit(&shade)
+                        })
+                        .await;
+                    this.update(cx, |v, cx| {
+                        if let Some(s) = v.scene.as_mut().filter(|s| s.key == key && !s.draped) {
+                            s.texture = Arc::new(texture);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
             // The last loop's picture goes off the atlas with the next frame.
             if let Some(old) = self.scene.take() {
                 s.stale.extend(old.stale.into_iter().chain(old.image));
@@ -334,6 +423,7 @@ impl LoopsView {
     /// Lays the map on the ground, in its colours, once all its tiles are there. Until then, and
     /// offline, the ground stays grey.
     fn ensure_drape(&mut self, cx: &mut Context<Self>) {
+        let (graph, dark) = (self.data.read(cx).loops.graph.clone(), self.snap.theme.dark);
         let Some(s) = self.scene.as_mut().filter(|s| !s.draped) else { return };
         let z = map_zoom(s.bbox);
         // Every tile asked for at once, so that they come together.
@@ -341,7 +431,8 @@ impl LoopsView {
         let Some(have) = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<std::collections::HashMap<(u32, u32), Arc<Vec<u8>>>>>() else { return };
         // ponytail: resampled and lit on the main thread, once per loop; in the background if it shows.
         if let Some(t) = Texture::from_tiles(s.bbox, z, FADE, &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) {
-            s.texture = Arc::new(t.lit(&s.shade));
+            s.base = Arc::new(t.clone());
+            s.texture = Arc::new(with_roads(t, graph.as_deref(), s.bbox, s.extent().0, dark).lit(&s.shade));
             s.draped = true;
         }
     }
@@ -350,7 +441,8 @@ impl LoopsView {
     /// than the screen there: the streets stay sharp close up. Made again (in the background) when
     /// the eye looks a quarter of it away or comes nearer; the last one shows until then.
     fn ensure_inset(&mut self, size: (f64, f64), cx: &mut Context<Self>) {
-        let Some(s) = self.scene.as_mut().filter(|s| s.draped && !s.inset_busy) else { return };
+        let (graph, dark) = (self.data.read(cx).loops.graph.clone(), self.snap.theme.dark);
+        let Some(s) = self.scene.as_mut().filter(|s| !s.inset_busy) else { return };
         let t = &s.terrain;
         let (gw, gh) = ((t.cols - 1) as f64 * t.dx, (t.rows - 1) as f64 * t.dy);
         // Metres of ground a pixel of the screen covers, a little before where the eye looks:
@@ -363,35 +455,48 @@ impl LoopsView {
         let z = ((156_543.0 * cos / per_px).log2().ceil() as u8).clamp(map_zoom(s.bbox) + 1, INSET_MAX_ZOOM.max(map_zoom(s.bbox) + 1));
         let half = INSET_PIXELS / 2.0 * 156_543.0 * cos / 2f64.powi(z as i32);
         let centre = [s.cam.target[0], s.cam.target[1]];
-        if let Some((_, (iz, c))) = &s.inset
-            && *iz >= z
-            && (c[0] - centre[0]).abs().max((c[1] - centre[1]).abs()) < half / 2.0
-        {
-            return;
-        }
         let (lat, lon) = (t.south + centre[1] / t.my, t.west + centre[0] / t.mx);
         let (dlat, dlon) = (half / t.my, half / t.mx);
         let b = [(lat - dlat).max(s.bbox[0]), (lon - dlon).max(s.bbox[1]), (lat + dlat).min(s.bbox[2]), (lon + dlon).min(s.bbox[3])];
         if b[0] >= b[2] || b[1] >= b[3] {
             return;
         }
+        // The map's tiles are asked for at every frame until they are all there; until then the
+        // roads are drawn over the coarse ground, sharp at once.
         let got: Vec<_> = tiles(b, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
-        let Some(have) = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<std::collections::HashMap<(u32, u32), Arc<Vec<u8>>>>>() else { return };
+        let complete = got.iter().all(|(_, t)| t.is_some());
         let Some(s) = self.scene.as_mut() else { return };
+        if let Some((_, (iz, c, done))) = &s.inset
+            && *iz >= z
+            && (c[0] - centre[0]).abs().max((c[1] - centre[1]).abs()) < half / 2.0
+            && (*done || !complete)
+        {
+            return;
+        }
+        if !complete && graph.is_none() {
+            return;
+        }
+        let have: std::collections::HashMap<(u32, u32), Arc<Vec<u8>>> = got.into_iter().filter_map(|(k, t)| Some((k, t?))).collect();
         let t = &s.terrain;
         let uv = [(b[1] - t.west) * t.mx / gw, (b[0] - t.south) * t.my / gh, (b[3] - t.west) * t.mx / gw, (b[2] - t.south) * t.my / gh].map(|v| v as f32);
+        let (bw, bh) = ((b[3] - b[1]) * t.mx, (b[2] - b[0]) * t.my);
+        let texel = 156_543.0 * cos / 2f64.powi(z as i32);
+        let (pw, ph) = (((bw / texel) as usize).clamp(2, 2048), ((bh / texel) as usize).clamp(2, 2048));
         s.inset_busy = true;
-        let (shade, key) = (s.shade.clone(), s.key);
+        let (shade, key, base) = (s.shade.clone(), s.key, s.base.clone());
         cx.spawn(async move |this, cx| {
             let inset = cx
                 .background_executor()
-                .spawn(async move { Texture::from_tiles(b, z, 0.0, &|x, y| have.get(&(x, y)).map(|t| t.as_slice())).map(|t| Inset { texture: t.lit_in(&shade, uv), uv }) })
+                .spawn(async move {
+                    let p = if complete { Texture::from_tiles(b, z, 0.0, &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) } else { Some(base.crop(uv, pw, ph)) };
+                    p.map(|p| Inset { texture: with_roads(p, graph.as_deref(), b, bw, dark).lit_in(&shade, uv), uv })
+                })
                 .await;
             this.update(cx, |v, cx| {
                 if let Some(s) = v.scene.as_mut().filter(|s| s.key == key) {
                     s.inset_busy = false;
                     if let Some(i) = inset {
-                        s.inset = Some((Arc::new(i), (z, centre)));
+                        s.inset = Some((Arc::new(i), (z, centre, complete)));
                     }
                     cx.notify();
                 }
@@ -454,7 +559,7 @@ impl LoopsView {
             let mut hsh = std::collections::hash_map::DefaultHasher::new();
             let c = s.cam;
             (c.target.map(f64::to_bits), c.yaw.to_bits(), c.pitch.to_bits(), c.dist.to_bits(), w, h, s.key, s.draped, s.blocks.is_some(), fine).hash(&mut hsh);
-            s.inset.as_ref().map(|(i, _)| Arc::as_ptr(i) as usize).hash(&mut hsh);
+            (Arc::as_ptr(&s.texture) as usize, s.inset.as_ref().map(|(i, _)| Arc::as_ptr(i) as usize)).hash(&mut hsh);
             line.iter().for_each(|(_, c)| c.hash(&mut hsh));
             hsh.finish()
         };
