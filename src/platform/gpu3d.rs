@@ -95,6 +95,12 @@ pub fn render(t: &Arc<Terrain>, texture: &Arc<Texture>, solids: &[Face], cam: &C
 
 impl Gpu {
     fn new() -> Result<Gpu, String> {
+        // ponytail: wgpu is built with Vulkan and GLES only (the backends the window already
+        // pulls on Linux); macOS has neither, and creating the instance would panic. The 3D view
+        // draws on the processor there; wgpu's `metal` feature would give it the card.
+        if cfg!(target_os = "macos") {
+            return Err("no Metal backend in this build".into());
+        }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::default(),
