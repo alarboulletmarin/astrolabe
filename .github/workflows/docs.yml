@@ -1,4 +1,7 @@
-# Builds the user guide (book/, an mdBook) and checks every link of the docs and the website.
+# Builds the user guide (book/, an mdBook) with the website (docs/), checks every link, and
+# publishes both to GitHub Pages from main: the website at the root, the guide under /guide/.
+# Pages must be set to deploy from GitHub Actions (Settings › Pages › Source). After changing
+# that setting, publish at once with Actions › Docs › Run workflow, on main.
 name: Docs
 on:
   push:
@@ -22,9 +25,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.4.52
-      - name: Guide
-        run: mdbook build book --dest-dir ../_site/guide
-      # Links inside the repository and the guide, anchors included: on every change.
+      - name: Website and guide
+        run: |
+          mkdir _site
+          cp -r docs/. _site/
+          mdbook build book --dest-dir ../_site/guide
+      # Links inside the repository and the site, anchors included: on every change.
       - name: Links within the repository
         uses: lycheeverse/lychee-action@v2
         with:
@@ -40,3 +46,20 @@ jobs:
         with:
           args: --no-progress --max-retries 3 README.md CONTRIBUTING.md ARCHITECTURE.md 'book/src/*.md' 'docs/*.html'
           fail: true
+      - if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+  deploy:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

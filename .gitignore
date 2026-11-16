@@ -18,5 +18,9 @@
 /*.src.tar.*
 /*.log
 
+# makepkg builds of aur/*
+/aur/*/*/
+/aur/*/*.pkg.tar.*
+
 # mdBook output
 /book/book/

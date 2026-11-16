@@ -1,0 +1,49 @@
+# Maintainer: Andrea Larboullet Marin <a.larboulletmarin@gmail.com>
+# Tracks the main branch: every `makepkg -si` builds the latest commit.
+pkgname=astrolabe-git
+_name=astrolabe
+pkgver=0.1.0.r49.g908b7bc
+pkgrel=1
+pkgdesc="Desktop journal of your sport activities, read from your Garmin account (development version)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/alarboulletmarin/astrolabe"
+license=('MIT')
+depends=('libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'vulkan-icd-loader')
+makedepends=('cargo' 'git' 'fontconfig' 'freetype2')
+optdepends=('vulkan-driver: a Vulkan driver for your GPU is required to open the window'
+            'gnome-keyring: where the Garmin key is kept (or kwallet, keepassxc); without one, an encrypted file is used')
+# The binary is stripped at build time: a -debug package would be empty, and its
+# file would clash between astrolabe and astrolabe-git.
+options=('!debug')
+provides=('astrolabe')
+conflicts=('astrolabe')
+source=("git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$_name"
+    # Before the first tag there is nothing to describe: count commits instead.
+    if git describe --long --tags >/dev/null 2>&1; then
+        git describe --long --tags --abbrev=7 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+    else
+        printf '0.1.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+    fi
+}
+
+prepare() {
+    cd "$_name"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$_name"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release
+}
+
+package() {
+    cd "$_name"
+    make DESTDIR="$pkgdir" PREFIX=/usr install
+}

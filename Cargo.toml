@@ -29,6 +29,10 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # Already pulled by gpui-kit at this version: its test platform, to play clicks and keys in tests.
 gpui-pre = { version = "0.3.9", features = ["test-support"] }
 
+# Already pulled by gpui at this version: the icon of astrolabe.exe.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0"
+
 [profile.dev]
 # The 3D view draws its pictures on the processor: unoptimised, about three times slower (a
 # picture in 180 ms instead of 66 while the eye moves). Incremental builds take no longer.

@@ -20,7 +20,7 @@ resume=${RESUME:-0}
 [[ $dry != 1 || $resume != 1 ]] || die "DRY_RUN and RESUME cannot be combined"
 tag="v$ver"
 # Only the generated development recipe in Bref may already differ.
-git diff --quiet || die "uncommitted changes"
+git diff --quiet -- . ':!aur/astrolabe-git/PKGBUILD' || die "uncommitted changes"
 git diff --cached --quiet || die "staged changes"
 if [ "$dry" = 0 ]; then
     [ "$(git branch --show-current)" = main ] || die "not on main"

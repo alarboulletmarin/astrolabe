@@ -21,4 +21,8 @@ uninstall:
 test:
 	cargo test --locked
 
-.PHONY: all install uninstall test
+# The user guide, built into book/book/ (needs mdbook: `cargo install mdbook`).
+docs:
+	mdbook build book
+
+.PHONY: all install uninstall test docs
