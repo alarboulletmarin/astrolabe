@@ -5,7 +5,7 @@
 use crate::data::{Data, Snapshot};
 use crate::lang::{decimal, tr, trf};
 use crate::logic::activity::{CLIMB_COST, effort_pace, fmt_duration, fmt_km, fmt_m, group};
-use crate::logic::loops::{Loop, Request, Route, Target};
+use crate::logic::loops::{Loop, Request, Route, Target, Usual};
 use crate::logic::map::{self, View};
 use crate::logic::relief;
 use crate::logic::slope;
@@ -1163,9 +1163,19 @@ impl Render for LoopsView {
         });
         // Before a start: one's usual starts, with how many outings start there.
         let usual = if self.start.is_none() { self.usual_starts(cx) } else { Vec::new() };
-        let usual = usual.into_iter().map(|(p, n)| {
-            let (x, y) = view.screen(p[0], p[1], w, h);
-            div()
+        // Busiest first: one that would cover a busier one's label stays hidden.
+        let mut shown: Vec<(f64, f64)> = Vec::new();
+        let usual = usual.into_iter().filter_map(|u| {
+            let (x, y) = view.screen(u.at[0], u.at[1], w, h);
+            if shown.iter().any(|(sx, sy)| (x - sx).abs() < 110.0 && (y - sy).abs() < 22.0) {
+                return None;
+            }
+            shown.push((x, y));
+            let label = match u.place {
+                Some(place) => format!("{place} · {}", u.count),
+                None => u.count.to_string(),
+            };
+            Some(div()
                 .absolute()
                 .left(px(x as f32 - 4.))
                 .top(px(y as f32 - 4.))
@@ -1173,7 +1183,7 @@ impl Render for LoopsView {
                 .items_center()
                 .gap(px(4.))
                 .child(div().size(px(8.)).rounded(px(4.)).bg(t.text).border_1().border_color(t.bg))
-                .child(div().px(px(5.)).rounded(px(4.)).bg(t.bg.opacity(0.9)).shadow_sm().child(num(n.to_string()).text_size(px(11.)).text_color(t.soft)))
+                .child(div().px(px(5.)).rounded(px(4.)).bg(t.bg.opacity(0.9)).shadow_sm().whitespace_nowrap().child(num(label).text_size(px(11.)).text_color(t.soft))))
         });
         let overlay = div()
             .absolute()
@@ -1734,11 +1744,14 @@ impl LoopsView {
         )
     }
 
-    /// Where one's outings start most often in the region, the three busiest.
-    fn usual_starts(&self, cx: &App) -> Vec<([f64; 2], usize)> {
+    /// Where one's outings start most often in the region, the three busiest, named after the
+    /// place the watch named them after.
+    fn usual_starts(&self, cx: &App) -> Vec<Usual> {
         let d = self.data.read(cx);
         let region = d.loops.region;
-        crate::logic::loops::usual_starts(d.derived.values().map(|x| x.line.as_slice()), 12).into_iter().filter(|(p, _)| region.holds(p[0], p[1])).take(3).collect()
+        let places: std::collections::HashMap<i64, String> = d.acts.iter().filter_map(|a| Some((a.activity_id, crate::logic::journal::place(a)?))).collect();
+        let outings = d.derived.iter().map(|(id, x)| (x.line.as_slice(), places.get(id).cloned()));
+        crate::logic::loops::usual_starts(outings, 12).into_iter().filter(|u| region.holds(u.at[0], u.at[1])).take(3).collect()
     }
 
     /// Before a start: where one's outings start most often, to start from there in a click.
@@ -1754,8 +1767,14 @@ impl LoopsView {
             .flex_col()
             .gap(px(6.))
             .child(hint.child(tr("Click on the map to set the start, or start where you usually do:", "Clique sur la carte pour poser le départ, ou pars d'où tu pars d'habitude :")))
-            .child(div().flex().flex_wrap().gap(px(8.)).children(starts.into_iter().enumerate().map(|(i, (p, n))| {
-                let label = trf(format!("{n} outing{} from here", if n > 1 { "s" } else { "" }), format!("{n} sortie{} d'ici", if n > 1 { "s" } else { "" }));
+            .child(div().flex().flex_wrap().gap(px(8.)).children(starts.into_iter().enumerate().map(|(i, u)| {
+                let (p, n) = (u.at, u.count);
+                // The place, as on the dot on the map; the count says which dot without one.
+                let count = trf(format!("{n} outing{}", if n > 1 { "s" } else { "" }), format!("{n} sortie{}", if n > 1 { "s" } else { "" }));
+                let label = match &u.place {
+                    Some(place) => format!("{place} · {count}"),
+                    None => count,
+                };
                 button(("loops-usual", i), label, false, t).debug_selector(move || format!("loops-usual-{i}")).on_click(cx.listener(move |this, _, _, cx| {
                     this.remember(cx);
                     this.start = Some((p[0], p[1]));

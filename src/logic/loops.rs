@@ -137,21 +137,57 @@ impl Loop {
     }
 }
 
-// ponytail: fixed 200 m cells, a spot on a cell edge splits in two; cluster if it shows.
-/// Where one's outings start most often: the `n` busiest spots (about 200 m across), each with
-/// its mean position (lat, lon) and how many outings start there, busiest first.
-pub fn usual_starts<'a>(lines: impl Iterator<Item = &'a [[f32; 2]]>, n: usize) -> Vec<([f64; 2], usize)> {
+/// A spot where one's outings often start.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Usual {
+    /// Mean position (lat, lon) of the starts.
+    pub at: [f64; 2],
+    pub count: usize,
+    /// The place the outings starting there were most often named after.
+    pub place: Option<String>,
+}
+
+/// Where one's outings start most often, from each outing's line and the place it was named
+/// after: the `n` busiest spots, busiest first. Starts in 200 m cells, and a cell within
+/// `NEAR` of a busier spot joins it: one spot never splits in two on a cell's edge.
+pub fn usual_starts<'a>(outings: impl Iterator<Item = (&'a [[f32; 2]], Option<String>)>, n: usize) -> Vec<Usual> {
     const CELL: f64 = 0.002;
-    let mut cells: std::collections::HashMap<(i32, i32), (f64, f64, usize)> = std::collections::HashMap::new();
-    for p in lines.filter_map(|l| l.first()).filter(|p| p[0].is_finite() && p[1].is_finite()) {
+    const NEAR: f64 = 400.0;
+    type Cell = (f64, f64, usize, Vec<String>);
+    let mut cells: std::collections::HashMap<(i32, i32), Cell> = std::collections::HashMap::new();
+    for (p, place) in outings.filter_map(|(l, place)| Some((*l.first()?, place))).filter(|(p, _)| p[0].is_finite() && p[1].is_finite()) {
         let (lat, lon) = (p[0] as f64, p[1] as f64);
         let c = cells.entry(((lat / CELL).floor() as i32, (lon / CELL).floor() as i32)).or_default();
         (c.0, c.1, c.2) = (c.0 + lat, c.1 + lon, c.2 + 1);
+        c.3.extend(place);
     }
-    let mut out: Vec<([f64; 2], usize, (i32, i32))> = cells.into_iter().map(|(k, (a, b, m))| ([a / m as f64, b / m as f64], m, k)).collect();
     // Busiest first; ties in a fixed order.
-    out.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
-    out.into_iter().take(n).map(|(p, m, _)| (p, m)).collect()
+    let mut cells: Vec<((i32, i32), Cell)> = cells.into_iter().collect();
+    cells.sort_by(|a, b| b.1.2.cmp(&a.1.2).then(a.0.cmp(&b.0)));
+    let mut spots: Vec<Cell> = Vec::new();
+    for (_, c) in cells {
+        let at = |c: &Cell| [c.0 / c.2 as f64, c.1 / c.2 as f64];
+        let here = at(&c);
+        match spots.iter_mut().find(|s| crate::logic::fit::metres(at(s), here) < NEAR) {
+            Some(s) => {
+                (s.0, s.1, s.2) = (s.0 + c.0, s.1 + c.1, s.2 + c.2);
+                s.3.extend(c.3);
+            }
+            None => spots.push(c),
+        }
+    }
+    spots.sort_by(|a, b| b.2.cmp(&a.2));
+    spots
+        .into_iter()
+        .take(n)
+        .map(|s| {
+            let mut names = s.3;
+            names.sort();
+            // The most frequent name, the first in order on a tie.
+            let place = names.chunk_by(|a, b| a == b).fold(None::<&[String]>, |best, run| if best.is_none_or(|b| run.len() > b.len()) { Some(run) } else { best }).map(|run| run[0].clone());
+            Usual { at: [s.0 / s.2 as f64, s.1 / s.2 as f64], count: s.2, place }
+        })
+        .collect()
 }
 
 /// A loop kept under a name, with what made it: it opens again as it was, and can be changed.
@@ -623,7 +659,8 @@ mod tests {
 
     #[test]
     fn usual_starts_are_the_busiest_spots() {
-        assert!(usual_starts(std::iter::empty(), 3).is_empty());
+        let usual_starts = |lines: &[Vec<[f32; 2]>], n| usual_starts(lines.iter().map(|l| (l.as_slice(), None)), n).into_iter().map(|u| (u.at, u.count)).collect::<Vec<_>>();
+        assert!(usual_starts(&[], 3).is_empty());
         let home = [43.7001f32, 7.2501];
         let lines: Vec<Vec<[f32; 2]>> = vec![
             vec![home, [43.71, 7.26]],
@@ -635,12 +672,27 @@ mod tests {
             vec![],
             vec![[f32::NAN, 7.0]],
         ];
-        let s = usual_starts(lines.iter().map(Vec::as_slice), 2);
+        let s = usual_starts(&lines, 2);
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].1, 3);
         assert!((s[0].0[0] - 43.7002).abs() < 1e-4 && (s[0].0[1] - 7.2502).abs() < 1e-4, "{s:?}");
         assert_eq!(s[1].1, 2);
-        assert_eq!(usual_starts(lines.iter().map(Vec::as_slice), 10).len(), 3);
+        assert_eq!(usual_starts(&lines, 10).len(), 3);
+    }
+
+    #[test]
+    fn a_spot_on_a_cells_edge_stays_one_and_takes_its_most_frequent_name() {
+        // 0.002° cells: 43.7000 and 43.6999 fall on either side of an edge, 11 m apart.
+        let (a, b, far) = ([43.7000f32, 7.2501], [43.6999f32, 7.2501], [43.7100f32, 7.2501]);
+        let mut outings: Vec<(Vec<[f32; 2]>, Option<String>)> = Vec::new();
+        outings.extend((0..5).map(|_| (vec![a], Some("Nice".to_string()))));
+        outings.extend((0..3).map(|_| (vec![b], None)));
+        outings.push((vec![b], Some("Èze".into())));
+        outings.extend((0..2).map(|_| (vec![far], Some("Èze".into()))));
+        let s = usual_starts(outings.iter().map(|(l, p)| (l.as_slice(), p.clone())), 5);
+        assert_eq!(s.iter().map(|u| (u.count, u.place.as_deref())).collect::<Vec<_>>(), [(9, Some("Nice")), (2, Some("Èze"))]);
+        // No names: none.
+        assert_eq!(usual_starts([(&[a][..], None)].into_iter(), 1)[0].place, None);
     }
 
     #[test]

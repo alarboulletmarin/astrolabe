@@ -88,6 +88,13 @@ pub fn short_name(a: &Activity) -> String {
         .unwrap_or(full)
 }
 
+/// The place a device named the outing after ("Nice Course à pied" → "Nice"); none for a name
+/// of one's own.
+pub fn place(a: &Activity) -> Option<String> {
+    let short = short_name(a);
+    (short != name(a)).then_some(short)
+}
+
 /// The sports present in the data, for the filters.
 pub fn sports_present(acts: &[Activity]) -> Vec<Sport> {
     Sport::ALL.into_iter().filter(|s| acts.iter().any(|a| a.sport() == *s)).collect()
@@ -138,6 +145,8 @@ mod tests {
         assert_eq!(short("Course à pied"), "Course à pied");
         assert_eq!(short(" Course à pied"), " Course à pied");
         assert_eq!(short("Valbonne - Course à pied"), "Valbonne - Course à pied");
+        let place = |n: &str| super::place(&a(1, "2026-10-26 07:00:00", "running", n));
+        assert_eq!((place("Nice Course à pied"), place("Nice - Footing 40min"), place("Course à pied")), (Some("Nice".into()), None, None));
         assert_eq!(short("NiceCourse à pied"), "NiceCourse à pied");
         assert_eq!(short(""), "Course");
         assert_eq!(fold("ÉCLAIR Çà"), "eclair ca");
