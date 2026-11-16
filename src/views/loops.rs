@@ -7,6 +7,7 @@ use crate::lang::{decimal, tr, trf};
 use crate::logic::activity::{CLIMB_COST, effort_pace, fmt_duration, fmt_km, fmt_m, group};
 use crate::logic::loops::{Loop, Request, Route, Target, Usual};
 use crate::logic::map::{self, View};
+use crate::logic::place::{self, Place};
 use crate::logic::relief;
 use crate::logic::slope;
 use crate::logic::route::{Places, Prefs, Zone};
@@ -288,6 +289,18 @@ pub struct LoopsView {
     name: Entity<InputState>,
     /// The kept route shown, if the loops are one: keeping again updates it.
     opened: Option<u64>,
+    /// An address or coordinates to start from.
+    place: Entity<InputState>,
+    /// The place search under way (its number: a newer one makes it moot), and what it answered:
+    /// the other places found, or why none was.
+    searching: Option<u64>,
+    searches: u64,
+    others: Vec<Place>,
+    place_error: Option<String>,
+    /// The start's name, while the start is still where it was found.
+    named: Option<([f64; 2], String)>,
+    /// A place to bring into view at the next frame.
+    focus: Option<[f64; 2]>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -308,10 +321,16 @@ impl LoopsView {
         let max_km = input(get("loops.max", "15"), window, cx);
         let climb = cx.new(|cx| InputState::new(window, cx).placeholder(tr("any", "libre")).default_value(get("loops.climb", "")));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("Name (optional)", "Nom (facultatif)")));
+        let place = cx.new(|cx| InputState::new(window, cx).placeholder(tr("Address or coordinates", "Adresse ou coordonnées")));
         let mut subs = vec![cx.observe(&data, |this, data, cx| {
             this.snap = data.read(cx).snapshot();
             cx.notify();
         })];
+        subs.push(cx.subscribe(&place, |this, _, e: &InputEvent, cx| {
+            if let InputEvent::PressEnter { .. } = e {
+                this.find_place(cx);
+            }
+        }));
         for i in [&km, &min_km, &max_km, &climb] {
             subs.push(cx.subscribe(i, |this, _, e: &InputEvent, cx| {
                 match e {
@@ -365,8 +384,77 @@ impl LoopsView {
             said: None,
             name,
             opened: None,
+            place,
+            searching: None,
+            searches: 0,
+            others: Vec::new(),
+            place_error: None,
+            named: None,
+            focus: None,
             _subscriptions: subs,
         }
+    }
+
+    /// The start typed in: coordinates at once, else the place search (one at a time, as its
+    /// policy asks), whose first place becomes the start and the others are offered.
+    fn find_place(&mut self, cx: &mut Context<Self>) {
+        let q = self.place.read(cx).value().trim().to_string();
+        if q.is_empty() || self.searching.is_some() {
+            return;
+        }
+        self.others.clear();
+        self.place_error = None;
+        if let Some(at) = place::coords(&q) {
+            self.start_at(at, None, cx);
+            return;
+        }
+        self.searches += 1;
+        let n = self.searches;
+        self.searching = Some(n);
+        cx.notify();
+        let (base, region) = {
+            let d = self.data.read(cx);
+            (d.loops.places_base.clone(), d.loops.region)
+        };
+        cx.spawn(async move |this, cx| {
+            let res = cx.background_executor().spawn(async move { crate::platform::osm::search_places(&base, &q, region) }).await;
+            this.update(cx, |this, cx| {
+                if this.searching != Some(n) {
+                    return;
+                }
+                this.searching = None;
+                match res {
+                    Ok(mut found) if !found.is_empty() => {
+                        let first = found.remove(0);
+                        this.others = found;
+                        this.start_at(first.at, Some(first.name), cx);
+                    }
+                    Ok(_) => this.place_error = Some(trf(format!("Nothing found by that name in {}.", region.name()), format!("Rien trouvé à ce nom en {}.", region.name()))),
+                    Err(e) => this.place_error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Starts from `at` (named `name`), brought into view: set, or moved there.
+    fn start_at(&mut self, at: [f64; 2], name: Option<String>, cx: &mut Context<Self>) {
+        let region = self.data.read(cx).loops.region;
+        if !region.holds(at[0], at[1]) {
+            self.place_error = Some(trf(format!("This place is outside {}, the region downloaded.", region.name()), format!("Ce lieu est hors de {}, la région téléchargée.", region.name())));
+            cx.notify();
+            return;
+        }
+        self.remember(if self.start.is_some() { Gesture::StartMoved } else { Gesture::Start }, cx);
+        self.start = Some((at[0], at[1]));
+        self.named = name.map(|n| (at, n));
+        self.focus = Some(at);
+        if self.data.read(cx).loops.graph.is_some() {
+            self.propose(false, cx);
+        }
+        cx.notify();
     }
 
     /// The request the panel describes, or why it can't be one.
@@ -938,6 +1026,22 @@ impl LoopsView {
         self.km.update(cx, |s, cx| s.focus(window, cx));
     }
 
+    /// Types `text` in the start's field and puts the cursor there, as a click in it would.
+    #[cfg(test)]
+    pub fn type_place(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = text.to_string();
+        self.place.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.focus(window, cx);
+        });
+    }
+
+    /// The start's name, and what the place search said went wrong.
+    #[cfg(test)]
+    pub fn place_said(&self) -> (Option<String>, Option<String>) {
+        (self.named.as_ref().map(|n| n.1.clone()), self.place_error.clone())
+    }
+
     /// Puts the cursor in the name field, as a click in it would.
     #[cfg(test)]
     pub fn focus_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1067,7 +1171,12 @@ impl Render for LoopsView {
         let selected = self.selected;
         let chosen = found.get(selected);
         let generation = self.data.read(cx).loops.generation;
-        let bbox = if found.is_empty() {
+        // A place typed in: about two kilometres around it.
+        let focus = self.focus.take();
+        let bbox = if let Some([lat, lon]) = focus {
+            let (dlat, dlon) = (0.009, 0.009 / lat.to_radians().cos().max(0.1));
+            Some([lat - dlat, lon - dlon, lat + dlat, lon + dlon])
+        } else if found.is_empty() {
             Some(region.bbox)
         } else {
             let lines: Vec<Vec<[f32; 2]>> = found.iter().map(|l| l.line.iter().map(|p| [p[0] as f32, p[1] as f32]).collect()).collect();
@@ -1084,7 +1193,7 @@ impl Render for LoopsView {
             [s - (n - s) * (height - tall) / tall, w - (e - w) * (width - free) / free, n, e]
         });
         self.map.inset = (PANEL as f32 + 14.0, band as f32);
-        self.map.fit(generation, bbox, false);
+        self.map.fit(generation, bbox, focus.is_some());
 
         let b = self.map.bounds.get();
         let (w, h) = ((b.size.width / px(1.)) as f64, (b.size.height / px(1.)) as f64);
@@ -1573,6 +1682,7 @@ impl LoopsView {
             } else if let Some(e) = plan_error {
                 body = body.child(small(e, t.bad()));
             }
+            body = body.child(self.place_field(cx));
             if let Some(start) = self.start {
                 if self.zones.iter().any(|z| crate::logic::fit::metres([z.lat, z.lon], [start.0, start.1]) < z.radius) {
                     body = body.child(small(tr("The start is in a zone to avoid: the loops leave it as soon as they can.", "Le départ est dans une zone à éviter : les boucles en sortent au plus vite.").into(), t.soft));
@@ -1600,7 +1710,10 @@ impl LoopsView {
                                 .on_click(cx.listener(move |this, _, _, cx| remove(this, cx))),
                         )
                 };
-                let place = format!("{} · {}", decimal(format!("{:.4}", start.0)), decimal(format!("{:.4}", start.1)));
+                let place = match &self.named {
+                    Some((at, name)) if *at == [start.0, start.1] => name.clone(),
+                    _ => format!("{} · {}", decimal(format!("{:.4}", start.0)), decimal(format!("{:.4}", start.1))),
+                };
                 body = body.child(
                     div()
                         .flex()
@@ -2057,6 +2170,42 @@ impl LoopsView {
                     this.propose(false, cx);
                 }))
             })))
+    }
+
+    /// The start typed in: an address or coordinates, and what the search answered.
+    fn place_field(&mut self, cx: &mut Context<Self>) -> Div {
+        let t = self.snap.theme;
+        let small = |s: SharedString, c: Hsla| div().text_size(px(12.)).text_color(c).child(s);
+        let mut d = div().flex().flex_col().gap(px(6.)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().flex_1().min_w(px(0.)).child(Input::new(&self.place).small().prefix(icon(IconName::Search, t.soft, 14.))))
+                .child(button("loops-place", tr("Go", "Aller"), false, t).on_click(cx.listener(|this, _, _, cx| this.find_place(cx)))),
+        );
+        if self.searching.is_some() {
+            d = d.child(small(tr("Searching…", "Recherche…").into(), t.soft));
+        } else if let Some(e) = &self.place_error {
+            d = d.child(small(e.clone().into(), t.bad()));
+        } else if !self.others.is_empty() {
+            d = d.child(small(tr("Not that one? Also found:", "Pas celui-là ? Aussi trouvé :").into(), t.soft)).children(self.others.iter().enumerate().map(|(i, p)| {
+                let p = p.clone();
+                div()
+                    .id(("loops-other", i))
+                    .debug_selector(move || format!("loops-other-{i}"))
+                    .text_size(px(12.))
+                    .truncate()
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(t.accent))
+                    .child(p.name.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.others.retain(|o| *o != p);
+                        this.start_at(p.at, Some(p.name.clone()), cx);
+                    }))
+            }));
+        }
+        d
     }
 
     /// The name field and the buttons that keep the chosen loop.

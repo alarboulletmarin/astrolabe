@@ -6,7 +6,7 @@ Notable changes, newest first. Versions follow [Semantic Versioning](https://sem
 
 - **A new logo**: the limb of an astrolabe and the circles of its plate around the zenith, with fewer and thicker lines at 16 and 32 px.
 - **Loops**: a new page (`Ctrl + L`).
-  - Click a start on the map, ask for an exact distance (±2 %) or a range, streets or trails,
+  - Click a start on the map (or type an address, a place or coordinates), ask for an exact distance (±2 %) or a range, streets or trails,
     asphalt or not, and a climb if you like. Up to five different running or trail loops come on
     OpenStreetMap's paths, each with its distance, climb, descent, shares of trail, asphalt and
     out-and-back, and an altitude profile linked to the map.

@@ -32,6 +32,12 @@ next launch.
 ## Asking for loops
 
 1. Click on the map where you want to start. The start goes to the nearest path, within 500 m.
+   Or type it in the **Address or coordinates** field and press `Enter` (or **Go**):
+   - coordinates in decimal degrees, latitude first: `43.6950, 7.2575`, or `43,6950 7,2575`;
+   - an address or a place: `37 promenade des Anglais, Nice`, `Mont Vinaigrier`. It is looked up
+     in the region by OpenStreetMap's place search (Nominatim): what you type is sent to it, and
+     nothing else. The first place found becomes the start, the map moves there, and the other
+     places found are offered underneath.
 2. Choose the distance:
    - **Exact**: the length you type, within ±2 %;
    - **Range**: any length between the two you type.

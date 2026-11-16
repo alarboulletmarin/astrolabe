@@ -12,6 +12,29 @@ use std::io::{BufReader, Read};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub const GEOFABRIK: &str = "https://download.geofabrik.de";
+pub const NOMINATIM: &str = "https://nominatim.openstreetmap.org";
+
+/// Places named `q` within `region`, the five likeliest, from OpenStreetMap's search. Its policy:
+/// one search at a time, made by the user (never while typing), the app named in the User-Agent.
+pub fn search_places(base: &str, q: &str, region: &Region) -> Result<Vec<crate::logic::place::Place>, String> {
+    let [s, w, n, e] = region.bbox;
+    let who = tr("The place search", "La recherche de lieux");
+    let json = agent()
+        .get(format!("{base}/search"))
+        .query("q", q)
+        .query("format", "jsonv2")
+        .query("limit", "5")
+        .query("addressdetails", "1")
+        .query("viewbox", format!("{w},{n},{e},{s}"))
+        .query("bounded", "1")
+        .query("accept-language", tr("en", "fr"))
+        .call()
+        .map_err(|e| service_error(who, e))?
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| service_error(who, e))?;
+    crate::logic::place::read_search(&json).map_err(|e| format!("{who} : {e}"))
+}
 
 /// Counts what goes through, and stops when asked.
 struct Counted<'a, R> {

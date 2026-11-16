@@ -15,6 +15,7 @@ pub mod journal;
 pub mod loops;
 pub mod map;
 pub mod osm;
+pub mod place;
 pub mod profiles;
 pub mod records;
 pub mod regions;

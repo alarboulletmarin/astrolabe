@@ -65,9 +65,11 @@ pub struct Loops {
     pub routes: Vec<Route>,
     /// Where one has run, and the tracks it was made from (rebuilt when they change).
     known: Option<(usize, Arc<Known>)>,
-    /// Geofabrik's and the elevation tiles' addresses (local stand-ins in the tests).
+    /// Geofabrik's, the elevation tiles' and the place search's addresses (local stand-ins in
+    /// the tests).
     pub osm_base: String,
     pub elevation_base: String,
+    pub places_base: String,
     relief: HashMap<(u8, u32, u32), Option<Arc<Vec<f32>>>>,
     relief_busy: usize,
     /// The buildings read, by tile (`buildings::ZOOM`), and whether more are being read.
@@ -94,6 +96,7 @@ impl Default for Loops {
             known: None,
             osm_base: platform::osm::GEOFABRIK.into(),
             elevation_base: platform::elevation::TERRARIUM.into(),
+            places_base: platform::osm::NOMINATIM.into(),
             relief: HashMap::new(),
             relief_busy: 0,
             buildings: HashMap::new(),

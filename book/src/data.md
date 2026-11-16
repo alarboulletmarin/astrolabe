@@ -6,6 +6,8 @@ downloads the region's OpenStreetMap extract from Geofabrik, once, and elevation
 Amazon open data bucket (`elevation-tiles-prod`). Neither one learns your start or your loops: Geofabrik
 sees which region, the tile server which tiles. In 3D, the ground's aerial photos come from the IGN
 (`data.geopf.fr`), along the route shown: that server sees the tiles around it, and so where it goes.
+An address typed as the start goes to OpenStreetMap's place search (`nominatim.openstreetmap.org`),
+which so learns it; coordinates typed are read on your machine.
 
 ## Where things are
 

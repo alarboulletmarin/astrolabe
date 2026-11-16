@@ -1123,3 +1123,90 @@ fn the_profile_points_on_the_map(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(hover(cx), None);
 }
+
+/// The start typed in: coordinates, then an address the place search finds (a stand-in here),
+/// another of its answers, none, and one outside the region.
+#[gpui::test]
+fn a_typed_start_is_found_and_brought_into_view(cx: &mut TestAppContext) {
+    use crate::views::loops::Gesture;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+    let (shell, cx) = start(cx, 3);
+    let lon_at = |m: f64| 7.25 + m / (111_195.0 * 0.7230);
+    // The stand-in search: two places in the town, none, or Paris.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = asked.clone();
+    let (a, b) = (lon_at(1000.0), lon_at(2000.0));
+    std::thread::spawn(move || {
+        for mut conn in listener.incoming().flatten() {
+            let mut head = Vec::new();
+            let mut byte = [0u8];
+            while !head.ends_with(b"\r\n\r\n") && conn.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let path = String::from_utf8_lossy(&head).split(' ').nth(1).unwrap_or("").to_string();
+            let body = if path.contains("q=nowhere") {
+                "[]".to_string()
+            } else if path.contains("q=paris") {
+                r#"[{"lat": "48.8584", "lon": "2.2945", "name": "Tour Eiffel", "display_name": "Tour Eiffel, Paris", "address": {"city": "Paris"}}]"#.to_string()
+            } else {
+                format!(r#"[{{"lat": "43.70", "lon": "{a}", "name": "", "display_name": "1, Rue Longue, Ville", "address": {{"house_number": "1", "road": "Rue Longue", "city": "Ville"}}}},
+                           {{"lat": "43.70", "lon": "{b}", "name": "Place Haute", "display_name": "Place Haute, Ville", "address": {{"city": "Ville"}}}}]"#)
+            };
+            log.lock().unwrap().push(path);
+            let _ = conn.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+        }
+    });
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| {
+        d.loops.graph = Some(std::sync::Arc::new(crate::logic::graph::tests::town()));
+        d.loops.places_base = base;
+    }));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    let typed = |cx: &mut gpui::VisualTestContext, text: &str| {
+        shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| {
+            l.type_km("5", window, cx);
+            l.type_place(text, window, cx);
+        }));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+    };
+    let start_of = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.loops.read(cx).start());
+    let said = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.loops.read(cx).place_said());
+    let near = |p: Option<(f64, f64)>, lat: f64, lon: f64| p.is_some_and(|p| crate::logic::fit::metres([p.0, p.1], [lat, lon]) < 1.0);
+    // Coordinates: the start at once, no search, and loops.
+    typed(cx, &format!("43.70, {:.6}", lon_at(1500.0)));
+    assert!(near(start_of(cx), 43.70, lon_at(1500.0)), "{:?}", start_of(cx));
+    assert!(asked.lock().unwrap().is_empty());
+    assert!(!shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.is_empty()));
+    // An address: the first place found is the start, moved there, named; the other offered.
+    typed(cx, "rue longue");
+    assert!(near(start_of(cx), 43.70, a), "{:?}", start_of(cx));
+    assert_eq!(said(cx), (Some("1 Rue Longue, Ville".into()), None));
+    assert_eq!(shell.read_with(cx, |s, cx| s.loops.read(cx).next_change(true)), Some(Gesture::StartMoved));
+    let path = asked.lock().unwrap().last().cloned().unwrap();
+    assert!(path.contains("q=rue+longue") || path.contains("q=rue%20longue"), "{path}");
+    assert!(path.contains("bounded=1") && path.contains("viewbox=") && path.contains("addressdetails=1"), "{path}");
+    click(cx, "loops-other-0");
+    assert!(near(start_of(cx), 43.70, b));
+    assert_eq!(said(cx).0.as_deref(), Some("Place Haute, Ville"));
+    assert!(cx.debug_bounds("loops-other-0").is_none(), "the other, taken, is no longer offered");
+    // Undo (the arrow: the field has the keys): the start back where the address put it.
+    click(cx, "loops-undo");
+    assert!(near(start_of(cx), 43.70, a));
+    // Nothing found, or found outside the region: said, and the start stays.
+    let before = start_of(cx);
+    typed(cx, "nowhere");
+    assert!(said(cx).1.is_some_and(|e| e.contains("Provence")));
+    assert_eq!(start_of(cx), before);
+    typed(cx, "paris");
+    assert!(said(cx).1.is_some_and(|e| e.contains("Provence")));
+    assert_eq!(start_of(cx), before);
+    // Empty: nothing asked.
+    let n = asked.lock().unwrap().len();
+    typed(cx, "   ");
+    assert_eq!(asked.lock().unwrap().len(), n);
+}
