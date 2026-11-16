@@ -16,7 +16,7 @@ const FLAT_LIT: f32 = AMBIENT + (1.0 - AMBIENT) * LIGHT[2];
 /// The line is 0.5 % nearer than its own ground, so it is not buried in it.
 const LINE_BIAS: f32 = 1.005;
 /// Brightness of a wall turned away from the sun.
-const WALL_SHADE: f32 = 0.7;
+const WALL_SHADE: f32 = 0.55;
 const NEAR: f64 = 1.0;
 const BAND: usize = 16;
 
@@ -140,11 +140,16 @@ impl Texture {
     }
 
     /// The same picture lit by the sun: each texel times the light there.
-    pub fn lit(mut self, shade: &Shade) -> Texture {
+    pub fn lit(self, shade: &Shade) -> Texture {
+        self.lit_in(shade, [0.0, 0.0, 1.0, 1.0])
+    }
+
+    /// The same, for a picture that covers only `[u0, v0, u1, v1]` of the ground.
+    pub fn lit_in(mut self, shade: &Shade, [u0, v0, u1, v1]: [f32; 4]) -> Texture {
         for j in 0..self.h {
-            let v = (j as f32 + 0.5) / self.h as f32;
+            let v = v0 + (v1 - v0) * (j as f32 + 0.5) / self.h as f32;
             for i in 0..self.w {
-                let f = shade.at((i as f32 + 0.5) / self.w as f32, v);
+                let f = shade.at(u0 + (u1 - u0) * (i as f32 + 0.5) / self.w as f32, v);
                 let p = &mut self.px[j * self.w + i];
                 *p = p.map(|c| (c as f32 * f + 0.5).min(255.0) as u8);
             }
@@ -489,14 +494,15 @@ pub fn project(_t: &Terrain, cam: &Camera, exaggeration: f32, p: [f64; 3], w: us
     (c[2] > NEAR).then(|| screen(c, focal, w as f64, h as f64)).map(|v| (v[0], v[1]))
 }
 
-/// Draws `t` with `texture` laid over it (its light is in the picture), the `solids` standing on
+/// Draws `t` with `texture` laid over it (its light is in the picture), `inset` over part of
+/// that, the `solids` standing on
 /// it, then `line` over it, edged with the background's colour. Each line point is `([east,
 /// north, altitude], colour of the segment that starts there)`. `smooth` draws at twice the size
 /// and averages, for soft edges (about a third more time: the triangles' set-up costs more than
 /// their pixels). Returns `w * h` pixels of 4 bytes: the colour bytes as given, alpha 255;
 /// `background` where nothing is drawn, and under the ground's faded edges.
 #[allow(clippy::too_many_arguments)]
-pub fn render(t: &Terrain, texture: &Texture, solids: &[Face], cam: &Camera, exaggeration: f32, line: &[([f64; 3], [u8; 3])], w: usize, h: usize, background: [u8; 4], smooth: bool) -> Vec<u8> {
+pub fn render(t: &Terrain, texture: &Texture, solids: &[Face], cam: &Camera, exaggeration: f32, line: &[([f64; 3], [u8; 3])], w: usize, h: usize, background: [u8; 4], smooth: bool, inset: Option<&Inset>) -> Vec<u8> {
     let mut out: Vec<u8> = background.iter().copied().cycle().take(w * h * 4).collect();
     if w == 0 || h == 0 || t.cols < 2 || t.rows < 2 || texture.w < 2 || texture.h < 2 || texture.px.len() < texture.w * texture.h {
         return out;
@@ -635,7 +641,7 @@ pub fn render(t: &Terrain, texture: &Texture, solids: &[Face], cam: &Camera, exa
     let radius = (sw as f32 * 3.0 / 1200.0).max(1.0);
     let edging = radius + (radius * 0.4).max(1.0);
     let edge_colour = [background[0], background[1], background[2]];
-    let ground = Ground { texture, background: background.map(|v| v as f32) };
+    let ground = Ground { texture, inset, background: background.map(|v| v as f32) };
 
     let bands = Mutex::new(out.chunks_mut(BAND * w * 4).enumerate());
     std::thread::scope(|sc| {
@@ -690,9 +696,33 @@ pub fn render(t: &Terrain, texture: &Texture, solids: &[Face], cam: &Camera, exa
     out
 }
 
-/// What a point of the ground looks like: its picture, and the background it fades into.
+/// A finer picture over part of the ground (where the eye looks close), lit like the rest.
+#[derive(Clone, Debug)]
+pub struct Inset {
+    pub texture: Texture,
+    /// The part of the ground it covers, `[u0, v0, u1, v1]` as for `Texture`.
+    pub uv: [f32; 4],
+}
+
+impl Inset {
+    /// Its colour at the ground's `(u, v)` and how much of it shows: 1 inside, down to 0 at its
+    /// edges so that no seam shows; `None` outside.
+    fn sample(&self, u: f32, v: f32) -> Option<([f32; 3], f32)> {
+        let [u0, v0, u1, v1] = self.uv;
+        let (x, y) = ((u - u0) / (u1 - u0), (v - v0) / (v1 - v0));
+        if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+            return None;
+        }
+        let e = |d: f32| (d / 0.1).min(1.0);
+        Some((self.texture.sample(x, y), e(x) * e(1.0 - x) * e(y) * e(1.0 - y)))
+    }
+}
+
+/// What a point of the ground looks like: its picture, a finer one over part of it, and the
+/// background it fades into.
 struct Ground<'a> {
     texture: &'a Texture,
+    inset: Option<&'a Inset>,
     background: [f32; 4],
 }
 
@@ -738,7 +768,10 @@ fn triangle(v: [&[f32; 6]; 3], g: Option<&Ground>, y0: usize, y1: usize, w: usiz
                     continue;
                 };
                 let [u, v, light] = [3, 4, 5].map(|k| wa * a[k] + wb * b[k] + wc * c[k]);
-                let (tex, shown, bg) = (g.texture.sample(u, v), g.texture.shown(u, v), g.background);
+                let (mut tex, shown, bg) = (g.texture.sample(u, v), g.texture.shown(u, v), g.background);
+                if let Some((fine, k)) = g.inset.and_then(|i| i.sample(u, v)) {
+                    tex = [0, 1, 2].map(|n| tex[n] + (fine[n] - tex[n]) * k);
+                }
                 let lit = [tex[0] * light, tex[1] * light, tex[2] * light, 255.0];
                 put(&mut rows_out[zi * 4..zi * 4 + 4], [0, 1, 2, 3].map(|k| bg[k] + (lit[k] - bg[k]) * shown));
             }
@@ -826,12 +859,30 @@ mod tests {
     fn flat_terrain_from_above_shows_its_lit_colour() {
         let t = grid(21, |_, _| 0.0);
         let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.0, pitch: PITCH_MAX, dist: 3000.0, min_dist: 300.0, fov: 0.8 };
-        let img = render(&t, &plain([200, 100, 50]), &[], &cam, 1.0, &[], 200, 150, CLEAR, false);
+        let img = render(&t, &plain([200, 100, 50]), &[], &cam, 1.0, &[], 200, 150, CLEAR, false, None);
         let p = pixel(&img, 200, 100.0, 75.0);
         for (got, want) in p.iter().zip([200.0, 100.0, 50.0, 255.0]) {
             assert!((*got as f32 - want).abs() <= 1.5, "{p:?} vs {want}");
         }
         assert_eq!(pixel(&img, 200, 0.0, 0.0), CLEAR, "the corner is background");
+    }
+
+    #[test]
+    fn a_finer_picture_shows_over_its_part_of_the_ground_without_a_seam() {
+        let t = grid(21, |_, _| 0.0);
+        let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.0, pitch: PITCH_MAX, dist: 3000.0, min_dist: 300.0, fov: 0.8 };
+        let inset = Inset { texture: plain([0, 0, 250]), uv: [0.4, 0.4, 0.6, 0.6] };
+        let img = render(&t, &plain([200, 100, 50]), &[], &cam, 1.0, &[], 400, 400, CLEAR, false, Some(&inset));
+        let at = |e: f64, n: f64| {
+            let (x, y) = project(&t, &cam, 1.0, [e, n, 0.0], 400, 400).unwrap();
+            pixel(&img, 400, x, y)
+        };
+        assert_eq!(at(1000.0, 1000.0)[..3], [0, 0, 250], "inside: the finer picture");
+        assert_eq!(at(400.0, 1000.0)[..3], [200, 100, 50], "outside: the ground's");
+        let edge = at(801.0, 1000.0);
+        assert!(edge[2] < 70 && edge[0] > 180, "its edge melts into the ground: {edge:?}");
+        let half = at(820.0, 1000.0);
+        assert!((80..180).contains(&half[2]), "half way in its margin: {half:?}");
     }
 
     /// A ridge across the whole grid at row 5, and a red line behind it, seen from the south.
@@ -846,7 +897,7 @@ mod tests {
     #[test]
     fn line_shows_on_flat_ground() {
         let (t, cam, line) = ridge_scene(0.0);
-        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false, None);
         let (x, y) = project(&t, &cam, 1.0, [1000.0, 1500.0, 0.0], 1200, 800).unwrap();
         assert_eq!(pixel(&img, 1200, x, y)[..3], [255, 0, 0]);
         // About 3 px thick: the pixels 4 px above and below are ground.
@@ -857,7 +908,7 @@ mod tests {
     #[test]
     fn a_peak_in_front_hides_the_line() {
         let (t, cam, line) = ridge_scene(1500.0);
-        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false, None);
         let (x, y) = project(&t, &cam, 1.0, [1000.0, 1500.0, 0.0], 1200, 800).unwrap();
         assert_eq!(pixel(&img, 1200, x, y)[3], 255, "the ridge covers that pixel");
         // The line shows faintly through the ridge (40 % of its red over the ridge's green),
@@ -867,7 +918,7 @@ mod tests {
         let faint = [(40.0 + 215.0 * 0.4) as u8, (160.0 * 0.6) as u8, (40.0 * 0.6) as u8, 255];
         assert_eq!(pixel(&img, 1200, x, y), faint);
         let joined = vec![line[0], ([1000.0, 1500.0, 0.0], [255, 0, 0]), ([1000.0, 1500.0, 0.0], [255, 0, 0]), line[1]];
-        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &joined, 1200, 800, CLEAR, false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &joined, 1200, 800, CLEAR, false, None);
         assert_eq!(pixel(&img, 1200, x, y), faint);
         let around: Vec<[u8; 4]> = (-12..=12).map(|d| pixel(&img, 1200, x, y + d as f32)).collect();
         assert!(around.iter().all(|p| *p == faint || *p == ridge), "no edging: {around:?}");
@@ -931,7 +982,7 @@ mod tests {
         let t = grid(301, |_, _| 100.0);
         for dist in [50.0, 200.0, 300.0] {
             let cam = Camera { target: [15_000.0, 15_000.0, 100.0], yaw: 0.4, pitch: PITCH_MIN, dist, min_dist: 300.0, fov: 0.8 };
-            let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &[], 1200, 800, CLEAR, false);
+            let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &[], 1200, 800, CLEAR, false, None);
             let bg = lower_half_background(&img);
             assert!(bg < 0.01, "dist {dist}: {:.1} % background", bg * 100.0);
         }
@@ -943,7 +994,7 @@ mod tests {
         let cam = Camera { target: [1500.0, 1500.0, 0.0], yaw: 0.0, pitch: PITCH_MIN, dist: 200.0, min_dist: 300.0, fov: 0.8 };
         // From ahead of the eye to behind it.
         let line = [([1500.0, 1450.0, 0.0], [255, 0, 0]), ([1500.0, 1100.0, 0.0], [255, 0, 0])];
-        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false, None);
         assert_eq!(pixel(&img, 1200, 600.0, 799.0)[..3], [255, 0, 0], "the line reaches the bottom edge");
     }
 
@@ -953,7 +1004,7 @@ mod tests {
         let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.0, pitch: 40f64.to_radians(), dist: 3000.0, min_dist: 300.0, fov: 0.8 };
         let red = [255, 0, 0];
         let line = [([f64::NAN, 1000.0, 0.0], red), ([900.0, 1000.0, 0.0], red), ([1100.0, 1000.0, 0.0], red)];
-        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, CLEAR, false, None);
         let (x, y) = project(&t, &cam, 1.0, [1000.0, 1000.0, 0.0], 1200, 800).unwrap();
         assert_eq!(pixel(&img, 1200, x, y)[..3], [255, 0, 0], "the good segment is drawn");
         let reds = img.chunks(4).filter(|p| p[..3] == [255, 0, 0]).count();
@@ -964,7 +1015,7 @@ mod tests {
     fn an_empty_grid_has_no_extent_to_overflow() {
         let t = Terrain { cols: 0, rows: 0, heights: vec![], dx: 0.0, dy: 0.0, south: 0.0, west: 0.0, mx: 1.0, my: 1.0 };
         let cam = Camera::fit(&t);
-        assert_eq!(render(&t, &plain([0; 3]), &[], &cam, 1.0, &[], 4, 4, [1, 2, 3, 4], false).len(), 64);
+        assert_eq!(render(&t, &plain([0; 3]), &[], &cam, 1.0, &[], 4, 4, [1, 2, 3, 4], false, None).len(), 64);
         assert_eq!(t.height_at(5.0, 5.0), 0.0);
     }
 
@@ -1124,7 +1175,7 @@ mod tests {
         let line = vec![([600.0, 1100.0, 0.0], [255, 0, 0]), ([1400.0, 1100.0, 0.0], [255, 0, 0])];
         let block = extrude(&[[950.0, 950.0], [1050.0, 950.0], [1050.0, 1050.0], [950.0, 1050.0]], 0.0, 120.0, [90, 90, 90], [10, 20, 250]);
         let at = |solids: &[Face], p: [f64; 3]| {
-            let img = render(&t, &plain([40, 160, 40]), solids, &cam, 1.0, &line, 600, 400, CLEAR, false);
+            let img = render(&t, &plain([40, 160, 40]), solids, &cam, 1.0, &line, 600, 400, CLEAR, false, None);
             let (x, y) = project(&t, &cam, 1.0, p, 600, 400).unwrap();
             pixel(&img, 600, x, y)
         };
@@ -1139,7 +1190,7 @@ mod tests {
         assert_eq!(at(&block, [700.0, 1100.0, 0.0]), [255, 0, 0, 255]);
         assert_eq!(at(&block, [700.0, 900.0, 0.0]), [40, 160, 40, 255]);
         // Heights are drawn higher with the ground's: the roof is where `project` says.
-        let img = render(&t, &plain([40, 160, 40]), &block, &cam, 2.0, &[], 600, 400, CLEAR, false);
+        let img = render(&t, &plain([40, 160, 40]), &block, &cam, 2.0, &[], 600, 400, CLEAR, false, None);
         let (x, y) = project(&t, &cam, 2.0, [1000.0, 1000.0, 120.0], 600, 400).unwrap();
         assert_eq!(pixel(&img, 600, x, y), [10, 20, 250, 255]);
     }
@@ -1154,7 +1205,7 @@ mod tests {
             (true, false) => [0, 0, 250],
             (false, false) => [250, 250, 0],
         });
-        render(&t, &Texture { w: 40, h: 40, px: px.collect(), fade }, &[], &cam, 1.0, &[], 300, 300, [10, 20, 30, 255], smooth)
+        render(&t, &Texture { w: 40, h: 40, px: px.collect(), fade }, &[], &cam, 1.0, &[], 300, 300, [10, 20, 30, 255], smooth, None)
     }
 
     #[test]
@@ -1188,7 +1239,7 @@ mod tests {
         let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.3, pitch: PITCH_MAX, dist: 4500.0, min_dist: 300.0, fov: 0.8 };
         let line = vec![([500.0, 500.0, 0.0], [255, 255, 255]), ([1500.0, 900.0, 0.0], [255, 255, 255])];
         let between = |smooth: bool| {
-            let img = render(&t, &plain([200, 0, 0]), &[], &cam, 1.0, &line, 300, 300, [0, 0, 0, 255], smooth);
+            let img = render(&t, &plain([200, 0, 0]), &[], &cam, 1.0, &line, 300, 300, [0, 0, 0, 255], smooth, None);
             assert_eq!(img.len(), 300 * 300 * 4);
             // Neither ground, background nor line: a blend.
             img.chunks_exact(4).filter(|p| ![0, 200, 255].contains(&p[0])).count()
@@ -1202,7 +1253,7 @@ mod tests {
         let t = grid(21, |_, _| 0.0);
         let cam = Camera { target: [1000.0, 1000.0, 0.0], yaw: 0.0, pitch: PITCH_MAX, dist: 3000.0, min_dist: 300.0, fov: 0.8 };
         let line = vec![([500.0, 1000.0, 0.0], [255, 0, 0]), ([1500.0, 1000.0, 0.0], [255, 0, 0])];
-        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, [9, 9, 9, 255], false);
+        let img = render(&t, &plain([40, 160, 40]), &[], &cam, 1.0, &line, 1200, 800, [9, 9, 9, 255], false, None);
         // Down from the line's middle: the line, its edging, the ground.
         let col: Vec<[u8; 4]> = (0..10).map(|d| pixel(&img, 1200, 600.0, 400.0 + d as f32)).collect();
         assert_eq!(col[0], [255, 0, 0, 255]);
@@ -1218,11 +1269,11 @@ mod tests {
         let colors = Texture { w: 1500, h: 1500, px: (0..1500 * 1500).map(|k| [(k % 251) as u8, 120, 60]).collect(), fade: 0.12 };
         let cam = Camera::fit(&t);
         let line: Vec<_> = (0..500).map(|k| ([k as f64 * 50.0, 15_000.0 + (k as f64 / 20.0).sin() * 8000.0, 900.0], [255, 40, 40])).collect();
-        render(&t, &colors, &[], &cam, 1.5, &line, 1200, 800, CLEAR, true);
+        render(&t, &colors, &[], &cam, 1.5, &line, 1200, 800, CLEAR, true, None);
         let start = std::time::Instant::now();
         let runs = 10;
         for _ in 0..runs {
-            std::hint::black_box(render(&t, &colors, &[], &cam, 1.5, &line, 1200, 800, CLEAR, true));
+            std::hint::black_box(render(&t, &colors, &[], &cam, 1.5, &line, 1200, 800, CLEAR, true, None));
         }
         let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
         println!("terrain render 1200x800, 500x500 vertices, smooth: {ms:.1} ms");
@@ -1238,7 +1289,7 @@ mod tests {
             .collect();
         let start = std::time::Instant::now();
         for _ in 0..runs {
-            std::hint::black_box(render(&t, &colors, &blocks, &cam, 1.5, &line, 1200, 800, CLEAR, true));
+            std::hint::black_box(render(&t, &colors, &blocks, &cam, 1.5, &line, 1200, 800, CLEAR, true, None));
         }
         let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
         println!("the same from 1200 m with {} faces of buildings: {ms:.1} ms", blocks.len());

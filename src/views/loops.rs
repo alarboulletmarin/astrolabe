@@ -987,7 +987,7 @@ impl Render for LoopsView {
             }
             None => None,
         };
-        let ramp = slope_ramp(&t);
+        let ramp = slope_ramp(&t, false);
         let climb = chosen.zip(self.climb_hover).and_then(|(l, i)| slope::climbs(&l.along, &l.eles).get(i).map(|c| l.line[c.from..=c.to].to_vec()));
         let bounds = self.map.bounds.clone();
         let drawing = canvas(
@@ -1266,22 +1266,24 @@ impl Render for LoopsView {
                             this.data.update(cx, |d, cx| d.set_setting("loops.slope", v.to_string(), cx));
                         },
                     )))
-                    .when(self.show_slope, |d| d.child(slope_legend(&t))),
+                    .when(self.show_slope, |d| d.child(slope_legend(&t, three))),
             ))
     }
 }
 
 /// The colours of the grade: the flat in a neutral grey that holds on any ground, then the
 /// accent, deeper as it steepens. In the dark theme the gentle grades keep more of the accent,
-/// or they would sink into the dark map.
-fn slope_ramp(t: &crate::ui::theme::Theme) -> [Hsla; 5] {
+/// or they would sink into the dark map. In 3D the flat is a pale accent: grey there is the
+/// buildings' colour, and the loop must be the one coloured thing.
+fn slope_ramp(t: &crate::ui::theme::Theme, three: bool) -> [Hsla; 5] {
     let [b, c] = if t.dark { [0.68, 0.84] } else { [0.5, 0.78] };
-    [blend(t.text, t.bg, 0.5), blend(t.accent, t.bg, b), blend(t.accent, t.bg, c), t.accent, blend(t.text, t.accent, 0.55)]
+    let flat = if three { blend(t.accent, t.bg, if t.dark { 0.5 } else { 0.32 }) } else { blend(t.text, t.bg, 0.5) };
+    [flat, blend(t.accent, t.bg, b), blend(t.accent, t.bg, c), t.accent, blend(t.text, t.accent, 0.55)]
 }
 
 /// What the colours of the grade say.
-fn slope_legend(t: &crate::ui::theme::Theme) -> Div {
-    let ramp = slope_ramp(t);
+fn slope_legend(t: &crate::ui::theme::Theme, three: bool) -> Div {
+    let ramp = slope_ramp(t, three);
     let labels = ["< 3 %", "3–6", "6–10", "10–15", "> 15 %"];
     div().flex().items_center().gap(px(6.)).px(px(8.)).py(px(5.)).bg(t.bg).rounded(px(8.)).shadow_sm().children(ramp.iter().zip(labels).map(|(c, l)| {
         div().flex().items_center().gap(px(3.)).child(div().w(px(12.)).h(px(4.)).rounded(px(2.)).bg(*c)).child(div().text_size(px(11.)).text_color(t.soft).child(l))
@@ -1908,7 +1910,7 @@ impl LoopsView {
         let xs2 = xs.clone();
         // The grade along it, in the colours of the map.
         let total = l.along.last().copied().unwrap_or(0.0).max(1.0);
-        let ramp = slope_ramp(&t);
+        let ramp = slope_ramp(&t, self.three_d);
         let strip = self.show_slope.then(|| {
             div().h(px(4.)).w_full().flex().rounded(px(2.)).overflow_hidden().children(
                 slope::runs(&l.along, &l.eles).into_iter().map(|(i, j, k)| div().h_full().w(relative((l.along[j] - l.along[i]) / total)).bg(ramp[k as usize])),

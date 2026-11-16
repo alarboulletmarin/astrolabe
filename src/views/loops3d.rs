@@ -7,7 +7,7 @@ use crate::logic::loops::Loop;
 use crate::logic::map::world;
 use crate::logic::slope;
 use crate::logic::buildings::{self, Building};
-use crate::logic::terrain::{self, Camera, Face, Shade, Terrain, Texture};
+use crate::logic::terrain::{self, Camera, Face, Inset, Shade, Terrain, Texture};
 use crate::ui::render_image;
 use gpui_kit::*;
 use std::hash::{Hash, Hasher};
@@ -28,6 +28,10 @@ const FADE: f32 = 0.16;
 /// The map laid on the ground is at least this many pixels along its longer side (and less
 /// than twice as many): about one per pixel of the screen.
 const MAP_PIXELS: f64 = 1024.0;
+/// The finer map laid where the eye looks close: this many pixels a side, of a zoom up to the
+/// 2D map's finest.
+const INSET_PIXELS: f64 = 1536.0;
+const INSET_MAX_ZOOM: u8 = 18;
 /// The loop fills this share of the free area's width, or of its height.
 const FILL: f64 = 0.8;
 
@@ -124,6 +128,10 @@ pub(super) struct Scene {
     /// Grey by altitude until the map's tiles are all there, then the map (`draped`); lit.
     texture: Arc<Texture>,
     draped: bool,
+    /// The finer map where the eye looks close, with its zoom and the point (local metres) it is
+    /// centred on; and the one being made.
+    inset: Option<(Arc<Inset>, (u8, [f64; 2]))>,
+    inset_busy: bool,
     /// The buildings beside the loop, once read (`None` until then, and in the tests).
     blocks: Option<Arc<Blocks>>,
     blocks_busy: bool,
@@ -217,7 +225,7 @@ impl Scene {
         let shade = Shade::from_tiles(bbox, z, EXAGGERATION, &|x, y| needed.get(&(x, y)).cloned())?;
         let texture = Texture { w: t.cols, h: t.rows, px: t.heights.iter().map(|h| tint(*h, lo, hi, dark)).collect(), fade: FADE }.lit(&shade);
         let cam = Camera::fit(&t);
-        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
+        let mut s = Scene { key, terrain: Arc::new(t), bbox, shade: Arc::new(shade), texture: Arc::new(texture), draped: false, inset: None, inset_busy: false, blocks: None, blocks_busy: false, cam, image: None, shown: None, busy: false, drawn: None, drag: None, framed: size, moved: false, fly: None };
         s.frame(line, size);
         Some(s)
     }
@@ -329,6 +337,61 @@ impl LoopsView {
         }
     }
 
+    /// Lays a finer map around where the eye looks, when the map over the whole ground is coarser
+    /// than the screen there: the streets stay sharp close up. Made again (in the background) when
+    /// the eye looks a quarter of it away or comes nearer; the last one shows until then.
+    fn ensure_inset(&mut self, size: (f64, f64), cx: &mut Context<Self>) {
+        let Some(s) = self.scene.as_mut().filter(|s| s.draped && !s.inset_busy) else { return };
+        let t = &s.terrain;
+        let (gw, gh) = ((t.cols - 1) as f64 * t.dx, (t.rows - 1) as f64 * t.dy);
+        // Metres of ground a pixel of the screen covers, a little before where the eye looks:
+        // the ground nearer the eye matters more.
+        let per_px = 0.6 * s.cam.dist * 2.0 * (s.cam.fov / 2.0).tan() / size.1.max(1.0);
+        if gw.max(gh) / s.texture.w.max(s.texture.h) as f64 <= per_px * 1.5 {
+            return;
+        }
+        let cos = ((s.bbox[0] + s.bbox[2]) / 2.0).to_radians().cos();
+        let z = ((156_543.0 * cos / per_px).log2().ceil() as u8).clamp(map_zoom(s.bbox) + 1, INSET_MAX_ZOOM.max(map_zoom(s.bbox) + 1));
+        let half = INSET_PIXELS / 2.0 * 156_543.0 * cos / 2f64.powi(z as i32);
+        let centre = [s.cam.target[0], s.cam.target[1]];
+        if let Some((_, (iz, c))) = &s.inset
+            && *iz >= z
+            && (c[0] - centre[0]).abs().max((c[1] - centre[1]).abs()) < half / 2.0
+        {
+            return;
+        }
+        let (lat, lon) = (t.south + centre[1] / t.my, t.west + centre[0] / t.mx);
+        let (dlat, dlon) = (half / t.my, half / t.mx);
+        let b = [(lat - dlat).max(s.bbox[0]), (lon - dlon).max(s.bbox[1]), (lat + dlat).min(s.bbox[2]), (lon + dlon).min(s.bbox[3])];
+        if b[0] >= b[2] || b[1] >= b[3] {
+            return;
+        }
+        let got: Vec<_> = tiles(b, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
+        let Some(have) = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<std::collections::HashMap<(u32, u32), Arc<Vec<u8>>>>>() else { return };
+        let Some(s) = self.scene.as_mut() else { return };
+        let t = &s.terrain;
+        let uv = [(b[1] - t.west) * t.mx / gw, (b[0] - t.south) * t.my / gh, (b[3] - t.west) * t.mx / gw, (b[2] - t.south) * t.my / gh].map(|v| v as f32);
+        s.inset_busy = true;
+        let (shade, key) = (s.shade.clone(), s.key);
+        cx.spawn(async move |this, cx| {
+            let inset = cx
+                .background_executor()
+                .spawn(async move { Texture::from_tiles(b, z, 0.0, &|x, y| have.get(&(x, y)).map(|t| t.as_slice())).map(|t| Inset { texture: t.lit_in(&shade, uv), uv }) })
+                .await;
+            this.update(cx, |v, cx| {
+                if let Some(s) = v.scene.as_mut().filter(|s| s.key == key) {
+                    s.inset_busy = false;
+                    if let Some(i) = inset {
+                        s.inset = Some((Arc::new(i), (z, centre)));
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Stands the buildings beside the loop on the ground, once they are read (from the cache or
     /// the region's extract); they are made into blocks in the background.
     fn ensure_blocks(&mut self, l: &Loop, cx: &mut Context<Self>) {
@@ -358,7 +421,7 @@ impl LoopsView {
     /// drawing at a time, the latest wins.
     fn ensure_picture(&mut self, l: &Loop, size: (f64, f64), cx: &mut Context<Self>) {
         let t = self.snap.theme;
-        let ramp = slope_ramp(&t).map(bytes);
+        let ramp = slope_ramp(&t, true).map(bytes);
         let classes = self.show_slope.then(|| slope::runs(&l.along, &l.eles));
         let climb = self.climb_hover.and_then(|i| slope::climbs(&l.along, &l.eles).get(i).map(|c| c.from..c.to));
         let (accent, ink, bg) = (bytes(t.accent), bytes(t.text), bytes(t.bg));
@@ -379,6 +442,7 @@ impl LoopsView {
             let mut hsh = std::collections::hash_map::DefaultHasher::new();
             let c = s.cam;
             (c.target.map(f64::to_bits), c.yaw.to_bits(), c.pitch.to_bits(), c.dist.to_bits(), w, h, s.key, s.draped, s.blocks.is_some()).hash(&mut hsh);
+            s.inset.as_ref().map(|(i, _)| Arc::as_ptr(i) as usize).hash(&mut hsh);
             line.iter().for_each(|(_, c)| c.hash(&mut hsh));
             hsh.finish()
         };
@@ -386,13 +450,13 @@ impl LoopsView {
             return;
         }
         s.busy = true;
-        let (terrain, texture, blocks, cam) = (s.terrain.clone(), s.texture.clone(), s.blocks.clone(), s.cam);
+        let (terrain, texture, blocks, cam, inset) = (s.terrain.clone(), s.texture.clone(), s.blocks.clone(), s.cam, s.inset.as_ref().map(|(i, _)| i.clone()));
         cx.spawn(async move |this, cx| {
             let img = cx
                 .background_executor()
                 .spawn(async move {
                     let solids = blocks.map(|b| b.seen(&cam)).unwrap_or_default();
-                    let px = terrain::render(&terrain, &texture, &solids, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], true);
+                    let px = terrain::render(&terrain, &texture, &solids, &cam, EXAGGERATION, &line, w, h, [bg[0], bg[1], bg[2], 255], true, inset.as_deref());
                     render_image(w as u32, h as u32, px).map(Arc::new)
                 })
                 .await;
@@ -488,6 +552,7 @@ impl LoopsView {
             s.follow_size(&l.line, dims);
         }
         self.ensure_drape(cx);
+        self.ensure_inset(dims, cx);
         self.ensure_blocks(l, cx);
         self.ensure_picture(l, dims, cx);
         let cell = bounds.clone();
