@@ -846,7 +846,7 @@ impl LoopsView {
             .enumerate()
             .filter_map(|(k, p)| Some((s.screen(p?, dims.0, dims.1)?, k == 1)))
             .collect();
-        let (accent, ink, bg) = (t.accent, t.text, t.bg);
+        let (ink, bg) = (t.text, t.bg);
         base.children(s.image.clone().map(|i| img(i).absolute().size_full().into_any_element()))
             .child(
                 canvas(
@@ -857,8 +857,15 @@ impl LoopsView {
                             window.paint_quad(fill(Bounds::new(p, size(px(2. * r), px(2. * r))), c).corner_radii(px(r)));
                         };
                         for (p, hover) in &marks {
-                            dot(*p, 8.0, bg, window);
-                            dot(*p, 6.0, if *hover { accent } else { ink }, window);
+                            if *hover {
+                                // As on the map: a target.
+                                dot(*p, 10.0, bg, window);
+                                dot(*p, 8.0, ink, window);
+                                dot(*p, 4.0, bg, window);
+                            } else {
+                                dot(*p, 8.0, bg, window);
+                                dot(*p, 6.0, ink, window);
+                            }
                         }
                     },
                 )

@@ -1081,3 +1081,45 @@ fn measure_a_large_history(cx: &mut TestAppContext) {
     assert_eq!(page(&shell, cx), Page::Journal);
     println!("\n{n} activities\n{}", out.join("\n"));
 }
+
+/// The pointer on the profile shows its point on the map, under the band the profile is in;
+/// off the map, the point goes.
+#[gpui::test]
+fn the_profile_points_on_the_map(cx: &mut TestAppContext) {
+    use gpui::Modifiers;
+    let (shell, cx) = start(cx, 3);
+    shell.update(cx, |s, cx| s.data.update(cx, |d, _| {
+        // Rising eastward, so the loops have a profile.
+        let mut g = crate::logic::graph::tests::town();
+        g.set_elevation(&mut crate::logic::elevation::Dem::new(8, |_, _| Some((0..256 * 256).map(|i| (i % 256) as f32).collect())));
+        d.loops.graph = Some(std::sync::Arc::new(g));
+    }));
+    let mod_key = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+    cx.simulate_keystrokes(&format!("{mod_key}-l"));
+    cx.run_until_parked();
+    let (lat, lon) = (43.70, 7.25 + 1500.0 / (111_195.0 * 0.7230));
+    shell.update_in(cx, |s, window, cx| s.loops.update(cx, |l, cx| {
+        l.look_at(lat, lon, 15.0);
+        l.type_km("5", window, cx);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let at = shell.read_with(cx, |s, cx| s.loops.read(cx).screen_of(lat, lon));
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    assert!(!shell.read_with(cx, |s, cx| s.data.read(cx).loops.found.is_empty()));
+    let hover = |cx: &mut gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.loops.read(cx).hover());
+    let profile = cx.debug_bounds("loop-profile").expect("the profile");
+    let mut seen = Vec::new();
+    for f in [0.3, 0.6] {
+        cx.simulate_mouse_move(gpui::point(profile.origin.x + profile.size.width * f, profile.center().y), None, Modifiers::none());
+        cx.run_until_parked();
+        seen.push(hover(cx).unwrap_or_else(|| panic!("at {f} of the profile")));
+    }
+    assert!(seen[1] > seen[0]);
+    // Off the profile, onto the band's climbs: none.
+    let band = cx.debug_bounds("loops-band").unwrap();
+    cx.simulate_mouse_move(gpui::point(band.origin.x + band.size.width - gpui::px(20.), band.center().y), None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(hover(cx), None);
+}

@@ -50,7 +50,8 @@ the way are not both shown. Each loop says:
 - its seed (`#…`).
 
 `↑` and `↓` pick a loop. The chosen one is drawn thicker on the map, with its altitude profile
-below the list. Pointing at the profile points at the map.
+in the band along the bottom of the map. Pointing at the profile shows the place on the map, as a
+ring; pointing at the loop on the map shows it on the profile.
 
 Under the list, **Others** (`Ctrl + N`) proposes other loops from the same start, **Reverse** runs
 the chosen loop the other way round, and **GPX** (`Ctrl + S`) writes it where you say. The file

@@ -257,8 +257,10 @@ pub struct LoopsView {
     runs: Option<(u64, Arc<Vec<(usize, usize, u8)>>)>,
     seed: u64,
     selected: usize,
-    /// The point of the profile pointed at.
+    /// The point of the profile pointed at, and whether the pointer is on the map for it (not on
+    /// the profile).
     hover: Option<usize>,
+    hover_on_map: bool,
     show_relief: bool,
     relief: Relief,
     /// The chosen loop shown in 3D, and its scene.
@@ -346,6 +348,7 @@ impl LoopsView {
             seed: 1,
             selected: 0,
             hover: None,
+            hover_on_map: false,
             show_relief: true,
             relief: Relief::default(),
             three_d: false,
@@ -650,6 +653,7 @@ impl LoopsView {
             // Over the chosen loop: its point shows on the profile.
             if e.pressed_button.is_none() {
                 let hover = self.line_at(e.position, cx);
+                self.hover_on_map = true;
                 if hover != self.hover {
                     self.hover = hover;
                     cx.notify();
@@ -1299,9 +1303,11 @@ impl Render for LoopsView {
                     dot(at([lat, lon]), 8.0, bg, window);
                     dot(at([lat, lon]), 6.0, ink, window);
                 }
+                // The point pointed at on the profile: a target, apart from the line and its points.
                 if let Some(p) = hover {
-                    dot(at(p), 7.0, bg, window);
-                    dot(at(p), 5.0, accent, window);
+                    dot(at(p), 10.0, bg, window);
+                    dot(at(p), 8.0, ink, window);
+                    dot(at(p), 4.0, bg, window);
                 }
             },
         )
@@ -1354,6 +1360,7 @@ impl Render for LoopsView {
                 .child(div().px(px(5.)).rounded(px(4.)).bg(t.bg.opacity(0.9)).shadow_sm().whitespace_nowrap().child(num(label).text_size(px(11.)).text_color(t.soft))))
         });
         let overlay = div()
+            .id("loops-overlay")
             .absolute()
             .size_full()
             .children(shade)
@@ -1362,6 +1369,13 @@ impl Render for LoopsView {
             .children(usual)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.grab(e, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.move_to(e, cx)))
+            // Off the map (onto the band, say): its point leaves with the pointer.
+            .on_hover(cx.listener(|this, on: &bool, _, cx| {
+                // The profile may have taken the pointer first: its point stays.
+                if !on && this.drag.is_none() && this.hover_on_map && this.hover.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, cx| this.drop_at(e, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, _, cx| this.take_away(e, cx)))
             .into_any_element();
@@ -2140,6 +2154,8 @@ impl LoopsView {
             .py(px(10.))
             .flex()
             .gap(px(16.))
+            // The map under it would take the pointer too, and clear the point the profile shows.
+            .block_mouse_except_scroll()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(div().flex_1().min_w(px(0.)).child(self.profile(found, cx)))
@@ -2217,6 +2233,7 @@ impl LoopsView {
             .child(
                 div()
                     .id("loop-profile")
+                    .debug_selector(|| "loop-profile".into())
                     .relative()
                     .h(px(78.))
                     .child(canvas(move |b, _, _| cell.set(b), |_, _, _, _| {}).absolute().size_full())
@@ -2227,6 +2244,7 @@ impl LoopsView {
                             let f = ((e.position.x - b.origin.x) / b.size.width).clamp(0.0, 1.0);
                             let x1 = xs2.last().copied().unwrap_or(0.0);
                             this.hover = nearest(&xs2, f * x1);
+                            this.hover_on_map = false;
                             cx.notify();
                         }
                     }))
