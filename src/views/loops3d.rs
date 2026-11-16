@@ -4,7 +4,7 @@
 use super::{LoopsView, PANEL, slope_ramp};
 use crate::lang::tr;
 use crate::logic::loops::Loop;
-use crate::logic::map::world;
+use crate::logic::map::{self, world};
 use crate::logic::slope;
 use crate::logic::buildings::{self, Building};
 use crate::logic::graph::Graph;
@@ -183,6 +183,19 @@ struct Fly {
     playing: bool,
     /// Which run of the clock moves it: a flight started again leaves the old clock behind.
     run: u64,
+}
+
+/// The pixels of photo tiles (`map::photo`, in the theme's light); a tile with nothing in it
+/// where the server has none or one can't be read: the ground under it shows. Decoded on all
+/// cores but one (about 0.75 ms a tile; the whole ground's are decoded on the main thread).
+fn pixels(jpegs: std::collections::HashMap<(u32, u32), Arc<Vec<u8>>>, dark: bool) -> std::collections::HashMap<(u32, u32), Vec<u8>> {
+    let photo = |j: &[u8]| map::photo(j, dark).filter(|(w, h, _)| (*w, *h) == (256, 256)).map(|(_, _, px)| px).unwrap_or_else(|| vec![0; 256 * 256 * 4]);
+    let jpegs: Vec<_> = jpegs.into_iter().collect();
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1));
+    std::thread::scope(|s| {
+        let jobs: Vec<_> = jpegs.chunks(jpegs.len().div_ceil(workers).max(1)).map(|c| s.spawn(move || c.iter().map(|(k, j)| (*k, photo(j))).collect::<Vec<_>>())).collect();
+        jobs.into_iter().flat_map(|j| j.join().unwrap_or_default()).collect()
+    })
 }
 
 /// Where a point `[lat, lon]` is on the ground `t`, local metres and altitude.
@@ -558,7 +571,9 @@ impl LoopsView {
         // Every tile asked for at once, so that they come together.
         let got: Vec<_> = tiles(s.bbox, z).into_iter().map(|(x, y)| ((x, y), self.data.update(cx, |d, cx| d.ground_tile((z, x, y), cx)))).collect();
         let Some(have) = got.into_iter().map(|(k, t)| Some((k, t?))).collect::<Option<std::collections::HashMap<(u32, u32), Arc<Vec<u8>>>>>() else { return };
-        // ponytail: resampled and lit on the main thread, once per loop; in the background if it shows.
+        let have = pixels(have, self.snap.theme.dark);
+        // ponytail: decoded, resampled and lit on the main thread, once per loop; in the background
+        // if it shows.
         if let Some(t) = Texture::from_tiles(s.bbox, z, FADE, Some((&s.base, [0.0, 0.0, 1.0, 1.0])), &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) {
             s.texture = Arc::new(t.lit(&s.shade));
             s.draped = true;
@@ -612,7 +627,10 @@ impl LoopsView {
                 let inset = cx
                     .background_executor()
                     .spawn(async move {
-                        let p = if complete { Texture::from_tiles(b, z, 0.0, Some((&base, uv)), &|x, y| have.get(&(x, y)).map(|t| t.as_slice())) } else { Some(with_roads(base.crop(uv, pw, ph), graph.as_deref(), b, bw, dark)) };
+                        let p = if complete {
+                            let have = pixels(have, dark);
+                            Texture::from_tiles(b, z, 0.0, Some((&base, uv)), &|x, y| have.get(&(x, y)).map(|t| t.as_slice()))
+                        } else { Some(with_roads(base.crop(uv, pw, ph), graph.as_deref(), b, bw, dark)) };
                         p.map(|p| Inset { texture: p.lit_in(&shade, uv), uv })
                     })
                     .await;

@@ -93,7 +93,8 @@ pub struct Data {
     tiles_busy: usize,
     /// Aerial photos being downloaded for the ground in 3D (another server: a few at a time).
     photos_busy: usize,
-    /// Aerial photos for the ground in 3D (`map::photo`), as pixels.
+    /// Aerial photos for the ground in 3D, as the server gives them (JPEG; empty where it has
+    /// none): about 20 KB each, a twelfth of their pixels. Decoded where the ground is made.
     ground: HashMap<(u8, u32, u32), Option<Arc<Vec<u8>>>>,
     /// Garmin's address (a local stand-in in the tests).
     api: String,
@@ -182,7 +183,6 @@ impl Data {
         if theme.dark != self.theme.dark {
             // Tiles are drawn in the theme's colors.
             self.tiles.clear();
-            self.ground.clear();
         }
         self.theme = theme;
         cx.notify();
@@ -619,8 +619,6 @@ impl Data {
         None
     }
 
-    /// The 256 × 256 pixels (BGRA) of an aerial photo's tile for the ground in 3D (alpha 0 where
-    /// there is none), if ready; otherwise asks for it, six downloads at a time.
     /// Fetches ahead, into the disk cache, the photo tiles `keys` (those a flight over a route
     /// will ask for), after what the screen asks for; until `cancel` is set.
     pub fn photos_ahead(&self, keys: Vec<(u8, u32, u32)>, cancel: Arc<std::sync::atomic::AtomicBool>, cx: &mut Context<Self>) {
@@ -631,6 +629,8 @@ impl Data {
         cx.background_executor().spawn(async move { tiles::photos_ahead(&keys, 8, &cancel) }).detach();
     }
 
+    /// An aerial photo's tile for the ground in 3D, as the server gives it (JPEG; empty where it
+    /// has none), if ready; otherwise asks for it, ten downloads at a time.
     pub fn ground_tile(&mut self, k: (u8, u32, u32), cx: &mut Context<Self>) -> Option<Arc<Vec<u8>>> {
         // The tests never go online.
         if cfg!(test) {
@@ -644,33 +644,21 @@ impl Data {
         if self.photos_busy >= 10 {
             return None;
         }
-        // ponytail: drops every tile past 450 (120 MB: the ground and four finer levels fit), an
-        // LRU if moving between loops shows refetches.
+        // ponytail: drops every tile past 450 (about 9 MB: the ground and four finer levels fit),
+        // an LRU if moving between loops shows refetches.
         if self.ground.len() > 450 {
             self.ground.retain(|_, t| t.is_none());
         }
         self.ground.insert(k, None);
         self.photos_busy += 1;
-        let dark = self.theme.dark;
         cx.spawn(async move |this, cx| {
-            let px = cx
-                .background_executor()
-                .spawn(async move {
-                    // Where the IGN has nothing, a tile with nothing in it: the grey ground shows.
-                    match tiles::photo(k.0, k.1, k.2).ok()? {
-                        Some(jpeg) => map::photo(&jpeg, dark).filter(|(w, h, _)| (*w, *h) == (256, 256)).map(|(_, _, px)| Arc::new(px)),
-                        None => Some(Arc::new(vec![0; 256 * 256 * 4])),
-                    }
-                })
-                .await;
-            let failed = px.is_none();
+            // Where the IGN has nothing, nothing: the grey ground shows.
+            let jpeg = cx.background_executor().spawn(async move { tiles::photo(k.0, k.1, k.2).ok().map(|t| Arc::new(t.unwrap_or_default())) }).await;
+            let failed = jpeg.is_none();
             this.update(cx, |d, cx| {
                 d.photos_busy -= 1;
-                // One fetched for the other theme is dropped.
-                if px.is_some() && d.theme.dark == dark {
-                    d.ground.insert(k, px);
-                } else if d.theme.dark != dark {
-                    d.ground.remove(&k);
+                if jpeg.is_some() {
+                    d.ground.insert(k, jpeg);
                 }
                 cx.notify();
             })
