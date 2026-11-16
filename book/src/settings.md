@@ -21,8 +21,12 @@ How to get a key: [First steps](first-steps.md). Where it goes: [Your data and b
 
 ## Maps
 
-OpenStreetMap's tiles by default, kept on disk. **Tile address ({z}, {x}, {y})** takes another
-server's address, with `{z}`, `{x}`, `{y}`; **Save** keeps it.
+- The regions downloaded for the loops, each with its size and date; the one used says so.
+  **Use**, **Update** (or **Download** when it isn't there) and **Remove**, which asks first.
+- **Add a region**: type a name, then **Add** one of the regions found. See
+  [Loops › Other regions](loops.md#other-regions).
+- **Tile address ({z}, {x}, {y})**: OpenStreetMap's tiles by default, kept on disk; another
+  server's address, with `{z}`, `{x}`, `{y}`, and **Save** keeps it.
 
 ## Data received
 

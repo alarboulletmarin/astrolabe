@@ -200,6 +200,8 @@ mod tests {
         assert_eq!(calendar_title(Mode::Week, d(2026, 9, 30)), "28 sept. – 4 oct. 2026");
         assert_eq!(calendar_title(Mode::Week, d(2026, 1, 1)), "29 déc. 2025 – 4 janv. 2026");
         assert_eq!(calendar_title(Mode::Week, d(2024, 2, 29)), "26 févr. – 3 mars 2024");
+        assert_eq!(long_date(d(2025, 3, 19)), "19 mars 2025");
+        assert_eq!(long_date(d(2025, 3, 1)), "1er mars 2025");
     }
 
     #[test]
@@ -208,6 +210,7 @@ mod tests {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         assert_eq!(calendar_title(Mode::Month, d(2026, 10, 24)), "October 2026");
         assert_eq!(calendar_title(Mode::Month, d(2026, 2, 1)), "February 2026");
+        assert_eq!(long_date(d(2025, 3, 1)), "March 1, 2025");
         assert_eq!(calendar_title(Mode::Year, d(2026, 10, 24)), "2026");
         assert_eq!(calendar_title(Mode::Week, d(2026, 10, 22)), "October 19 – 25, 2026");
         assert_eq!(calendar_title(Mode::Week, d(2026, 9, 30)), "Sep 28 – Oct 4, 2026");

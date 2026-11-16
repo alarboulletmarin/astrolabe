@@ -16,7 +16,9 @@ Notable changes, newest first. Versions follow [Semantic Versioning](https://sem
   - Loops run on paths, footways, sidewalks and pedestrian areas (a seafront promenade drawn as
     a polygon too), never on cycle tracks; a road without a sidewalk only links the rest.
   - The map is shaded with the relief, and can show the IGN's aerial photos instead, in 2D as in 3D.
-  - The region's extract (Provence-Alpes-Côte d'Azur for now) is downloaded once from Geofabrik,
+  - Any region Geofabrik offers can be added in **Settings › Maps** (found by name), used, updated
+    or removed once confirmed; a start in another region downloaded switches to it.
+  - The region's extract (Provence-Alpes-Côte d'Azur at first) is downloaded once from Geofabrik,
     and the elevation tiles that cover it from the Amazon open data bucket. The network of paths is
     built and kept on disk, and everything is computed on the machine: no account, no routing
     service, offline afterwards.

@@ -101,6 +101,54 @@ fn the_key_field_shows_when_asked(cx: &mut TestAppContext) {
     assert!(!shown(cx) && cx.debug_bounds("change-key").is_some());
 }
 
+/// Settings › Maps: a region found by name, added (used, its download failing without a server:
+/// it stays, to download again), then removed once confirmed, not when cancelled.
+#[gpui::test]
+fn regions_are_found_added_and_removed_in_settings(cx: &mut TestAppContext) {
+    let root = std::env::temp_dir().join(format!("astrolabe-ui-regions-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    crate::platform::store::use_root(root.clone());
+    let (shell, cx) = start(cx, 3);
+    let data = shell.read_with(cx, |s, _| s.data.clone());
+    let index = r#"{"features": [
+        {"properties": {"id": "bretagne", "parent": "france", "name": "Bretagne", "urls": {"pbf": "https://download.geofabrik.de/europe/france/bretagne-latest.osm.pbf"}}, "geometry": {"coordinates": [[[-5.2, 47.2], [-1.0, 48.9]]]}},
+        {"properties": {"id": "france", "name": "France", "urls": {"pbf": "https://download.geofabrik.de/europe/france-latest.osm.pbf"}}, "geometry": {"coordinates": [[[-5.0, 42.0], [8.0, 51.0]]]}}
+    ]}"#;
+    data.update(cx, |d, _| {
+        d.loops.osm_base = "http://127.0.0.1:9".into();
+        d.loops.catalog = Some(Ok(std::sync::Arc::new(crate::logic::regions::read_index(index).unwrap())));
+    });
+    click(cx, "rail-settings");
+    let shown = |cx: &mut gpui::VisualTestContext, s: &'static str| cx.debug_bounds(s).is_some();
+    let listed = |cx: &mut gpui::VisualTestContext| data.read_with(cx, |d, _| d.loops.regions.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
+    // Nothing downloaded, nothing typed: no region, no result.
+    assert!(!shown(cx, "remove-region-0") && !shown(cx, "add-region-0"));
+    shell.update_in(cx, |s, window, cx| s.settings.update(cx, |v, cx| v.focus_region(window, cx)));
+    cx.simulate_input("bret");
+    cx.run_until_parked();
+    assert!(shown(cx, "add-region-0") && !shown(cx, "add-region-1"));
+    click(cx, "add-region-0");
+    assert_eq!(listed(cx), ["bretagne"]);
+    data.read_with(cx, |d, _| {
+        assert_eq!(d.loops.region.id, "bretagne");
+        assert!(d.loops.job.is_none() && d.loops.error.is_some(), "{:?}", d.loops.error);
+    });
+    // The field is emptied; the region shows, to download again or remove.
+    assert!(!shown(cx, "add-region-0") && shown(cx, "update-region-0") && shown(cx, "remove-region-0"));
+    assert!(std::fs::read_to_string(root.join("data/regions.json")).unwrap().contains("bretagne"));
+    // Cancelled: still there. Confirmed: gone.
+    click(cx, "remove-region-0");
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer(crate::lang::tr("Cancel", "Annuler"));
+    cx.run_until_parked();
+    assert_eq!(listed(cx), ["bretagne"]);
+    click(cx, "remove-region-0");
+    cx.simulate_prompt_answer(crate::lang::tr("Remove", "Retirer"));
+    cx.run_until_parked();
+    assert!(listed(cx).is_empty() && !shown(cx, "remove-region-0"));
+    assert_eq!(std::fs::read_to_string(root.join("data/regions.json")).unwrap().trim(), "[]");
+}
+
 /// A click on a journal row opens the outing; Esc and the arrows then behave.
 #[gpui::test]
 fn a_journal_row_opens_the_outing(cx: &mut TestAppContext) {

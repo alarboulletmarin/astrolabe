@@ -69,19 +69,6 @@ pub fn icon(name: IconName, color: Hsla, size: f32) -> Icon {
     Icon::new(name).size(px(size)).text_color(color)
 }
 
-/// Tinted label (recipe background, legible text), radius 6, 12 px.
-pub fn pill(text: impl Into<SharedString>, (bg, fg): (Hsla, Hsla)) -> Div {
-    div()
-        .flex_none()
-        .px(px(6.))
-        .py(px(1.))
-        .rounded(px(6.))
-        .bg(bg)
-        .text_color(fg)
-        .text_size(px(12.))
-        .child(text.into())
-}
-
 pub fn sport_icon(s: Sport) -> IconName {
     match s {
         Sport::Run => IconName::Footprints,

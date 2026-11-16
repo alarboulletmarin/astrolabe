@@ -7,8 +7,8 @@ is no account, no credits, no routing service and no tracking.
 
 ## The region, once
 
-The first time, the page offers to **Download the region**: Provence-Alpes-Côte d'Azur for now.
-Astrolabe then does the following:
+The first time, the page offers to **Download the region**: Provence-Alpes-Côte d'Azur, unless
+another was added in **Settings › Maps** (see below). Astrolabe then does the following:
 
 1. It downloads the region's OpenStreetMap extract from Geofabrik, a few hundred MB, kept in the data
    folder.
@@ -105,10 +105,23 @@ The map is shaded from the elevation tiles, lit from the north-west, so valleys 
 and other sources), about 30 m apart in France. Climb is read every 10 m along each path and smooths
 away rises under 2 m, so it reads a little lower than a barometric watch.
 
+## Other regions
+
+**Settings › Maps** lists the regions downloaded, with their size and date, and the one used for
+the loops.
+
+- Type a region's or a country's name under **Add a region** (accents and case don't matter):
+  Geofabrik's list comes once, kept a month. **Add** downloads the region, builds its network and
+  uses it. There is no size limit: a whole country takes a while and several GB.
+- **Use** plans in another region from now on; **Update** downloads it again; **Remove** deletes
+  its extract and network from the disk, once confirmed (the loops saved stay).
+- A start set in another region downloaded switches to it by itself, and the loops come once its
+  network is read. A start outside every region says so.
+
 ## What it doesn't do
 
-- Only one region for now.
-- The network is the one downloaded. A newer one comes with **Download the region** again: it
-  replaces the extract once complete.
+- One region at a time: a loop doesn't cross from one region to the next.
+- The network is the one downloaded. A newer one comes with **Update** in **Settings › Maps**
+  (or **Download the region** again): it replaces the extract once complete.
 - It doesn't know whether a path is open today, a private yard crossed, or a ford deep. Look at the
   ground.

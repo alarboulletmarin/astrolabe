@@ -32,6 +32,7 @@ In the data folder:
 | `key.enc` | your Garmin key, encrypted, only when your system has no keyring |
 | `osm/<region>.osm.pbf` | the region's OpenStreetMap extract, as Geofabrik gives it (a few hundred MB) |
 | `osm/<region>.graph` | the network of paths built from it, with the climb of every stretch |
+| `regions.json` | the regions downloaded for the loops |
 
 Health data (activities, files, the key) are readable by you only. Each file is written in full to a
 temporary file, then put in place, so a crash or a full disk never leaves half a file.

@@ -2,13 +2,15 @@
 //! over the ground, in two columns when there is room.
 
 use crate::data::{Data, Status};
+use crate::logic::regions::{self, Region};
 use crate::lang::{tr, trf};
 use crate::platform::secrets::Store;
 use crate::platform::{store, tiles};
 use crate::ui::theme::{MONO, SERIF};
 use crate::ui::{button, segmented};
 use crate::views::{Width, tracks_progress};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use std::sync::Arc;
 use gpui_kit::{prelude::FluentBuilder, *};
 
 /// What the settings file keeps for each theme, in the order they are shown.
@@ -22,9 +24,11 @@ pub struct SettingsView {
     width: Width,
     key_input: Entity<InputState>,
     tiles_input: Entity<InputState>,
+    /// A region's name, to find it in Geofabrik's list.
+    region_input: Entity<InputState>,
     /// The key being changed: its field shows (always, without a key).
     changing_key: bool,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 
 impl SettingsView {
@@ -32,8 +36,18 @@ impl SettingsView {
         let key_input = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("GCDC_…"));
         let saved = data.read(cx).settings.get("tiles").cloned().unwrap_or_default();
         let tiles_input = cx.new(|cx| InputState::new(window, cx).placeholder(tiles::DEFAULT_TILES).default_value(saved));
-        let sub = cx.observe(&data, |_, _, cx| cx.notify());
-        SettingsView { data, width, key_input, tiles_input, changing_key: false, _subscription: sub }
+        let region_input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("A region or a country: Bretagne, Switzerland…", "Une région ou un pays : Bretagne, Suisse…")));
+        let observe = cx.observe(&data, |_, _, cx| cx.notify());
+        // The list is fetched once a name is typed.
+        let typed = cx.subscribe(&region_input, |this, input, e: &InputEvent, cx| {
+            if let InputEvent::Change = e {
+                if !input.read(cx).value().trim().is_empty() {
+                    this.data.update(cx, |d, cx| d.load_catalog(cx));
+                }
+                cx.notify();
+            }
+        });
+        SettingsView { data, width, key_input, tiles_input, region_input, changing_key: false, _subscriptions: [observe, typed] }
     }
 
     fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -44,11 +58,44 @@ impl SettingsView {
         }
     }
 
+    /// Puts the cursor in the region's field, as a click in it would.
+    #[cfg(test)]
+    pub fn focus_region(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.region_input.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    /// Removes a region's files once confirmed.
+    fn confirm_remove(&mut self, r: Arc<Region>, window: &mut Window, cx: &mut Context<Self>) {
+        let size = store::region_files(&r.id).0.map(size_label).unwrap_or_default();
+        let question = trf(format!("Remove {}?", r.name()), format!("Retirer {} ?", r.name()));
+        let detail = trf(
+            format!("Its extract ({size}) and its path network are deleted from the disk; the loops saved stay. It can be downloaded again."),
+            format!("Son extrait ({size}) et son réseau de chemins sont supprimés du disque ; les boucles enregistrées restent. Elle pourra être téléchargée à nouveau."),
+        );
+        let answer = window.prompt(PromptLevel::Warning, &question, Some(&detail), &[tr("Remove", "Retirer"), tr("Cancel", "Annuler")], cx);
+        let data = self.data.clone();
+        cx.spawn(async move |_, cx| {
+            if answer.await == Ok(0) {
+                data.update(cx, |d, cx| d.remove_region(&r.id, cx));
+            }
+        })
+        .detach();
+    }
+
     fn save_tiles(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = self.tiles_input.read(cx).value().to_string();
         if self.data.update(cx, |d, cx| d.save_tiles(&value, cx)) && value.trim().is_empty() {
             self.tiles_input.update(cx, |s, cx| s.set_value("", window, cx));
         }
+    }
+}
+
+/// "412 Mo", "1,2 Go".
+fn size_label(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        format!("{} {}", crate::lang::decimal(format!("{:.1}", n as f64 / 1e9)), tr("GB", "Go"))
+    } else {
+        format!("{} {}", (n as f64 / 1e6).ceil(), tr("MB", "Mo"))
     }
 }
 
@@ -62,14 +109,14 @@ fn section() -> Div {
 }
 
 /// A line of a section: what, and its value at the right.
-fn row(label: impl Into<SharedString>, value: impl IntoElement) -> Div {
+fn row(label: impl IntoElement, value: impl IntoElement) -> Div {
     div()
         .flex()
         .items_center()
         .justify_between()
         .gap(px(12.))
         .min_h(px(26.))
-        .child(div().flex_none().child(label.into()))
+        .child(div().flex_none().child(label))
         .child(div().min_w_0().child(value))
 }
 
@@ -215,16 +262,120 @@ impl SettingsView {
             })
     }
 
-    /// The map background's tile server.
+    /// The regions downloaded for the loops, finding and adding another, and the map
+    /// background's tile server.
     fn maps(&mut self, cx: &mut Context<Self>) -> Div {
-        let t = self.data.read(cx).theme;
+        self.data.update(cx, |d, _| d.read_regions());
+        let d = self.data.read(cx);
+        let t = d.theme;
+        let soft = |text: SharedString| div().text_size(px(12.5)).line_height(rems(1.5)).text_color(t.soft).child(text);
+        let (installed, active, job) = (d.loops.regions.clone(), d.loops.region.id.clone(), d.loops_line());
+        let mut list = div().flex().flex_col().gap(px(10.));
+        if installed.is_empty() {
+            list = list.child(soft(tr("No region downloaded yet: find one below to plan loops in it.", "Aucune région téléchargée : cherches-en une ci-dessous pour y planifier des boucles.").into()));
+        }
+        for (i, r) in installed.iter().enumerate() {
+            let on = r.id == active;
+            // ponytail: three file stats per region at each frame; keep them in Data if regions pile up.
+            let (size, when, built) = store::region_files(&r.id);
+            let facts = match (size, when) {
+                (Some(n), Some(at)) => {
+                    let day = crate::ui::format::long_date(chrono::DateTime::<chrono::Local>::from(at).date_naive());
+                    format!("{} · {day}", size_label(n))
+                }
+                (Some(n), None) => size_label(n),
+                (None, _) => tr("not downloaded", "pas téléchargée").into(),
+            };
+            let state = match (on, size.is_some(), built) {
+                (_, false, _) => None,
+                (true, _, _) => Some(tr("used for the loops", "utilisée pour les boucles")),
+                (false, _, false) => Some(tr("network built when used", "réseau construit à l'usage")),
+                (false, _, true) => None,
+            };
+            let (use_r, update_r, remove_r) = (r.clone(), r.id.clone(), r.clone());
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(row(
+                        div().flex().items_baseline().gap(px(8.)).child(div().when(on, |d| d.font_weight(FontWeight::BOLD)).child(r.name().to_string())).when(!r.parent.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(t.soft).child(r.parent.clone()))),
+                        div().font_family(MONO).text_size(px(12.5)).text_color(t.soft).child(facts),
+                    ))
+                    .when_some(state, |d, s| d.child(div().text_size(px(12.)).text_color(if on { t.good().1 } else { t.soft }).child(s)))
+                    .when_some(job.clone().filter(|_| on), |d, (line, share)| {
+                        d.child(div().text_size(px(12.)).text_color(t.soft).child(line)).when_some(share, |d, f| {
+                            d.child(div().h(px(4.)).w_full().rounded(px(2.)).bg(t.border).child(div().h_full().rounded(px(2.)).bg(t.accent).w(relative(f))))
+                        })
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(8.))
+                            .when(!on, |d| d.child(button(("use-region", i), tr("Use", "Utiliser"), false, t).on_click(cx.listener(move |this, _, _, cx| {
+                                this.data.update(cx, |d, cx| d.use_region(use_r.clone(), cx));
+                            }))))
+                            .when(job.is_some() && on, |d| d.child(button("stop-region", tr("Stop", "Arrêter"), false, t).on_click(cx.listener(|this, _, _, cx| this.data.update(cx, |d, cx| d.stop_loops_job(cx))))))
+                            .when(job.is_none() || !on, |d| {
+                                d.child(
+                                    button(("update-region", i), if size.is_some() { tr("Update", "Mettre à jour") } else { tr("Download", "Télécharger") }, false, t)
+                                        .on_click(cx.listener(move |this, _, _, cx| this.data.update(cx, |d, cx| d.update_region(&update_r, cx)))),
+                                )
+                                .child(button(("remove-region", i), tr("Remove", "Retirer"), false, t).on_click(cx.listener(move |this, _, window, cx| this.confirm_remove(remove_r.clone(), window, cx))))
+                            }),
+                    ),
+            );
+        }
+        // What the typed name finds in Geofabrik's list, the regions already there left out.
+        let query = self.region_input.read(cx).value().to_string();
+        let found: Div = if query.trim().is_empty() {
+            div()
+        } else {
+            match &d.loops.catalog {
+                None => soft(tr("Reading Geofabrik's list of regions…", "Lecture de la liste des régions de Geofabrik…").into()),
+                Some(Err(e)) => div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().min_w_0().text_size(px(12.5)).text_color(t.bad()).child(e.clone()))
+                    .child(button("catalog-again", tr("Try again", "Réessayer"), false, t).on_click(cx.listener(|this, _, _, cx| this.data.update(cx, |d, cx| d.load_catalog(cx))))),
+                Some(Ok(all)) => {
+                    let hits: Vec<Region> = regions::search(all, &query, 12).into_iter().filter(|r| !installed.iter().any(|k| k.id == r.id)).take(6).cloned().collect();
+                    if hits.is_empty() {
+                        soft(tr("No region by that name.", "Aucune région de ce nom.").into())
+                    } else {
+                        let mut list = div().flex().flex_col().gap(px(2.));
+                        for (i, r) in hits.into_iter().enumerate() {
+                            let parent = r.parent.clone();
+                            let name = r.name().to_string();
+                            list = list.child(row(
+                                div().flex().items_baseline().gap(px(8.)).child(name).when(!parent.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(t.soft).child(parent))),
+                                button(("add-region", i), tr("Add", "Ajouter"), false, t).on_click(cx.listener(move |this, _, window, cx| {
+                                    this.data.update(cx, |d, cx| d.add_region(r.clone(), cx));
+                                    this.region_input.update(cx, |s, cx| s.set_value("", window, cx));
+                                })),
+                            ));
+                        }
+                        list
+                    }
+                }
+            }
+        };
         section()
             .child(heading(tr("Maps", "Cartes")))
-            .child(div().text_size(px(12.5)).line_height(rems(1.5)).text_color(t.soft).child(tr(
-                "Map background: OpenStreetMap's tiles by default, kept on disk so they are asked for only once. Another server's address works too (with your own key if it asks for one).",
-                "Fond de carte : les tuiles d'OpenStreetMap par défaut, gardées sur le disque pour ne les demander qu'une fois. L'adresse d'un autre serveur marche aussi (avec ta propre clé s'il en demande une).",
-            )))
-            .child(div().text_size(px(12.)).text_color(t.soft).child(tr("Tile address ({z}, {x}, {y})", "Adresse des tuiles ({z}, {x}, {y})")))
+            .child(soft(
+                tr(
+                    "The loops are planned on a region's OpenStreetMap extract, downloaded once from Geofabrik, with its network of paths built on this machine.",
+                    "Les boucles se planifient sur l'extrait OpenStreetMap d'une région, téléchargé une fois chez Geofabrik, avec son réseau de chemins construit sur cette machine.",
+                )
+                .into(),
+            ))
+            .child(list)
+            .child(div().mt(px(8.)).text_size(px(12.)).text_color(t.soft).child(tr("Add a region", "Ajouter une région")))
+            .child(Input::new(&self.region_input).cleanable(true))
+            .child(found)
+            .child(div().mt(px(8.)).text_size(px(12.)).text_color(t.soft).child(tr("Tile address ({z}, {x}, {y})", "Adresse des tuiles ({z}, {x}, {y})")))
             .child(
                 div()
                     .flex()
@@ -232,6 +383,13 @@ impl SettingsView {
                     .child(div().flex_1().min_w_0().child(Input::new(&self.tiles_input).cleanable(true)))
                     .child(button("save-tiles", tr("Save", "Enregistrer"), false, t).on_click(cx.listener(|this, _, window, cx| this.save_tiles(window, cx)))),
             )
+            .child(soft(
+                tr(
+                    "The map background: OpenStreetMap's tiles by default, kept on disk so they are asked for only once. Another server's address works too (with your own key if it asks for one).",
+                    "Le fond de carte : les tuiles d'OpenStreetMap par défaut, gardées sur le disque pour ne les demander qu'une fois. L'adresse d'un autre serveur marche aussi (avec ta propre clé s'il en demande une).",
+                )
+                .into(),
+            ))
     }
 
     /// What was received and where it is kept.
